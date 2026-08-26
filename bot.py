@@ -15,6 +15,7 @@ Configuration (config.json and/or environment variables):
     client_id          Twitch app Client ID for auto-login  (env: TWITCH_CLIENT_ID)
     client_secret      Twitch app Client Secret (optional)  (env: TWITCH_CLIENT_SECRET)
     channel            channel to join, e.g. "#name"    (env: TWITCH_CHANNEL)
+    fact_source        "sources" (default) or "llm"      (env: TWITCH_FACT_SOURCE)
     prefix             command prefix                   (default "!")
     cooldown_seconds   min seconds between lookups      (default 5)
     max_message_chars  hard cap for one chat message    (default 450)
@@ -101,6 +102,8 @@ def load_config(path: str) -> dict:
         "TWITCH_CHANNEL", cfg.get("channel", "")
     ).strip()
     cfg["spice"] = os.environ.get("TWITCH_SPICE", cfg.get("spice", "clean")).strip()
+    cfg["fact_source"] = os.environ.get(
+        "TWITCH_FACT_SOURCE", cfg.get("fact_source", "sources")).strip()
     cfg["serper_api_key"] = os.environ.get(
         "SERPER_API_KEY", cfg.get("serper_api_key", "")
     ).strip()
@@ -167,6 +170,7 @@ class TwitchBot:
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
+            "fact_source": cfg.get("fact_source", "sources"),
             "llm_api_key": cfg.get("llm_api_key", ""),
             "llm_base_url": cfg.get("llm_base_url", ""),
             "llm_model": cfg.get("llm_model", ""),
@@ -516,6 +520,7 @@ def run_selftest(cfg: dict) -> int:
     opts = {
         "spice": cfg.get("spice", "clean"),
         "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
+        "fact_source": cfg.get("fact_source", "sources"),
         "llm_api_key": cfg.get("llm_api_key", ""),
         "llm_base_url": cfg.get("llm_base_url", ""),
         "llm_model": cfg.get("llm_model", ""),

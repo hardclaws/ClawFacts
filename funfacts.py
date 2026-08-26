@@ -1579,12 +1579,60 @@ def _norm_opts(options):
     o = options or {}
     spice = str(o.get("spice") or "").strip().lower()
     spicy = spice in ("spicy", "adult", "r", "on", "true", "1", "yes")
+    # "fact_source": "llm" skips retrieval entirely and asks the model for
+    # facts from its own knowledge. See _llm_only_facts for the trade-off.
+    source = str(o.get("fact_source") or o.get("source") or "").strip().lower()
+    llm_only = source in ("llm", "llm-only", "llmonly", "model", "ai")
     try:
         limit = int(o.get("max_fact_chars") or 200)
     except (TypeError, ValueError):
         limit = 200
     limit = max(80, min(limit, 480))
-    return spicy, limit, o
+    return spicy, limit, o, llm_only
+
+
+def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
+    """Facts straight from the model's own knowledge — no sources consulted.
+
+    This is the simple mode: one prompt, no Wikipedia, no search, no ranking.
+    It is also the mode with no safety net: the grounded filter compares a line
+    against the facts that were found, and here nothing was found, so there is
+    nothing to compare against. Only the explicit/taste filters and the
+    character limit still apply. That is why it is opt-in.
+    """
+    try:
+        import llm
+    except Exception as exc:
+        print(f"[funfacts] llm import error: {exc!r}", flush=True)
+        return []
+    if not llm.is_configured(opts):
+        print("[funfacts] fact_source='llm' but no LLM is configured — set "
+              "llm_api_key / GROQ_API_KEY / OPENROUTER_API_KEY, or a local "
+              "Ollama (llm_base_url http://localhost:11434/v1).", flush=True)
+        return []
+    try:
+        text = llm.freeform_facts(location, location, opts)
+    except Exception as exc:
+        print(f"[funfacts] llm error: {exc!r}", flush=True)
+        return []
+    if not text or "NOTHING RELIABLE" in text.upper():
+        return []
+    lines = []
+    for ln in text.splitlines():
+        ln = ln.strip().strip('"\u201c\u201d')
+        ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
+        ln = ln.replace("**", "").replace("`", "").strip()
+        if not ln or _META_LINE.match(ln):
+            continue
+        if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
+            continue
+        fact = _trim(ln, limit)
+        if fact:
+            lines.append(fact)
+    if lines:
+        print(f"[funfacts] llm-only wrote {len(lines)} facts for {location} "
+              f"(unsourced)", flush=True)
+    return lines[:10]
 
 
 def get_funfact(location: str, options=None):
@@ -1596,8 +1644,9 @@ def get_funfact(location: str, options=None):
     `options` may include: spice ("clean"/"spicy"), max_fact_chars (int),
     llm_api_key, llm_base_url, llm_model.
     """
-    spicy, limit, opts = _norm_opts(options)
-    key = ("spicy:" if spicy else "clean:") + " ".join(location.strip().lower().split())
+    spicy, limit, opts, llm_only = _norm_opts(options)
+    key = (("llm:" if llm_only else "spicy:" if spicy else "clean:")
+           + " ".join(location.strip().lower().split()))
     now = time.time()
 
     with _cache_lock:
@@ -1608,7 +1657,17 @@ def get_funfact(location: str, options=None):
             _cache.pop(key, None)
 
     if entry is None:
-        result = _lookup_all(location.strip(), opts, spicy, limit)
+        result = None
+        if llm_only:
+            facts = _llm_only_facts(location.strip(), limit, opts)
+            if facts:
+                result = {"place": location.strip(), "facts": facts}
+            else:
+                # The model had nothing reliable: fall back to real sources
+                # rather than tell the viewer the place has no facts.
+                result = _lookup_all(location.strip(), opts, spicy, limit)
+        if result is None:
+            result = _lookup_all(location.strip(), opts, spicy, limit)
         with _cache_lock:
             if result and result.get("unavailable"):
                 # Sources are rate-limited right now — retry soon instead of

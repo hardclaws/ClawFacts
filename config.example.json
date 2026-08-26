@@ -8,18 +8,17 @@
   "cooldown_seconds": 5,
   "spice": "spicy",
   "max_fact_chars": 200,
+  "fact_source": "sources",
+  "_fact_source": "'sources' (default): find real facts on Wikipedia/web, then rewrite them. 'llm': skip retrieval and ask the model for facts from its own knowledge - simpler and often better for famous places, but nothing is verified, so it can invent.",
   "max_message_chars": 450,
   "fact_prefix": "FunFact",
   "fun_commands": true,
   "respond_only_to": [],
-
   "llm_api_key": "sk-or-v1-paste_your_openrouter_key_here",
   "llm_base_url": "https://openrouter.ai/api/v1",
   "llm_model": "nousresearch/hermes-4-70b",
-
   "google_api_key": "",
   "google_cx": "",
   "serper_api_key": "",
-
   "_llm_options": "The three llm_* fields above are set for OpenRouter (recommended for adult-aligned facts). Other providers: Groq -> key 'gsk_...', base 'https://api.groq.com/openai/v1', model 'openai/gpt-oss-120b'. Local Ollama -> key '' (empty), base 'http://localhost:11434/v1', model 'llama3.1:8b'. Other OpenRouter models: 'sao10k/l3.3-euryale-70b' (edgiest), 'cognitivecomputations/dolphin-mistral-24b-venice-edition' (uncensored), 'mistralai/mistral-nemo' (cheapest)."
 }

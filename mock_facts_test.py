@@ -508,6 +508,55 @@ def test_region_word_boundaries():
     print("[PASS] region check: 'United States' is home, Kansas != Arkansas")
 
 
+def test_llm_only_mode():
+    """`"fact_source": "llm"` — one prompt, no retrieval at all.
+
+    Opt-in. The grounded filter can't run (there are no source facts to
+    compare against), so this asserts what still holds: the explicit/taste
+    filters, the character limit, and the fallback when the model admits it
+    knows nothing reliable.
+    """
+    import llm
+    orig_free, orig_cfg = llm.freeform_facts, llm.is_configured
+    orig_lookup = funfacts._lookup_all
+    calls = []
+
+    def fake_lookup(*a, **kw):
+        calls.append(a)
+        return {"place": "Girard, Ohio", "facts": ["It was first settled in 1800."]}
+
+    try:
+        funfacts._cache.clear()
+        funfacts._lookup_all = fake_lookup
+        llm.is_configured = lambda o: True
+        llm.freeform_facts = lambda p, l, o: (
+            "1. Girard is named for Stephen Girard, the Philadelphia "
+            "philanthropist who founded Girard Bank.\n"
+            "2. Past Times Arcade there holds the Guinness record for the "
+            "largest free-play pinball collection.\n"
+            "3. A porn studio opened in town in 1972.\n"
+            "4. The town threw a hanging party back in the day.\n")
+        r = funfacts.get_funfact("girard, OH",
+                                 {"fact_source": "llm", "max_fact_chars": 200})
+        assert r and r["fact"].startswith("Girard is named for Stephen Girard"), r
+        assert not calls, "retrieval must be skipped in llm mode"
+        facts = funfacts._cache["llm:girard, oh"]["facts"]
+        assert len(facts) == 2, facts              # explicit + tasteless dropped
+        assert all(len(f) <= 200 for f in facts), facts
+        assert not any("porn" in f or "hanging party" in f for f in facts), facts
+
+        # Model says it knows nothing reliable -> fall back to real sources.
+        funfacts._cache.clear()
+        llm.freeform_facts = lambda p, l, o: "NOTHING RELIABLE"
+        r2 = funfacts.get_funfact("girard, OH", {"fact_source": "llm"})
+        assert r2 and "1800" in r2["fact"], r2
+        assert calls, "should have fallen back to the sources"
+    finally:
+        llm.freeform_facts, llm.is_configured = orig_free, orig_cfg
+        funfacts._lookup_all = orig_lookup
+    print("[PASS] fact_source=llm -> one prompt, filters still apply, fallback works")
+
+
 def test_namesake_ranking():
     """"Named after <somebody>" is a real fun fact, not filler — Girard, OH is
     named for the Philadelphia philanthropist Stephen Girard, and that used to
@@ -773,6 +822,7 @@ def main():
     test_county_hanging_reattribution()
     test_search_seeds_and_query()
     test_short_year_grounding()
+    test_llm_only_mode()
     test_weird_fallback()
     test_merge_curated()
     test_region_dig()

@@ -154,9 +154,9 @@ _SUMMARIZE_SYSTEM = (
 )
 
 
-def _build_body(model: str, user_prompt: str) -> str:
+def _build_body(model: str, user_prompt: str, system: str = None) -> str:
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
     body = {"model": model, "messages": messages}
@@ -188,8 +188,9 @@ def _request(base: str, key: str, body: bytes) -> str:
     return (data["choices"][0]["message"]["content"] or "").strip()
 
 
-def _call(base: str, model: str, key: str, user_prompt: str) -> str:
-    return _request(base, key, _build_body(model, user_prompt))
+def _call(base: str, model: str, key: str, user_prompt: str,
+          system: str = None) -> str:
+    return _request(base, key, _build_body(model, user_prompt, system))
 
 
 def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
@@ -295,6 +296,12 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
         print("[llm] ---- system prompt ----\n" + SYSTEM_PROMPT, flush=True)
         print("[llm] ---- user prompt ----\n" + user, flush=True)
 
+    return _complete(base, model, key, user, cfg, tag="")
+
+
+def _complete(base: str, model: str, key: str, user: str, cfg: dict,
+              tag: str, system: str = None) -> str | None:
+    """One chat completion with the provider fallbacks. `tag` labels debug logs."""
     candidates = [model]
     spare = _fallback_model(base, model)
     if spare:
@@ -303,9 +310,9 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
     last_detail = ""
     for m in candidates:
         try:
-            text = _call(base, m, key, user)
+            text = _call(base, m, key, user, system)
             if cfg.get("debug"):
-                print("[llm] ---- response ----\n" + text, flush=True)
+                print(f"[llm] ---- response ----\n" + text, flush=True)
             return text
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace").strip()[:300]
@@ -315,8 +322,8 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
                 _disable(exc.code)
                 return None
             if exc.code in (400, 404, 422) and m != candidates[-1]:
-                # Model not found / param error → try the spare.
-                print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying fallback…",
+                # Model not found / param error -> try the spare.
+                print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying fallback\u2026",
                       flush=True)
                 continue
             print(f"[llm] HTTP {exc.code}: {detail}", flush=True)
@@ -324,7 +331,7 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             last_detail = repr(exc)
             if m != candidates[-1]:
-                print(f"[llm] bad response from '{m}': {exc!r}; trying fallback…",
+                print(f"[llm] bad response from '{m}': {exc!r}; trying fallback\u2026",
                       flush=True)
                 continue
             print(f"[llm] bad response from '{m}': {exc!r}", flush=True)
@@ -334,3 +341,57 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
             return None
     print(f"[llm] all models failed: {last_detail}", flush=True)
     return None
+
+
+FREEFORM_SYSTEM = (
+    "You write short, TRUE fun facts about places for a Twitch chat. Accuracy "
+    "matters more than entertainment: a viewer will look these up.\n\n"
+    "HARD RULES:\n"
+    "- Only facts you are confident are documented: founding and what the "
+    "place is named for, a landmark, a record, a well-known local, a famous "
+    "event. If you are not sure, leave it out. An omitted fact is fine; a "
+    "wrong one is not.\n"
+    "- Never invent a name, date, number or story to fill space. If you don't "
+    "know a year, say 'in the 1800s' rather than guess.\n"
+    "- No crime, scandal, disaster or dark history unless you are certain of "
+    "it, and never about a recent, named private person.\n"
+    "- Don't pad. Four confident facts beat ten padded ones.\n"
+    "- If you know nothing reliable about this place, reply with exactly: "
+    "NOTHING RELIABLE\n"
+    "- Each line is ONE self-contained fact, at most the given character "
+    "limit, no numbering, no markdown, no emoji.\n"
+    "Return up to 10 one-line facts, most interesting first."
+)
+
+
+def freeform_facts(place: str, location: str, cfg: dict) -> str | None:
+    """Ask the model for facts from its own knowledge (no source facts).
+
+    Opt-in only (`"fact_source": "llm"`). There is nothing to ground the output
+    against, so the caller must not promise the viewer these are sourced.
+    """
+    if not is_configured(cfg) or _unavailable():
+        return None
+    key = (cfg.get("llm_api_key") or "").strip()
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    model = cfg.get("llm_model") or (OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    try:
+        max_chars = max(60, min(int(cfg.get("max_fact_chars") or 200), 480))
+    except (TypeError, ValueError):
+        max_chars = 200
+
+    user = (
+        f"Place: {place}\n"
+        f"What the viewer asked for: {location}\n"
+        f"Write up to 10 true, interesting fun facts about this place, each at "
+        f"most {max_chars} characters, one per line, no numbering. Only facts "
+        f"you are confident are documented."
+    )
+    if cfg.get("debug"):
+        print(f"[llm] POST {base}/chat/completions  model={model} (freeform)",
+              flush=True)
+        print("[llm] ---- system prompt ----\n" + FREEFORM_SYSTEM, flush=True)
+        print("[llm] ---- user prompt ----\n" + user, flush=True)
+    return _complete(base, model, key, user, cfg, tag="freeform",
+                     system=FREEFORM_SYSTEM)
+

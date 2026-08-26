@@ -116,6 +116,7 @@ Edit `config.json`:
 | `cooldown_seconds` | Minimum seconds between lookups (default 5).                   |
 | `spice`            | `"clean"` or `"spicy"` — adult-rated facts (default `clean`).  |
 | `max_fact_chars`   | Max length of the fact itself (default 200).                   |
+| `fact_source`      | `"sources"` (default) or `"llm"` — see [Where facts come from](#where-facts-come-from). |
 | `llm_api_key`      | Groq/OpenRouter/OpenAI-compatible API key (leave empty for local Ollama). |
 | `llm_base_url`     | LLM API base URL (default `https://api.groq.com/openai/v1`; Ollama = `http://localhost:11434/v1`). |
 | `llm_model`        | LLM model (default `openai/gpt-oss-120b`; Ollama e.g. `llama3.1:8b`). |
@@ -206,6 +207,33 @@ Quick-and-dirty local alternatives:
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
 keyless APIs and can be disabled with `"fun_commands": false`.
+
+## Where facts come from
+
+`"fact_source"` picks one of two engines:
+
+**`"sources"` (default)** — find real facts first, then rewrite them. Wikipedia
+(and optionally DuckDuckGo / Google / Serper) supply sentences about the place;
+the LLM only *rewords* what was found. Every line is checked before it reaches
+chat: no invented names or dates, no invented claims, no county story handed to
+the town. Downside: a small town's article is often thin, so the answer can be
+plainer than you'd like.
+
+**`"llm"`** — skip retrieval entirely and ask the model for interesting facts
+from its own knowledge, capped at `max_fact_chars`. One prompt, no sources, no
+ranking — much simpler, and for well-documented places it often produces a
+better fact than a stubby Wikipedia article.
+
+The trade-off is that in `"llm"` mode **nothing is verified**. The grounded
+filter works by comparing a line against the facts that were found, and here
+nothing was found, so there is nothing to compare against — only the
+explicit/taste filters and the character limit still apply. The prompt demands
+documented-only facts and tells the model to answer `NOTHING RELIABLE` rather
+than guess (the bot then falls back to the real sources), but that is a request,
+not a guarantee: a model with latitude is what produced *"the only place in
+Trumbull County where a hanging party went down"* for Girard, OH. Use `"llm"`
+when you'd rather have a livelier fact and accept the risk; keep `"sources"`
+when being right matters more.
 
 ## Spicy (adult) mode
 
