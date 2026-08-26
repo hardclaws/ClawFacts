@@ -1019,6 +1019,119 @@ def test_curated_indian_lake_facts():
         assert needle in text, f"missing from curated facts: {needle}"
     assert all(len(f) <= 200 for f in res["facts"])
 
+
+_SONG_ITEMS = [
+    {"title": "Indian Lake (Ohio)", "extract": (
+        "Indian Lake is a reservoir in Logan County, western Ohio. At 5,104 "
+        "acres, Indian Lake is the second largest inland lake in Ohio.")},
+    {"title": "Indian Lake (song)", "extract": (
+        "Indian Lake is a song written by Tony Romeo. It was recorded by the "
+        "pop band The Cowsills, and included on their 1968 album Captain Sad "
+        "and His Ship of Fools. Jan & Dean included it on their 1985 album "
+        "Silver Summer.")},
+]
+
+
+def test_work_titles_not_harvested():
+    """'Indian Lake (song)' is the 1968 Cowsills single. Its cover-versions list
+    says 'Jan & Dean included it on their 1985 album Silver Summer' — where 'it'
+    is the song. That sentence was posted as a fun fact about Indian Lake, Ohio
+    (09:19) and Indian Lake, Missouri (09:29). The title matches the place
+    exactly, so neither the region check nor a name-the-place check catches it."""
+    assert funfacts._is_road_or_meta_title("Indian Lake (song)")
+    assert funfacts._is_road_or_meta_title("Girard (surname)")
+    assert not funfacts._is_road_or_meta_title("Indian Lake (Ohio)")
+    assert not funfacts._is_road_or_meta_title("Indian Lake State Park")
+
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: [
+        dict(it) for it in _SONG_ITEMS]
+    try:
+        res = funfacts._wikipedia("indian lake, oh", spice=True, limit=200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+    assert res, "no facts at all"
+    joined = " ".join(res["facts"])
+    for wrong in ("Jan & Dean", "Silver Summer", "Cowsills", "Tony Romeo", "1985"):
+        assert wrong not in joined, f"song-article fact leaked: {wrong}"
+    assert "5,104 acres" in joined
+
+
+def test_reputation_claims_need_a_source():
+    """The 09:29 reply called Jan & Dean 'surf rock legends' and said the album
+    put 'this sleepy Missouri spot on the musical map' — four claims no seed
+    made, all invisible to _claims() because they are ordinary words."""
+    seed = "Jan & Dean included it on their 1985 album Silver Summer."
+    line = ("Indian Lake got its claim to fame in 1985 when surf rock legends "
+            "Jan & Dean featured it on their album Silver Summer, putting this "
+            "sleepy Missouri spot on the musical map.")
+    assert not funfacts._grounded_filter(
+        [line], "Indian Lake, Missouri", "Indian Lake, Missouri", [seed]), \
+        "invented framing survived"
+    # A reputation claim the seeds actually make must still pass.
+    sourced = ["Sandy Beach Amusement Park was famous as the Midwest's Million "
+               "Dollar Playground."]
+    assert funfacts._grounded_filter(
+        ["Sandy Beach was famous as the Midwest's Million Dollar Playground."],
+        "Indian Lake (Ohio)", "Indian Lake, OH", sourced)
+
+
+def test_curated_entry_region_match():
+    """A curated entry describes ONE place, but its keys are stateless
+    ('girard', 'indian lake'). Without a region check, 'Girard, PA' was served
+    the Girard, Ohio facts and 'Indian Lake, Missouri' the Ohio lake's — the
+    same wrong-place error the harvest fixes exist to stop."""
+    assert funfacts._spicy_db("Girard, OH", 200)["place"] == "Girard, Ohio"
+    assert funfacts._spicy_db("Girard, PA", 200) is None
+    assert funfacts._spicy_db("Indian Lake, OH", 200)["place"] == "Indian Lake, Ohio"
+    assert funfacts._spicy_db("Indian Lake, Missouri", 200) is None
+    # A stateless request still gets the curated entry.
+    assert funfacts._spicy_db("Indian Lake", 200) is not None
+
+
+_MO_ITEMS = [
+    {"title": "Indian Lake, Missouri", "extract": (
+        "Indian Lake is an unincorporated community and census-designated place "
+        "in Crawford County, Missouri, United States. It is in the northwestern "
+        "part of the county, surrounding a lake of the same name. The community "
+        "is 5 miles northwest of Cuba and Interstate 44.")},
+    {"title": "Indian Lake (song)", "extract": (
+        "Indian Lake is a song written by Tony Romeo. Jan & Dean included it on "
+        "their 1985 album Silver Summer.")},
+]
+
+
+def test_full_state_name_region():
+    """Typing the state out must behave like the abbreviation. _US_STATES is
+    keyed by abbreviation, so for 'Indian Lake, Missouri' the 'United States'
+    in the lead counted as a foreign region and the place's own article was
+    discarded — which is what left the 09:29 lookup with nothing but the song
+    article to quote."""
+    extract = ("Indian Lake is an unincorporated community in Crawford County, "
+               "Missouri, United States.")
+    assert not funfacts._text_names_other_region(extract, "mo")
+    assert not funfacts._text_names_other_region(extract, "missouri")
+    assert funfacts._text_names_other_region(extract, "oh")
+    assert funfacts._text_names_other_region(extract, "ohio")
+    # Cross-state rejection must survive both spellings.
+    assert funfacts._text_names_other_region("Indian Lake (Ohio)", "missouri")
+    assert funfacts._text_names_other_region("Girard, Ohio", "pennsylvania")
+    # And the word-boundary guards must not regress.
+    assert not funfacts._text_names_other_region("a town in Virginia", "west virginia")
+    assert funfacts._text_names_other_region("a town in West Virginia", "virginia")
+    assert not funfacts._text_names_other_region("a town in Kansas", "arkansas")
+
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: [
+        dict(it) for it in _MO_ITEMS]
+    try:
+        res = funfacts._wikipedia("Indian Lake, Missouri", spice=True, limit=200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+    assert res, "the place's own article was discarded again"
+    assert res["place"] == "Indian Lake, Missouri", res["place"]
+    assert "Jan & Dean" not in " ".join(res["facts"])
+
 def main():
     test_trim()
     test_rotation()
@@ -1026,6 +1139,7 @@ def main():
     test_spicy_db()
     test_curated_girard_facts()
     test_curated_indian_lake_facts()
+    test_curated_entry_region_match()
     test_ranked_dedupe()
     test_ranked_filter()
     test_parse_geocode()
@@ -1035,6 +1149,7 @@ def main():
     test_bio_filter()
     test_definition_filter()
     test_region_word_boundaries()
+    test_full_state_name_region()
     test_namesake_ranking()
     test_namesake_person_stubs()
     test_attraction_ranking()
@@ -1042,6 +1157,7 @@ def main():
     test_tasteless_filter()
     test_grounded_filter()
     test_residence_claim_needs_a_seed()
+    test_reputation_claims_need_a_source()
     test_invented_claim_filter()
     test_county_hanging_reattribution()
     test_search_seeds_and_query()
@@ -1058,6 +1174,7 @@ def main():
     test_serper_source()
     test_wiki_multi_title()
     test_wrong_place_harvest()
+    test_work_titles_not_harvested()
     test_html_entities_unescaped()
     test_wiki_cooldown()
     print("\nALL PASSED ✔")

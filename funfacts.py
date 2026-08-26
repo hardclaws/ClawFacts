@@ -497,6 +497,11 @@ _REGION_NAME_RES = [(n, re.compile(r"\b" + re.escape(n) + r"\b"))
                     for n in _REGION_NAMES]
 # The country a US state lives in — never "another region".
 _US_COUNTRY_WORDS = {"united states", "united states of america", "usa"}
+# Reverse of _US_STATES / _CA_PROVINCES: viewers type full state names
+# ('Indian Lake, Missouri'), and the checks below are keyed by abbreviation.
+_US_STATE_BY_NAME = {v: k for k, v in _US_STATES.items()}
+_CA_PROVINCE_BY_NAME = {v: k for k, v in _CA_PROVINCES.items()}
+
 
 
 def _query_core(query: str) -> str:
@@ -553,12 +558,20 @@ def _text_names_other_region(text: str, region: str) -> bool:
     if not region:
         return False
     text_norm = _title_tokens(text)
-    requested = {region, _US_STATES.get(region, ""), _CA_PROVINCES.get(region, ""),
+    # Viewers type either form ("Girard, OH" or "Girard, Ohio"), and _US_STATES
+    # is keyed by abbreviation — so accept both, and treat the country as home
+    # for either. Getting this wrong for full state names discarded the town's
+    # own article again ("Indian Lake ... Missouri, United States"), which is
+    # exactly what left the 09:29 lookup with nothing but a song article.
+    us_abbr = region if region in _US_STATES else _US_STATE_BY_NAME.get(region, "")
+    ca_abbr = region if region in _CA_PROVINCES else _CA_PROVINCE_BY_NAME.get(region, "")
+    requested = {region, us_abbr, _US_STATES.get(us_abbr, ""),
+                 ca_abbr, _CA_PROVINCES.get(ca_abbr, ""),
                  _COUNTRIES.get(region, "")}
     requested.discard("")
-    if region in _US_STATES:
+    if us_abbr:
         requested |= _US_COUNTRY_WORDS      # "United States" == same place
-    elif region in _CA_PROVINCES:
+    elif ca_abbr:
         requested.add("canada")
     for name, rx in _REGION_NAME_RES:
         if name in requested:
@@ -571,10 +584,25 @@ def _text_names_other_region(text: str, region: str) -> bool:
     return False
 
 
+# Works and name pages that share a place's name. "Indian Lake (song)" is the
+# 1968 Cowsills single; its Cover-versions list says "Jan & Dean included it on
+# their 1985 album Silver Summer", and that sentence was posted as a fun fact
+# about Indian Lake, Ohio and then about Indian Lake, Missouri — where "it"
+# meant the song all along. The title matches the place exactly, so neither the
+# region check nor the name-the-place check can catch it.
+_WORK_TITLE = re.compile(
+    r"\((?:song|songs|single|album|band|music|film|movie|tv series|television "
+    r"series|episode|novel|book|poem|play|musical|opera|painting|sculpture|"
+    r"video game|game|character|surname|given name|name|disambiguation|ship|"
+    r"company|brand|magazine|newspaper|award)\)", re.IGNORECASE)
+
+
 def _is_road_or_meta_title(title: str) -> bool:
-    """Road/highway/route and meta pages are never the fun fact for a town."""
+    """Road/highway/route, meta and works pages are never the fun fact."""
     t = title.lower()
     if t.startswith(("list of", "category:", "template:", "wikipedia:", "portal:", "file:")):
+        return True
+    if _WORK_TITLE.search(title):
         return True
     return any(w in t for w in (" route ", " route", "highway", "interstate",
                                 "county road", "state road", "turnpike",
@@ -906,12 +934,21 @@ def _load_spicy_db() -> list:
 def _spicy_db(location: str, limit: int):
     full = _norm(location)
     core = _norm(re.split(r"[,;|]", location, maxsplit=1)[0])
+    region = _query_region(location)
     for entry in _load_spicy_db():
         keys = [_norm(k) for k in entry.get("keys", [])]
-        if full in keys or core in keys:
-            facts = [f for f in (_trim(x, limit) for x in entry.get("facts", [])) if f]
-            if facts:
-                return {"place": entry.get("name") or location, "facts": facts}
+        if full not in keys and core not in keys:
+            continue
+        # A curated entry describes ONE place, but its keys are often
+        # stateless ("girard", "indian lake"). Without a region check,
+        # 'Girard, PA' was served the Girard, Ohio facts and 'Indian Lake,
+        # Missouri' the Ohio lake's — the same wrong-place error the harvest
+        # fixes were made to stop, reintroduced by the curated data.
+        if region and not _title_matches_region(entry.get("name") or "", region):
+            continue
+        facts = [f for f in (_trim(x, limit) for x in entry.get("facts", [])) if f]
+        if facts:
+            return {"place": entry.get("name") or location, "facts": facts}
     return None
 
 
@@ -1176,6 +1213,22 @@ _CAP_ALIASES = {
     "frisco": "san francisco", "chi": "chicago", "detriot": "detroit",
     "columbus ohio": "columbus", "kc": "kansas city", "nola": "new orleans",
 }
+# Reputation, significance and genre labels are claims too. "Surf rock legends
+# Jan & Dean ... putting this sleepy Missouri spot on the musical map" adds four
+# assertions no source made — the band's genre, that they are legends, that the
+# town is sleepy, and that the album made it famous. _claims() saw none of them
+# because they are ordinary words, so the line was posted verbatim.
+_REPUTATION = re.compile(
+    r"\bclaim(?:s|ed)?\s+to\s+fame\b|\bput(?:s|ting)?\s+.{0,40}?\bon\s+the\s+"
+    r"(?:\w+\s+)?map\b|\bmade?\s+.{0,30}?famous\b|\blegend(?:s|ary)?\b|"
+    r"\biconic\b|\bworld[- ](?:famous|renowned)\b|\bfamous(?:ly)?\b|"
+    r"\brenowned\b|\bcelebrated\b|\bnotorious(?:ly)?\b|\bhidden\s+gem\b|"
+    r"\bmust[- ]see\b|\bsleepy\b|\bquaint\b|\bcharming\b|\bidyllic\b|"
+    r"\bpicturesque\b|\btimeless\b|\bbeloved\b|\bstoried\b|"
+    r"\bsurf\s+rock\b|\brock\s+(?:legends?|icons?)\b|\bpunk\s+rock\b|"
+    r"\bhip\s+hop\b|\bcountry\s+music\b|\bheavy\s+metal\b",
+    re.IGNORECASE,
+)
 # A residence claim about a person is the namesake trap: "Joe Girard ... called
 # Girard home" adds a fact (that he lived there) which no source states, and
 # slips past the name check because "Girard" is already in the corpus. Such a
@@ -1375,6 +1428,11 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
                     return False
         # 1b. a residence claim needs a seed that places someone in the town.
         if _RESIDENCE.search(line) and not _RESIDENCE.search(corpus):
+            return False
+        # 1c. reputation / genre labels need the same backing — "surf rock
+        #     legends" and "put this sleepy spot on the musical map" are
+        #     invented framing, not a rewrite of the supplied fact.
+        if _REPUTATION.search(line) and not _REPUTATION.search(corpus):
             return False
         # 2. every claim the line makes must be a claim the seeds make.
         line_claims = _claims(line)

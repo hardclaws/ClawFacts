@@ -46,6 +46,15 @@ def main() -> int:
          "deduped" in open(funfacts.__file__, encoding="utf-8").read()),
         ("curated Indian Lake, Ohio facts (Sandy Beach, Lewistown Reservoir)",
          bool(funfacts._spicy_db("Indian Lake, OH", 200))),
+        ("works pages excluded ('Indian Lake (song)' is the Cowsills single)",
+         funfacts._is_road_or_meta_title("Indian Lake (song)")),
+        ("reputation/genre claims need a source ('surf rock legends')",
+         hasattr(funfacts, "_REPUTATION")),
+        ("curated facts are region-matched ('Girard, PA' != Girard, Ohio)",
+         funfacts._spicy_db("Girard, PA", 200) is None),
+        ("full state names work ('Missouri' behaves like 'MO')",
+         not funfacts._text_names_other_region(
+             "a village in Crawford County, Missouri, United States.", "missouri")),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
