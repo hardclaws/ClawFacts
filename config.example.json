@@ -1,0 +1,25 @@
+{
+  "nick": "your_bot_account_name",
+  "oauth_token": "",
+  "client_id": "paste_your_client_id_here",
+  "client_secret": "paste_your_client_secret_here_optional",
+  "channel": "#your_channel",
+  "prefix": "!",
+  "cooldown_seconds": 5,
+  "spice": "spicy",
+  "max_fact_chars": 200,
+  "max_message_chars": 450,
+  "fact_prefix": "FunFact",
+  "fun_commands": true,
+  "respond_only_to": [],
+
+  "llm_api_key": "sk-or-v1-paste_your_openrouter_key_here",
+  "llm_base_url": "https://openrouter.ai/api/v1",
+  "llm_model": "nousresearch/hermes-4-70b",
+
+  "google_api_key": "",
+  "google_cx": "",
+  "serper_api_key": "",
+
+  "_llm_options": "The three llm_* fields above are set for OpenRouter (recommended for adult-aligned facts). Other providers: Groq -> key 'gsk_...', base 'https://api.groq.com/openai/v1', model 'openai/gpt-oss-120b'. Local Ollama -> key '' (empty), base 'http://localhost:11434/v1', model 'llama3.1:8b'. Other OpenRouter models: 'sao10k/l3.3-euryale-70b' (edgiest), 'cognitivecomputations/dolphin-mistral-24b-venice-edition' (uncensored), 'mistralai/mistral-nemo' (cheapest)."
+}

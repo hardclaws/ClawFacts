@@ -1,0 +1,121 @@
+{
+  "note": "Curated 'spicy' (adult-humor) fun facts, grounded in verified history. Used only when spice='spicy'. Keys are matched loosely (case, punctuation and 'City, ST' suffixes are ignored). Add your own entries following the same shape.",
+  "entries": [
+    {
+      "name": "Las Vegas, Nevada",
+      "keys": ["las vegas", "las vegas nv", "las vegas nevada", "vegas"],
+      "facts": [
+        "The Strip isn't actually in Las Vegas — it sits in unincorporated Paradise, Nevada. The name was not a coincidence.",
+        "Prostitution is illegal in Clark County, which is exactly why Nevada's legal brothels huddle just outside city limits. Supply and demand is a beautiful thing.",
+        "Bugsy Siegel built the Flamingo with mob money, opened it in 1946, and got shot dead in 1947. One star, would not visit again.",
+        "You can get married in a Vegas drive-thru without leaving the truck. Commitment issues, solved."
+      ]
+    },
+    {
+      "name": "Reno, Nevada",
+      "keys": ["reno", "reno nv", "reno nevada"],
+      "facts": [
+        "Reno was America's quickie-divorce capital — in the 1900s you could end a marriage with a six-week stay. The original easy-out.",
+        "Reno calls itself the Biggest Little City in the World, which sounds like a personal problem.",
+        "Nevada's brothels are only legal outside city limits, so Reno is a short drive from a very different kind of rest stop."
+      ]
+    },
+    {
+      "name": "Pahrump, Nevada",
+      "keys": ["pahrump", "pahrump nv", "pahrump nevada"],
+      "facts": [
+        "The Chicken Ranch, a legal brothel opened in 1976, sits just outside Pahrump — the closest legal 'hospitality' to Las Vegas.",
+        "In 1978 the Chicken Ranch burned down in a suspected arson — and reopened from trailers five days later. Motivated."
+      ]
+    },
+    {
+      "name": "New Orleans, Louisiana",
+      "keys": ["new orleans", "new orleans la", "new orleans louisiana", "nola"],
+      "facts": [
+        "Storyville was America's only legal red-light district, running 1897–1917 until the Navy shut it down in WWI. Sailors: ruining fun since forever.",
+        "Storyville even printed 'blue books' — guidebooks to the brothels with prices, services, and 'stock.' Yelp, 1905 edition."
+      ]
+    },
+    {
+      "name": "Butte, Montana",
+      "keys": ["butte", "butte mt", "butte montana"],
+      "facts": [
+        "Butte's Dumas Brothel ran from 1890 to 1982 — the longest in U.S. history. Customer loyalty, achieved.",
+        "The Dumas' last madam shot her husband in a bar in 1959, served nine months, then went right back to running the place."
+      ]
+    },
+    {
+      "name": "Wallace, Idaho",
+      "keys": ["wallace", "wallace id", "wallace idaho"],
+      "facts": [
+        "Wallace, Idaho ran brothels openly until 1991 — one is now a museum, and you can rent a former brothel on Airbnb.",
+        "Wallace hid its brothels in plain sight for over a century. Subtlety was not their strong suit."
+      ]
+    },
+    {
+      "name": "Tombstone, Arizona",
+      "keys": ["tombstone", "tombstone az", "tombstone arizona"],
+      "facts": [
+        "The O.K. Corral gunfight lasted about 30 seconds. Tombstone has been milking it for 140 years."
+      ]
+    },
+    {
+      "name": "Deadwood, South Dakota",
+      "keys": ["deadwood", "deadwood sd", "deadwood south dakota"],
+      "facts": [
+        "Wild Bill Hickok was shot dead in Deadwood holding aces and eights — the 'dead man's hand.' Literally a losing hand.",
+        "Deadwood's saloons, gambling, and brothels made it the wildest boomtown of the Black Hills gold rush."
+      ]
+    },
+    {
+      "name": "Fort Worth, Texas",
+      "keys": ["fort worth", "fort worth tx", "fort worth texas"],
+      "facts": [
+        "Hell's Half Acre was Fort Worth's official red-light district from the 1870s — saloons, gambling dens and brothels built for trail-weary cowboys.",
+        "By 1907 the Acre had dozens of 'crib' shacks selling sex for pocket change, plus a gunfight between gambler Luke Short and marshal Jim Courtright.",
+        "The city demolished Hell's Half Acre twice, but it always grew back until the brothels were finally cleared in the early 1900s."
+      ]
+    },
+    {
+      "name": "Dodge City, Kansas",
+      "keys": ["dodge city", "dodge city ks", "dodge city kansas"],
+      "facts": [
+        "Dodge City's Front Street packed saloons, gambling halls and brothels to serve cowboys fresh off the cattle trail — the 'Queen of the Cowtowns.'",
+        "Between 1877 and 1886 Dodge City was one of the most dangerous towns in America, where gunfights were just the evening entertainment."
+      ]
+    },
+    {
+      "name": "Fresno, California",
+      "keys": ["fresno", "fresno ca", "fresno california"],
+      "facts": [
+        "Fresno's Chinatown was once a red-light district — its underground tunnels and basements hid gambling and prostitution for decades.",
+        "Chinese immigrants who built the railroad were pushed west of the tracks into Chinatown, where the vice trade thrived."
+      ]
+    },
+    {
+      "name": "Milford, Pennsylvania",
+      "keys": ["milford pa", "milford pennsylvania", "milford pike county"],
+      "facts": [
+        "Gambino crime boss John Gotti kept a hilltop estate in Milford — the Pennsylvania Crime Commission said he entertained mob associates there.",
+        "Gotti's $300,000 Milford Heights estate was bought in 1988 through his son and son-in-law, per Pike County deed records.",
+        "Milford's Columns Museum holds the 'Lincoln Flag' — the blood-stained flag from Lincoln's Ford's Theatre box, used to cushion his head after he was shot."
+      ]
+    },
+    {
+      "name": "Lords Valley, Pennsylvania",
+      "keys": ["lords valley", "lords valley pa", "lords valley pennsylvania"],
+      "facts": [
+        "Lords Valley sits in the Pocono honeymoon belt: Cove Haven's Morris Wilkins invented the heart-shaped bathtub in 1963, making the Poconos the 'Honeymoon Capital of the World.'",
+        "The Poconos' seven-foot 'champagne glass' whirlpool for two debuted at Cove Haven in 1983 — couples climbed a staircase to soak in a giant acrylic flute."
+      ]
+    },
+    {
+      "name": "Lakeville, Pennsylvania",
+      "keys": ["lakeville", "lakeville pa", "lakeville pennsylvania", "cove haven"],
+      "facts": [
+        "Cove Haven's Morris Wilkins invented the heart-shaped bathtub in 1963, turning Lakeville and the Poconos into the 'Honeymoon Capital of the World.'",
+        "Cove Haven topped the tub with a seven-foot champagne-glass whirlpool for two in 1983 — couples climbed a staircase to get in."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+# systemd unit for the TruckingWithDoc FunFact Twitch bot.
+#
+# Install (as root or with sudo):
+#   sudo cp deploy/funfact-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now funfact-bot
+#   sudo systemctl status funfact-bot
+#
+# See deploy/DEPLOY.md for the full guide.
+
+[Unit]
+Description=TruckingWithDoc FunFact Twitch bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Point these at wherever you cloned the repo (DEPLOY.md uses /opt/funfact-bot).
+WorkingDirectory=/opt/funfact-bot
+ExecStart=/usr/bin/python3 /opt/funfact-bot/bot.py /opt/funfact-bot/config.json
+# Always come back up if the connection drops or the process dies.
+Restart=always
+RestartSec=5
+# Run as an unprivileged user (create it: sudo useradd -r -m funfact).
+User=funfact
+Group=funfact
+# Optional secrets file (LLM key, spice mode) — see bot.env.example.
+EnvironmentFile=-/opt/funfact-bot/bot.env
+
+# Security hardening (no network/filesystem sandboxing, so Twitch + the fact
+# APIs keep working, but drop all privileges we can).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
