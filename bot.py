@@ -606,6 +606,10 @@ def main() -> None:
     )
     if cfg["debug"]:
         print("[debug] verbose LLM logging enabled — full prompts/responses will be shown.")
+        # Also trace retrieval: which source answered, and the exact seed pool
+        # handed to the LLM. Without this a wrong fact can only be guessed at.
+        import funfacts
+        funfacts.DEBUG = True
 
     if not do_selftest:
         warn_config(cfg)

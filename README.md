@@ -489,6 +489,20 @@ needed.
   python3 funfacts.py "Milford, PA"
   python3 funfacts.py --spicy "Las Vegas, NV"   # adult mode
   ```
+- **Check which fixes the copy you are running actually has** — after
+  downloading a zip or applying a patch, this removes all guesswork:
+  ```
+  python3 check_fixes.py
+  ```
+  It prints one line per fix (`[x]` present, `[ ]` missing) and exits non-zero
+  if anything is absent.
+- **Trace retrieval, not just the LLM**: `--debug` (or `TWITCH_DEBUG=1`) also
+  prints which source answered and the exact seed pool handed to the model,
+  so a wrong fact can be traced to its source instead of guessed at:
+  ```
+  [funfacts] source=duckduckgo place='Girard, Ohio' facts=3
+  [funfacts]   seed 1: It is believed that Girard takes its name from Stephen Girard…
+  ```
 - **Replay a real lookup with no network** (for CI, or any machine that can't
   reach Wikipedia):
   ```
@@ -590,5 +604,6 @@ appends fake joke comments.
 | `mock_facts_test.py` | Offline fact-logic tests.                       |
 | `mock_live_test.py`  | End-to-end lookup replayed from recorded API responses. |
 | `fixtures/`          | Recorded MediaWiki responses for the replay.    |
+| `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
 | `tokens.json`        | Created on first login; holds the saved login.  |

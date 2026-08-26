@@ -824,11 +824,120 @@ def test_busy_unavailable():
     print("[PASS] busy marker only while sources are rate-limited")
 
 
+
+def test_namesake_person_stubs():
+    """A bare 'Name, epithet, epithet' stub is a Wikipedia title, not a fact
+    about the town — and a namesake person is a false fact waiting to happen.
+    DuckDuckGo's results for 'girard, OH' led with Joe Girard (born Detroit)
+    and Hugo Girard (Canadian), and the model turned one into a local."""
+    stubs = [
+        "Joe Girard, Guinness Book of World Records winning American salesman",
+        "Hugo Girard, Canadian Strongman, former World Champion",
+    ]
+    for s in stubs:
+        assert funfacts._is_person_stub(s), f"stub not caught: {s}"
+    real = [
+        "It is believed that Girard takes its name from Stephen Girard, a French "
+        "American philanthropist who founded the Girard Bank in Philadelphia.",
+        "Girard's first high school was opened in 1861 as Girard Union High "
+        "School; its current variation was originally opened in the 1920s.",
+        "It was first settled in 1800 but remained static until the Ohio and Erie "
+        "Canal was completed.",
+        "Past Times Arcade in Girard has more than 600 pinball machines.",
+    ]
+    for s in real:
+        assert not funfacts._is_person_stub(s), f"real fact wrongly dropped: {s}"
+    ranked = funfacts._ranked_facts(stubs + real, spice=True, limit=200)
+    assert ranked, "ranking dropped everything"
+    for f in ranked:
+        assert not funfacts._is_person_stub(f), f"stub reached the pool: {f}"
+    assert "Joe Girard" not in " ".join(ranked)
+    assert "Hugo Girard" not in " ".join(ranked)
+
+
+def test_residence_claim_needs_a_seed():
+    """The exact lines from the 08:51 debug log: the model adopted a Detroit
+    salesman as a local ('called Girard home'), while the true Stephen Girard
+    naming fact was dropped over the abbreviation 'Philly'. Both fixed."""
+    seeds = [
+        "Joe Girard, Guinness Book of World Records winning American salesman",
+        "It is believed that Girard takes its name from Stephen Girard, a French "
+        "American philanthropist who was the founder of the Girard Bank and "
+        "Girard College in Philadelphia.",
+        "Girard's first high school was opened in 1861 as Girard Union High "
+        "School; its current variation was originally opened in the 1920s.",
+        "Hugo Girard, Canadian Strongman, former World Champion",
+        "It was first settled in 1800 but remained static until the Ohio and Erie "
+        "Canal was completed.",
+    ]
+    lines = [
+        "Joe Girard, Guinness Book of World Records winning American salesman, "
+        "called Girard home—talk about local flavor.",
+        "The settlement dates back to 1800, got moving when the Ohio and Erie "
+        "Canal finished up here.",
+        "Some claim Girard owes its name to Stephen Girard, that French American "
+        "bank founder from Philly. Could be.",
+    ]
+    kept = funfacts._grounded_filter(lines, "Girard, Ohio", "girard, OH", seeds)
+    joined = " ".join(kept)
+    assert "called Girard home" not in joined, "namesake adopted as a local"
+    assert "Philly" in joined, "true line dropped over an abbreviation"
+    # A residence claim is fine when a seed actually places someone in town.
+    placed = seeds + ["Suffragist Elizabeth Hauser was born in Girard in 1873 and "
+                      "edited the Girard Grit."]
+    line = "Suffragist Elizabeth Hauser was born in Girard in 1873 and edited the Girard Grit."
+    assert funfacts._grounded_filter([line], "Girard, Ohio", "girard, OH", placed), \
+        "a sourced residence claim must survive"
+
+
+def test_curated_girard_facts():
+    """The facts we verified by hand must reach chat even when Wikipedia is
+    rate-limited and the web sources return namesakes."""
+    res = funfacts._spicy_db("girard, OH", 200)
+    assert res, "no curated entry for Girard, OH"
+    assert res["place"] == "Girard, Ohio", res["place"]
+    text = " ".join(res["facts"])
+    for needle in ("Past Times Arcade", "Guinness", "1,041", "Barnhisel",
+                   "1993", "1836", "Elizabeth Hauser"):
+        assert needle in text, f"missing from curated facts: {needle}"
+    assert all(len(f) <= 200 for f in res["facts"]), "curated fact over 200 chars"
+    assert not any(funfacts._is_person_stub(f) for f in res["facts"])
+
+
+def test_llm_preamble_dropped():
+    """The 08:51 reply opened with 'Girard, Ohio's got some real characters for
+    the record books...' and that preamble was posted as the first fact."""
+    reply = ("Girard, Ohio's got some real characters for the record books, and "
+             "not just the strongman type. Just don't ask us how it got the "
+             "name\u2014sources disagree. Here's the real deal:\n\n"
+             "- It was first settled in 1800 but remained static until the Ohio "
+             "and Erie Canal was completed.\n"
+             "- Girard Union High School first opened its doors way back in "
+             "1861; the current building's been around since the 1920s.")
+    import llm
+    orig = (llm.is_configured, llm.rewrite_fact)
+    llm.is_configured = lambda opts=None: True
+    llm.rewrite_fact = lambda *a, **k: reply
+    try:
+        out = funfacts._llm_facts("Girard, Ohio", "girard, OH",
+                                  ["It was first settled in 1800 but remained "
+                                   "static until the Ohio and Erie Canal was "
+                                   "completed."],
+                                  {"spice": "spicy", "llm_api_key": "x"})
+    finally:
+        llm.is_configured, llm.rewrite_fact = orig
+    assert out, "every line was dropped"
+    joined = " ".join(out)
+    assert "real characters" not in joined, "preamble reached the pool"
+    assert "real deal" not in joined, "preamble reached the pool"
+    assert any("1800" in f for f in out)
+
 def main():
     test_trim()
     test_rotation()
     test_busy_unavailable()
     test_spicy_db()
+    test_curated_girard_facts()
     test_ranked_dedupe()
     test_ranked_filter()
     test_parse_geocode()
@@ -839,10 +948,12 @@ def main():
     test_definition_filter()
     test_region_word_boundaries()
     test_namesake_ranking()
+    test_namesake_person_stubs()
     test_attraction_ranking()
     test_explicit_filter()
     test_tasteless_filter()
     test_grounded_filter()
+    test_residence_claim_needs_a_seed()
     test_invented_claim_filter()
     test_county_hanging_reattribution()
     test_search_seeds_and_query()
@@ -854,6 +965,7 @@ def main():
     test_fit_fact()
     test_filler_filter()
     test_meta_line_filter()
+    test_llm_preamble_dropped()
     test_serper_source()
     test_wiki_multi_title()
     test_wiki_cooldown()

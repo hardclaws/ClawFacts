@@ -26,6 +26,7 @@ import os
 import random
 import re
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -155,6 +156,42 @@ def _is_junk_seed(sentence: str) -> bool:
     return bool(_JUNK_SEED.search(sentence))
 
 
+# A bare "Name, epithet, epithet" stub is a Wikipedia *title*, not a fact about
+# the town — and when the person merely shares the town's name it is actively
+# dangerous. DuckDuckGo's results for "girard, OH" led with "Joe Girard,
+# Guinness Book of World Records winning American salesman" (born Detroit, 1928)
+# and "Hugo Girard, Canadian Strongman, former World Champion", and the model
+# turned the first into "Joe Girard called Girard home". Neither stub names the
+# town, states a date, or contains a verb — so they are dropped, while real
+# sentences ("It is believed that Girard takes its name from...") are untouched.
+_STUB_EPITHET = re.compile(
+    r"\b(former|current|retired|american|canadian|british|australian|world|"
+    r"national|professional|record|champion\w*|salesman|actor|actress|"
+    r"politician|senator|governor|mayor|musician|singer|songwriter|composer|"
+    r"player|coach|pitcher|quarterback|boxer|wrestler|strongman|driver|racer|"
+    r"author|writer|poet|artist|painter|inventor|scientist|engineer|general|"
+    r"businessman|entrepreneur|philanthropist|priest|bishop|outlaw|gangster)\b",
+    re.IGNORECASE,
+)
+_STUB_NAME = re.compile(r"^[A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,3}$")
+_STUB_VERB = re.compile(
+    r"\b(is|are|was|were|be|been|being|has|have|had|became|becomes|serves?|"
+    r"served|founded|opened|built|established|born|died|lived|located|stands?|"
+    r"holds?|hosted|won|named|settled|incorporated)\b", re.IGNORECASE)
+
+
+def _is_person_stub(sentence: str) -> bool:
+    """True for a bare "Firstname Lastname, epithet, epithet" title stub."""
+    t = sentence.strip()
+    if not t or len(t) > 110 or "." in t or t.count(",") < 1:
+        return False
+    if not _STUB_NAME.match(t.split(",")[0].strip()):
+        return False
+    if _STUB_VERB.search(t):
+        return False
+    return bool(_STUB_EPITHET.search(t))
+
+
 def _is_filler(sentence: str) -> bool:
     """True for census/location boilerplate that is never a fun fact.
 
@@ -186,6 +223,13 @@ _log_once = set()   # one-time warnings
 # lookups doesn't turn into a slow 429-retry storm (which was taking 30+ s).
 _wiki_lock = threading.Lock()
 _wiki_blocked_until = 0.0
+
+
+# Set True by bot.py when --debug / TWITCH_DEBUG=1 is on: prints which source
+# answered and the exact seed pool handed to the LLM, so a bad fact can be
+# traced to its source instead of guessed at.
+DEBUG = (os.environ.get("TWITCH_DEBUG", "").strip().lower()
+         in ("1", "true", "yes", "on")) or ("--debug" in sys.argv)
 
 
 def _wiki_blocked() -> bool:
@@ -391,7 +435,7 @@ def _ranked_facts(sentences: list, spice: bool = False,
                     key=lambda p: (-p[1], len(p[0])))
     out, seen_norm = [], []
     for s, sc in ranked:
-        if _is_filler(s) or _is_junk_seed(s):
+        if _is_filler(s) or _is_junk_seed(s) or _is_person_stub(s):
             continue
         if sc < 2 and out:
             break
@@ -1113,6 +1157,26 @@ _YEAR = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})s?\b")
 # that no source fact contains (the seeds said "Jan. 4", not 2004).
 _SHORT_YEAR = re.compile(r"['\u2019](\d{2})\b")
 _CAP_WORD = re.compile(r"\b[A-Z][a-z]{2,}\b")
+# Common shortenings of place names the model likes to use. Without this the
+# filter drops a TRUE line — "...bank founder from Philly" was dropped because
+# the seed said "Philadelphia" — while letting invented lines through.
+_CAP_ALIASES = {
+    "philly": "philadelphia", "phila": "philadelphia", "cincy": "cincinnati",
+    "frisco": "san francisco", "chi": "chicago", "detriot": "detroit",
+    "columbus ohio": "columbus", "kc": "kansas city", "nola": "new orleans",
+}
+# A residence claim about a person is the namesake trap: "Joe Girard ... called
+# Girard home" adds a fact (that he lived there) which no source states, and
+# slips past the name check because "Girard" is already in the corpus. Such a
+# line is only allowed if some seed actually places someone in the town.
+_RESIDENCE = re.compile(
+    r"\b(?:called|made|makes|claims?|claiming|counts?)\s+\S+\s+"
+    r"(?:his|her|their)?\s*home\b|\bhometown\b|\bhome\s+town\b|"
+    r"\bhailed?\s+from\b|\bgrew\s+up\s+in\b|\bnative\s+of\b|"
+    r"\b(?:born|raised|reared)\s+in\b|"
+    r"\blived\s+in\b|\blocal\s+(?:legend|hero|boy|girl|son|daughter)\b",
+    re.IGNORECASE,
+)
 _GROUNDED_STOP = {
     # determiners / pronouns
     "the", "a", "an", "this", "that", "these", "those", "some", "many", "most",
@@ -1295,7 +1359,12 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
             if w in _GROUNDED_STOP:
                 continue
             if w not in tokens:
-                return False
+                alias = _CAP_ALIASES.get(w)
+                if not alias or not all(a in tokens for a in alias.split()):
+                    return False
+        # 1b. a residence claim needs a seed that places someone in the town.
+        if _RESIDENCE.search(line) and not _RESIDENCE.search(corpus):
+            return False
         # 2. every claim the line makes must be a claim the seeds make.
         line_claims = _claims(line)
         if line_claims - corpus_claims:
@@ -1340,8 +1409,18 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         return []
     if not text:
         return []
+    # A bulleted reply usually opens with a chatty preamble ("Girard, Ohio's
+    # got some real characters for the record books... Here's the real deal:")
+    # that is not a fact at all. Once the first bullet appears, everything
+    # above it is discarded so the preamble can't be posted as fact #1.
+    raw_lines = text.splitlines()
+    first_bullet = next((i for i, ln in enumerate(raw_lines)
+                         if re.match(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)\S", ln)),
+                        None)
+    if first_bullet is not None:
+        raw_lines = raw_lines[first_bullet:]
     lines = []
-    for ln in text.splitlines():
+    for ln in raw_lines:
         ln = ln.strip().strip('"\u201c\u201d')
         # Strip "1." / "-" / "•" list prefixes and markdown the model may add.
         ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-•*]\s*)", "", ln)
@@ -1378,7 +1457,14 @@ def _try_sources(location: str, spicy: bool, limit: int, options: dict = None):
             print(f"[funfacts] {name} error: {exc!r}", flush=True)
         else:
             if result and result.get("facts"):
+                if DEBUG:
+                    print(f"[funfacts] source={name} place={result.get('place')!r} "
+                          f"facts={len(result['facts'])}", flush=True)
+                    for i, f in enumerate(result["facts"], 1):
+                        print(f"[funfacts]   seed {i}: {f[:150]}", flush=True)
                 return result
+            if DEBUG:
+                print(f"[funfacts] source={name} -> nothing usable", flush=True)
     return None
 
 
