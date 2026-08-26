@@ -1000,7 +1000,13 @@ _TASTELESS = re.compile(
     r"massacre|slaughter|suicide|corpse)\b(?:\s+(?!mystery\b)\w+){0,2}\s*"
     r"\b(party|parties|bash|festival|hoedown|celebration|soiree|rager)\b|"
     r"\b(party|bash|festival|hoedown|celebration)\b(?:\s+\w+){0,2}\s*"
-    r"\b(hanging|lynching|noose|gallows|murder|massacre)\b",
+    r"\b(hanging|lynching|noose|gallows|murder|massacre)\b|"
+    # Flippant idiom for killing somebody: "they really dropped the axe on
+    # this one guy", "a necktie party", "took him for a ride".
+    r"\b(dropp\w+|hand\w*|serv\w+|giv\w+|took)\b(?:\s+\w+){0,3}\s*"
+    r"\b(the axe|him for a ride|a ride)\b|"
+    r"\bnecktie (party|parties|social)\b|\brope party\b|"
+    r"\bstretched (his|her|their) neck\b|\bsent (him|her|them) up the river\b",
     re.IGNORECASE,
 )
 
@@ -1107,6 +1113,16 @@ _CLAIM_RES = [(name, re.compile(pat, re.IGNORECASE))
 _UNIQUE_CLAIMS = {"only", "first", "largest", "smallest", "oldest", "tallest",
                   "longest", "deadliest", "richest", "record"}
 
+# Words that scope a boast to a region instead of to the town. A line that
+# scopes its "only/first" claim this way ("home to Trumbull County's one and
+# only hanging") must be backed by a fact that names the town — otherwise a
+# county or state story is being handed to the town as its own.
+_SCOPE_WORDS = ({"county", "counties", "parish", "state", "province", "region",
+                 "valley", "area", "district", "statewide", "countywide"}
+                | {w for v in _US_STATES.values() for w in v.split() if len(w) >= 4}
+                | {w for v in _CA_PROVINCES.values() for w in v.split() if len(w) >= 4}
+                | {w for v in _COUNTRIES.values() for w in v.split() if len(w) >= 4})
+
 
 def _claims(text: str) -> set:
     """The claim concepts a piece of text makes ("hanging", "record", "only").
@@ -1119,15 +1135,40 @@ def _claims(text: str) -> set:
     return {name for name, rx in _CLAIM_RES if rx.search(text)}
 
 
-def _uniqueness_ok(line_claims: set, town_seeds: list) -> bool:
-    """Every "only/first/largest …" boast must come from the town's own facts.
+def _place_words(place: str, location: str) -> set:
+    """Words that identify the town itself, for attribution checks.
 
-    A county- or state-level "only" (the kind `_region_dig` returns) cannot be
-    borrowed by the town — that is how a prison in Leavittsburg became "the
-    only place in Trumbull County where a hanging party went down".
+    Two-letter state codes are skipped — "OH"/"IN"/"OR" would match ordinary
+    English and make every line look like it names the town.
     """
+    words = set(re.findall(r"[a-z]+", f"{place} {location}".lower()))
+    return {w for w in words if len(w) >= 3} - _GROUNDED_STOP
+
+
+def _uniqueness_ok(line: str, line_claims: set, seed_facts: list,
+                   place_words: set) -> bool:
+    """Every "only / first / largest" boast must be backed by a real source
+    fact - and a boast that hands a region's story to the town must be backed
+    by a fact about the town.
+
+    "Girard, Ohio: home to Trumbull County's one and only hanging" names the
+    town AND scopes the boast to the county, so it needs a fact that makes the
+    same boast and names Girard. A line that keeps the regional framing ("In
+    the area: the only man hanged in Trumbull County ...") claims nothing for
+    the town, so an area fact is enough to back it.
+    """
+    words = set(re.findall(r"[a-z]+", line.lower()))
+    # Only a boast pinned on the town itself is held to the stricter standard.
+    strict = bool(words & _SCOPE_WORDS) and bool(place_words & words)
     for claim in line_claims:
-        if not any(claim in _claims(seed) for seed in town_seeds):
+        for seed in seed_facts:
+            if claim not in _claims(seed):
+                continue
+            if strict and (seed.startswith(_AREA_PREFIX) or not (
+                    place_words & set(re.findall(r"[a-z]+", seed.lower())))):
+                continue
+            break
+        else:
             return False
     return True
 
@@ -1143,9 +1184,11 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
          largest" boast the seeds never make, written in lowercase so it slips
          past the name check ("a hanging party went down", "broke records as
          a drug mule");
-      3. re-attributed boasts — a uniqueness claim about the town that only a
-         county/state-level seed supports. Regional seeds arrive prefixed with
-         `_AREA_PREFIX` and may not be upgraded into a claim about the town.
+      3. re-attributed boasts — a "the only / the first ..." claim pinned on
+         the town and scoped to a region ("home to Trumbull County's one and
+         only hanging") must be backed by a fact that names the town. Facts
+         dug out of the county or state arrive prefixed with `_AREA_PREFIX`
+         and may not be upgraded into a claim about the town.
 
     A dropped line costs nothing: if every line goes, `_llm_facts` returns []
     and the bot posts the plain real facts instead.
@@ -1154,9 +1197,7 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
     years = set(_YEAR.findall(corpus))
     tokens = set(re.findall(r"[a-z]+", corpus))
     corpus_claims = _claims(corpus)
-    # Only the town's own facts can back a boast about the town; regional
-    # (county/state) dig results are prefixed and stay regional.
-    town_seeds = [s for s in seed_facts if not s.startswith(_AREA_PREFIX)]
+    place_words = _place_words(place, location)
 
     def _ok(line: str) -> bool:
         for y in _YEAR.findall(line):
@@ -1173,9 +1214,11 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
         if line_claims - corpus_claims:
             return False
         # 3. a "the only … / the first …" boast must be backed by one of the
-        #    town's own facts, never by a county/state dig result.
+        #    town's own facts, never by a county/state dig result — and a boast
+        #    scoped to a region ("the county's one and only …") must come from
+        #    a fact that names the town itself.
         if (line_claims & _UNIQUE_CLAIMS) and not _uniqueness_ok(
-                line_claims & _UNIQUE_CLAIMS, town_seeds):
+                line, line_claims & _UNIQUE_CLAIMS, seed_facts, place_words):
             return False
         return True
 

@@ -352,6 +352,45 @@ def test_grounded_filter():
     print("[PASS] grounded filter drops invented names/dates, keeps seed-grounded lines")
 
 
+def test_county_hanging_reattribution():
+    """A county-wide hanging story must never become the town's claim to fame.
+
+    The line below reached chat as `!funfact girard, OH`. The only hanging in
+    Trumbull County was Ira West Gardner's 1830s execution in Warren — Girard
+    has nothing to do with it — and the seeds can carry that sentence
+    *without* the regional prefix (any harvest path can surface it), so the
+    filter has to catch the re-attribution itself.
+    """
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    hang = ("Ira West Gardner was the only man hanged in Trumbull County, "
+            "executed for the 1832 murder of his stepdaughter Maria Buel.")
+    seeds = [
+        "It was first settled in 1800 but remained static until the Ohio and "
+        "Erie Canal was completed.",
+        hang,  # unprefixed: region dig wasn't the source this time
+    ]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Girard, Ohio: home to Trumbull County's one and only hanging. "
+            "That's right, they really dropped the axe on this one guy.\n")
+        # "one and only" is scoped to the county, so it needs a fact that
+        # names Girard — and "dropped the axe" is tasteless framing besides.
+        assert funfacts._llm_facts("Girard, Ohio", "girard, OH", seeds, {}) == []
+        # The honest regional telling still passes: it claims nothing for
+        # Girard, so the county-level fact is enough to back it.
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Over in Trumbull County, Ira West Gardner was the only man hanged "
+            "there, executed in 1832 for murdering his stepdaughter.\n")
+        got = funfacts._llm_facts("Girard, Ohio", "girard, OH",
+                                  seeds + [funfacts._AREA_PREFIX + hang], {})
+        assert got and "Trumbull County" in got[0], got
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] county hanging can't be re-attributed to the town")
+
+
 def test_namesake_ranking():
     """"Named after <somebody>" is a real fun fact, not filler — Girard, OH is
     named for the Philadelphia philanthropist Stephen Girard, and that used to
@@ -613,6 +652,7 @@ def main():
     test_tasteless_filter()
     test_grounded_filter()
     test_invented_claim_filter()
+    test_county_hanging_reattribution()
     test_weird_fallback()
     test_merge_curated()
     test_region_dig()

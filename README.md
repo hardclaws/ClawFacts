@@ -264,9 +264,12 @@ channel for those. Hard output filters enforce this:
   actually found, in three parts: no invented **names or dates**; no invented
   **claims** (a crime, vice, disaster, record or "only / first / largest" boast
   that no source fact makes — these are written in lowercase, so a name-and-date
-  check alone cannot see them); and no **borrowed boasts** — facts dug out of
-  the county or state are prefixed `In the area:` and may not be rewritten as
-  "the only place in the county …" about the town.
+  check alone cannot see them); and no **borrowed boasts** — a "the only … /
+  the first …" claim that is pinned on the town *and* scoped to a region ("home
+  to Trumbull County's one and only …") must be backed by a fact that names the
+  town. Facts dug out of the county or state are also prefixed `In the area:`,
+  in chat as well as for the filter. Telling a regional story *as* a regional
+  story is fine; handing it to the town is not.
 
 If a line fails any of these it is dropped, and if every line fails the bot
 posts the plain real facts instead. Spice comes from the curated database and
@@ -275,13 +278,16 @@ the search sources — never from the model's imagination.
 Worked example — `!funfact girard, OH`. Girard's whole Wikipedia article yields
 one interesting sentence (settled 1800, grew after the Ohio and Erie Canal), so
 a low-refusal model asked for "rowdy" facts made up *"the only place in
-Trumbull County where a hanging party went down"* and *"so fast and loose with
-drugs, one local broke records as a mule"*. Neither is true: the only hanging in
-Trumbull County was Ira West Gardner's 1830s execution in Warren for the murder
-of his stepdaughter Maria Buel, and no drug-mule record exists for Girard. Both
-lines are now dropped — no source fact mentions a hanging, drugs, a mule or a
-record — and the bot posts the real facts instead (Girard is named for
-Stephen Girard, the Philadelphia philanthropist).
+Trumbull County where a hanging party went down"*, *"so fast and loose with
+drugs, one local broke records as a mule"* and, later, *"home to Trumbull
+County's one and only hanging … they really dropped the axe on this one guy"*.
+None of it is true: the only hanging in Trumbull County was Ira West Gardner's
+1830s execution in Warren for the murder of his stepdaughter Maria Buel, and no
+drug-mule record exists for Girard. All three are now dropped — no source fact
+mentions a hanging in Girard, drugs, a mule or a record, and a county-wide
+"only" cannot be pinned on the town — and the bot posts the real facts instead
+(Girard is named for Stephen Girard, the Philadelphia philanthropist). Telling
+the Gardner hanging *as* a Trumbull County story is still allowed.
 
 ### Optional Google search (surfaces racier local news Wikipedia skips)
 
