@@ -52,7 +52,9 @@ _STRONG = re.compile(
     r"truck stops?|interstates?|highways?|railroads?|railways?|junctions?|"
     r"crossroads|bridges?|tunnels?|turnpikes?|freeways?|freight|"
     r"mile markers?|rest stops?|route 66|museum|landmark|monument|memorial|"
-    r"president|civil war|battle|national register|artifact|relic)\b",
+    r"president|civil war|battle|national register|artifact|relic|"
+    r"takes its name|takes their name|named for|namesake|eponym|eponymous|"
+    r"philanthropist|billionaire|richest)\b",
     re.IGNORECASE,
 )
 _WEAK = re.compile(
@@ -987,6 +989,21 @@ _EXPLICIT = re.compile(
     re.IGNORECASE,
 )
 
+# Taste backstop: turning a real killing, execution or lynching into
+# entertainment ("a hanging party went down") is never acceptable, even when
+# the underlying fact happens to be true. Matched lines are dropped like
+# explicit ones — and if everything is dropped the bot posts the plain facts.
+# A literal "murder mystery" dinner/party is a real attraction, so it is
+# excluded from the first alternative.
+_TASTELESS = re.compile(
+    r"\b(hang(?:ing|ed)?|lynch(?:ing|ed)?|noose|gallows|execution|murder|"
+    r"massacre|slaughter|suicide|corpse)\b(?:\s+(?!mystery\b)\w+){0,2}\s*"
+    r"\b(party|parties|bash|festival|hoedown|celebration|soiree|rager)\b|"
+    r"\b(party|bash|festival|hoedown|celebration)\b(?:\s+\w+){0,2}\s*"
+    r"\b(hanging|lynching|noose|gallows|murder|massacre)\b",
+    re.IGNORECASE,
+)
+
 # Reasoning models (and OpenRouter's "openrouter/free" auto-router) sometimes
 # return their chain-of-thought as text before the actual facts — "Here's a
 # thinking process:", "1. Analyze the input:", "Final answer:" … These are meta
@@ -1037,12 +1054,109 @@ _GROUNDED_STOP = {
     "fifth",
 }
 
+# Regional (county/state) dig results are marked with this prefix, both so chat
+# readers can tell the fact isn't about the town itself and so the grounding
+# filter knows not to let the LLM re-attribute it to the town.
+_AREA_PREFIX = "In the area: "
+
+# Claim concepts: the substance of a fact. A rewrite may reword freely, but a
+# concept in this table that appears in the LLM's line and nowhere in the seed
+# facts is an invented claim — the lowercase equivalent of "Devil Jack
+# Schramm", which the capitalised-name check above cannot see.
+_CLAIM_CONCEPTS = (
+    ("hanging", r"\bhang(?:s|ing|ed)?\b|\bnoose\w*\b|\bgallows\b"),
+    ("lynching", r"\blynch\w*\b"),
+    ("killing", r"\bmurder\w*\b|\bkill\w*\b|\bslay\w*\b|\bslain\b|\bhomicide\w*\b|"
+                r"\bmanslaughter\b"),
+    ("shooting", r"\bshoot\w*\b|\bshots?\b|\bsniper\w*\b|\bgunfight\w*\b|"
+                 r"\bshootout\w*\b|\bmassacre\w*\b|\bambush\w*\b"),
+    ("robbery", r"\brobber\w*\b|\bheist\w*\b|\bburglar\w*\b|\bholdup\w*\b|"
+                r"\bstickup\w*\b"),
+    ("prison", r"\bprison\w*\b|\bjail\w*\b|\binmate\w*\b|\bpenitentiary\w*\b|"
+               r"\bexecution\w*\b|\belectric chair\b|\bdeath row\b"),
+    ("arson", r"\barson\w*\b|\bburned down\b|\bburnt down\b"),
+    ("vice", r"\bbrothel\w*\b|\bbordello\w*\b|\bprostitut\w*\b|\bred.?light\b|"
+             r"\bspeakeasy\w*\b|\bsaloon\w*\b|\bmoonshin\w*\b|\bbootleg\w*\b"),
+    ("gambling", r"\bgambl\w*\b|\bcasino\w*\b|\bslot machine\w*\b"),
+    ("drugs", r"\bdrugs?\b|\bheroin\b|\bcocaine\b|\bfentanyl\b|\bmeth\w*\b|"
+              r"\bopioid\w*\b|\bnarcotic\w*\b|\boverdose\w*\b"),
+    ("smuggling", r"\bsmuggl\w*\b|\bmules?\b|\btraffick\w*\b"),
+    ("corruption", r"\bcorrupt\w*\b|\bgraft\b|\bbribe\w*\b|\bracketeer\w*\b|"
+                   r"\bmobster\w*\b|\bgangster\w*\b|\boutlaw\w*\b"),
+    ("scandal", r"\bscandal\w*\b|\baffair\w*\b|\bmistress\w*\b"),
+    ("haunting", r"\bhaunt\w*\b|\bghost\w*\b|\bcursed?\b|\bcurses\b|\bcryptid\w*\b|"
+                 r"\bbigfoot\b|\bsasquatch\b|\bufos?\b|\bhoax\w*\b"),
+    ("disaster", r"\btornado\w*\b|\bflood\w*\b|\bhurricane\w*\b|\bexplos\w*\b|"
+                 r"\bcollapsed?\b|\bplague\b|\bepidemic\w*\b"),
+    ("unrest", r"\bstrikes?\b|\bunion\w*\b|\briots?\b"),
+    ("record", r"\brecords?\b|\bguinness\b"),
+    ("only", r"\bonly\b|\bsole\b|\bunique\b|\bone of a kind\b"),
+    ("first", r"\bfirst\b"),
+    ("largest", r"\blargest\b|\bbiggest\b"),
+    ("smallest", r"\bsmallest\b"),
+    ("oldest", r"\boldest\b"),
+    ("tallest", r"\btallest\b"),
+    ("longest", r"\blongest\b"),
+    ("deadliest", r"\bdeadliest\b"),
+    ("richest", r"\brichest\b"),
+)
+_CLAIM_RES = [(name, re.compile(pat, re.IGNORECASE))
+              for name, pat in _CLAIM_CONCEPTS]
+# The subset that makes a uniqueness boast — these also need an attribution
+# check, because a county-wide "only" is routinely rewritten as a town-wide one.
+_UNIQUE_CLAIMS = {"only", "first", "largest", "smallest", "oldest", "tallest",
+                  "longest", "deadliest", "richest", "record"}
+
+
+def _claims(text: str) -> set:
+    """The claim concepts a piece of text makes ("hanging", "record", "only").
+
+    Rewording a seed fact is fine; introducing a new crime, vice, disaster,
+    record or superlative is not. Matching on concepts (not raw words) means
+    "hanged"/"hanging"/"noose" all count as one claim, so a rewrite that says
+    "hanging" is still supported by a seed that says "hanged".
+    """
+    return {name for name, rx in _CLAIM_RES if rx.search(text)}
+
+
+def _uniqueness_ok(line_claims: set, town_seeds: list) -> bool:
+    """Every "only/first/largest …" boast must come from the town's own facts.
+
+    A county- or state-level "only" (the kind `_region_dig` returns) cannot be
+    borrowed by the town — that is how a prison in Leavittsburg became "the
+    only place in Trumbull County where a hanging party went down".
+    """
+    for claim in line_claims:
+        if not any(claim in _claims(seed) for seed in town_seeds):
+            return False
+    return True
+
 
 def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -> list:
-    """Drop LLM lines that invent names/dates not present in the seed facts."""
+    """Drop LLM lines that claim something the seed facts don't support.
+
+    Three checks, in order of how often they fire:
+
+      1. invented names/dates — a capitalised word or year that isn't in the
+         seed facts ("Devil Jack Schramm", "in 1912");
+      2. invented claims — a crime, vice, disaster, record or "only/first/
+         largest" boast the seeds never make, written in lowercase so it slips
+         past the name check ("a hanging party went down", "broke records as
+         a drug mule");
+      3. re-attributed boasts — a uniqueness claim about the town that only a
+         county/state-level seed supports. Regional seeds arrive prefixed with
+         `_AREA_PREFIX` and may not be upgraded into a claim about the town.
+
+    A dropped line costs nothing: if every line goes, `_llm_facts` returns []
+    and the bot posts the plain real facts instead.
+    """
     corpus = " ".join([place, location] + list(seed_facts)).lower()
     years = set(_YEAR.findall(corpus))
     tokens = set(re.findall(r"[a-z]+", corpus))
+    corpus_claims = _claims(corpus)
+    # Only the town's own facts can back a boast about the town; regional
+    # (county/state) dig results are prefixed and stay regional.
+    town_seeds = [s for s in seed_facts if not s.startswith(_AREA_PREFIX)]
 
     def _ok(line: str) -> bool:
         for y in _YEAR.findall(line):
@@ -1054,12 +1168,21 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
                 continue
             if w not in tokens:
                 return False
+        # 2. every claim the line makes must be a claim the seeds make.
+        line_claims = _claims(line)
+        if line_claims - corpus_claims:
+            return False
+        # 3. a "the only … / the first …" boast must be backed by one of the
+        #    town's own facts, never by a county/state dig result.
+        if (line_claims & _UNIQUE_CLAIMS) and not _uniqueness_ok(
+                line_claims & _UNIQUE_CLAIMS, town_seeds):
+            return False
         return True
 
     kept = [ln for ln in lines if _ok(ln)]
     if len(kept) != len(lines):
         print(f"[funfacts] grounded filter dropped {len(lines) - len(kept)} "
-              f"line(s) with invented names/dates", flush=True)
+              f"line(s) with invented or unsupported claims", flush=True)
     return kept
 
 
@@ -1099,10 +1222,11 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         if _META_LINE.match(ln):
             continue
         lines.append(ln)
-    kept = [ln for ln in lines if not _EXPLICIT.search(ln)]
+    kept = [ln for ln in lines if not _EXPLICIT.search(ln)
+            and not _TASTELESS.search(ln)]
     if len(kept) != len(lines):
-        print(f"[funfacts] dropped {len(lines) - len(kept)} explicit LLM line(s) "
-              f"for {place}", flush=True)
+        print(f"[funfacts] dropped {len(lines) - len(kept)} explicit/tasteless "
+              f"LLM line(s) for {place}", flush=True)
     lines = _grounded_filter(kept, place, location, seed_facts)
     if lines:
         print(f"[funfacts] llm wrote {len(lines)} facts for {place}", flush=True)
@@ -1174,8 +1298,9 @@ _REGION_HINTS = ["murder", "crime", "scandal", "legend", "honeymoon", "resort", 
 def _region_dig(location: str, existing: list, limit: int, max_facts: int = 2) -> list:
     """When a town's own article is dry, mine its county / state for spicy or
     weird facts (e.g. the Poconos honeymoon resorts for a tiny Pike County
-    town). Only sentences that actually name the county/state are kept, so the
-    fact stays regionally honest."""
+    town). Only sentences that actually name the county/state are kept, and
+    every result is prefixed with `_AREA_PREFIX`, so a county or state story is
+    never mistaken for — or rewritten as — one about the town itself."""
     geo = _osm_geocode(location)
     if not geo:
         return []
@@ -1184,7 +1309,7 @@ def _region_dig(location: str, existing: list, limit: int, max_facts: int = 2) -
         return []
 
     existing_norm = [_norm(f) for f in existing]
-    found = []
+    found, found_norm = [], []
     for scope in scopes:
         if len(found) >= max_facts or _wiki_blocked():
             break
@@ -1221,9 +1346,13 @@ def _region_dig(location: str, existing: list, limit: int, max_facts: int = 2) -
                     fn = _norm(fact)
                     if any(_overlap(fn, e) > 0.7 for e in existing_norm):
                         continue
-                    if any(_overlap(fn, f) > 0.7 for f in found):
+                    if any(_overlap(fn, f) > 0.7 for f in found_norm):
                         continue
-                    found.append(fact)
+                    # Labelled as regional: in chat it reads honestly, and the
+                    # grounding filter won't let the LLM re-attribute a county
+                    # or state story to the town itself.
+                    found.append(_AREA_PREFIX + fact)
+                    found_norm.append(fn)
                     if len(found) >= max_facts:
                         break
     return found

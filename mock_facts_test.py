@@ -243,7 +243,8 @@ def test_explicit_filter():
             "1. The saloon brawls here were legendary.\n"
             "2. A porn studio opened in town in 1972.\n"
             "3. The first public execution happened in 1888.\n")
-        seed = ["The saloon brawls were legendary in 1888."]
+        seed = ["The saloon brawls were legendary in 1888.",
+                "The town's first public execution drew a crowd in 1888."]
         got = funfacts._llm_facts("X", "X", seed, {})
         assert got == ["The saloon brawls here were legendary.",
                        "The first public execution happened in 1888."], got
@@ -253,6 +254,74 @@ def test_explicit_filter():
     finally:
         llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
     print("[PASS] explicit-content filter drops sexual lines, keeps the rest")
+
+
+def test_tasteless_filter():
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    seed = ["A public hanging was carried out in the town square in 1888.",
+            "The inn runs a murder mystery dinner every month."]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "1. The town threw a hanging party in 1888.\n"
+            "2. A public hanging went down in the town square in 1888.\n"
+            "3. The inn's murder mystery dinner is a monthly thing.\n")
+        got = funfacts._llm_facts("X", "X", seed, {})
+        # "hanging party" is dropped as tasteless even though it is grounded;
+        # the plain telling of the same fact and the real murder-mystery
+        # dinner survive.
+        assert "hanging party" not in " ".join(got), got
+        assert any("1888" in f for f in got), got
+        assert any("murder mystery dinner" in f for f in got), got
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] taste filter drops 'hanging party' framing, keeps the fact")
+
+
+def test_invented_claim_filter():
+    """The exact two lines the bot posted for `!funfact girard, OH`.
+
+    Girard's whole Wikipedia article yields one seed fact (the canal), plus a
+    regional dig hit on Trumbull County — nowhere near a hanging or a drug
+    mule. Neither line may reach chat.
+    """
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    seed = [
+        "It was first settled in 1800 but remained static until the Ohio and "
+        "Erie Canal was completed.",
+        funfacts._AREA_PREFIX +
+        "The Trumbull Correctional Institution is a medium-security prison for "
+        "men located in Leavittsburg, Trumbull County, Ohio and operated by the "
+        "Ohio Department of Rehabilitation and Correction.",
+    ]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Girard's no choir boy - it's the only place in Trumbull County "
+            "where a hanging party went down.\n"
+            "This town's so fast and loose with drugs, one local broke records "
+            "as a mule.\n"
+            "Girard's the only town in Trumbull County with a prison.\n"
+            "Girard was first settled in 1800 and stayed quiet until the Ohio "
+            "and Erie Canal was finished.\n")
+        got = funfacts._llm_facts("Girard, Ohio", "girard, OH", seed, {})
+        # The hanging boast ("hanging" is nowhere in the seeds), the drug-mule
+        # boast ("drugs"/"mule"/"records" are nowhere in the seeds) and the
+        # county-prison fact re-attributed to the town must all be dropped.
+        assert got == ["Girard was first settled in 1800 and stayed quiet until "
+                       "the Ohio and Erie Canal was finished."], got
+        # Every line invented -> empty, so the bot posts the plain real facts.
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Girard's no choir boy - it's the only place in Trumbull County "
+            "where a hanging party went down.\n"
+            "This town's so fast and loose with drugs, one local broke records "
+            "as a mule.\n")
+        assert funfacts._llm_facts("Girard, Ohio", "girard, OH", seed, {}) == []
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] claim grounding drops the invented Girard hanging/mule facts")
 
 
 def test_grounded_filter():
@@ -281,6 +350,28 @@ def test_grounded_filter():
     finally:
         llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
     print("[PASS] grounded filter drops invented names/dates, keeps seed-grounded lines")
+
+
+def test_namesake_ranking():
+    """"Named after <somebody>" is a real fun fact, not filler — Girard, OH is
+    named for the Philadelphia philanthropist Stephen Girard, and that used to
+    be scored below the census boilerplate and never posted."""
+    sents = [
+        "Girard is a city in southern Trumbull County, Ohio, United States, "
+        "along the Mahoning River.",
+        "The population was 9,603 at the 2020 census.",
+        "It is believed that Girard takes its name from Stephen Girard, a "
+        "French American philanthropist who was the founder of the Girard Bank "
+        "and Girard College in Philadelphia.",
+        "It was first settled in 1800 but remained static until the Ohio and "
+        "Erie Canal was completed.",
+    ]
+    facts = funfacts._ranked_facts(funfacts._filter_definitions(sents),
+                                   limit=200, count=8)
+    assert any("Stephen Girard" in f for f in facts), facts
+    assert any("1800" in f for f in facts), facts
+    assert not any("population was" in f for f in facts), facts
+    print(f"[PASS] namesake facts rank -> {len(facts)} facts, Stephen Girard kept")
 
 
 def test_weird_fallback():
@@ -335,6 +426,9 @@ def test_region_dig():
         funfacts._wiki_search_extracts = fake
         r = funfacts._region_dig("Lords Valley, PA", [], 200)
         assert any("honeymoon capital" in f for f in r), r
+        # Regional results are labelled so they are never read — or rewritten —
+        # as facts about the town itself.
+        assert all(f.startswith(funfacts._AREA_PREFIX) for f in r), r
         # A sentence that doesn't name the county/state must be ignored.
         funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: (
             [{"title": "Somewhere, Ohio", "extract":
@@ -514,8 +608,11 @@ def main():
     test_spicy_dig()
     test_bio_filter()
     test_definition_filter()
+    test_namesake_ranking()
     test_explicit_filter()
+    test_tasteless_filter()
     test_grounded_filter()
+    test_invented_claim_filter()
     test_weird_fallback()
     test_merge_curated()
     test_region_dig()

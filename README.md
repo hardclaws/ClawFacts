@@ -254,11 +254,34 @@ tacks on fake joke comments.
 sexual** — R-rated *topics* (crime, vice, gambling, scandal, dark history) told
 with barstool wit and salty language, grounded in real history. It is *not*
 explicit sexual content, porn/XXX, slurs, or hate speech — Twitch will ban a
-channel for those. Two hard output filters enforce this: any LLM line with
-explicit sexual words is dropped, and any LLM line that invents a name or date
-not in the real facts is dropped (a low-refusal model will otherwise make up a
-"Devil Jack Schramm"-style story for boring towns). Spice comes from the
-curated database and the search sources — never from the model's imagination.
+channel for those. Hard output filters enforce this:
+
+- **explicit** — any LLM line with explicit sexual words is dropped.
+- **taste** — a real killing, execution or lynching is never framed as a party
+  or a good time ("a hanging party went down" is dropped even when the
+  underlying fact is true). A literal murder-*mystery* dinner is fine.
+- **grounding** — every LLM line must be traceable to the facts that were
+  actually found, in three parts: no invented **names or dates**; no invented
+  **claims** (a crime, vice, disaster, record or "only / first / largest" boast
+  that no source fact makes — these are written in lowercase, so a name-and-date
+  check alone cannot see them); and no **borrowed boasts** — facts dug out of
+  the county or state are prefixed `In the area:` and may not be rewritten as
+  "the only place in the county …" about the town.
+
+If a line fails any of these it is dropped, and if every line fails the bot
+posts the plain real facts instead. Spice comes from the curated database and
+the search sources — never from the model's imagination.
+
+Worked example — `!funfact girard, OH`. Girard's whole Wikipedia article yields
+one interesting sentence (settled 1800, grew after the Ohio and Erie Canal), so
+a low-refusal model asked for "rowdy" facts made up *"the only place in
+Trumbull County where a hanging party went down"* and *"so fast and loose with
+drugs, one local broke records as a mule"*. Neither is true: the only hanging in
+Trumbull County was Ira West Gardner's 1830s execution in Warren for the murder
+of his stepdaughter Maria Buel, and no drug-mule record exists for Girard. Both
+lines are now dropped — no source fact mentions a hanging, drugs, a mule or a
+record — and the bot posts the real facts instead (Girard is named for
+Stephen Girard, the Philadelphia philanthropist).
 
 ### Optional Google search (surfaces racier local news Wikipedia skips)
 
