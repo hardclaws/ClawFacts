@@ -55,6 +55,11 @@ def main() -> int:
         ("full state names work ('Missouri' behaves like 'MO')",
          not funfacts._text_names_other_region(
              "a village in Crawford County, Missouri, United States.", "missouri")),
+        ("comma-less regions ('Cuba Missouri' = 'Cuba, Missouri')",
+         funfacts._query_region("Cuba Missouri") == "missouri"
+         and funfacts._query_core("Kansas City") == "kansas city"),
+        ("significance padding dropped ('holds the crown', 'the star')",
+         "the\\s+star" in funfacts._REPUTATION.pattern),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

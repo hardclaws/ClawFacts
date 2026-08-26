@@ -1132,6 +1132,47 @@ def test_full_state_name_region():
     assert res["place"] == "Indian Lake, Missouri", res["place"]
     assert "Jan & Dean" not in " ".join(res["facts"])
 
+
+def test_comma_less_region():
+    """Viewers type 'Cuba Missouri', not 'Cuba, Missouri'. Losing the region
+    made the island nation outrank the town (120 vs 118) and switched off every
+    region guard, so Wikipedia returned nothing usable."""
+    assert funfacts._query_region("Cuba Missouri") == "missouri"
+    assert funfacts._query_core("Cuba Missouri") == "cuba"
+    assert funfacts._query_region("Cuba MO") == "mo"
+    assert funfacts._query_core("girard oh") == "girard"
+    assert funfacts._query_region("Raleigh North Carolina") == "north carolina"
+    assert funfacts._query_core("Cuba City Wisconsin") == "cuba city"
+    # Place names that merely end in a state word must not be split.
+    for q in ("Kansas City", "New York", "Los Angeles", "Oklahoma City"):
+        assert funfacts._query_region(q) == "", q
+        assert funfacts._query_core(q) == q.lower(), q
+    # And the region bonus must put the town above the country again.
+    assert funfacts._title_relevance("Cuba, Missouri", "cuba", "missouri") > \
+        funfacts._title_relevance("Cuba", "cuba", "missouri")
+
+
+def test_padding_claims_dropped():
+    """'Holds the crown', 'bustling heart of the region', 'the star' and
+    'proud to be' are significance the sources never claimed."""
+    seeds = ["Cuba is the largest city in Crawford County.",
+             "Interstate 44 now runs through Cuba.",
+             "It was named after the island of Cuba."]
+    padded = [
+        "Cuba, Missouri holds the crown as the largest city in Crawford County, "
+        "making it the bustling heart of the region.",
+        "You'll find Cuba along Interstate 44 these days, but Route 66's the star.",
+        "Crawford County's largest city is proud to be Cuba, Missouri.",
+    ]
+    for ln in padded:
+        assert not funfacts._grounded_filter(
+            [ln], "Cuba, Missouri", "Cuba, Missouri", seeds), ln
+    plain = ["Cuba, Missouri got its name from the island of Cuba.",
+             "You'll find Cuba along Interstate 44 these days."]
+    for ln in plain:
+        assert funfacts._grounded_filter(
+            [ln], "Cuba, Missouri", "Cuba, Missouri", seeds), ln
+
 def main():
     test_trim()
     test_rotation()
@@ -1150,6 +1191,7 @@ def main():
     test_definition_filter()
     test_region_word_boundaries()
     test_full_state_name_region()
+    test_comma_less_region()
     test_namesake_ranking()
     test_namesake_person_stubs()
     test_attraction_ranking()
@@ -1158,6 +1200,7 @@ def main():
     test_grounded_filter()
     test_residence_claim_needs_a_seed()
     test_reputation_claims_need_a_source()
+    test_padding_claims_dropped()
     test_invented_claim_filter()
     test_county_hanging_reattribution()
     test_search_seeds_and_query()

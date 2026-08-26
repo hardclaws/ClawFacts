@@ -504,19 +504,58 @@ _CA_PROVINCE_BY_NAME = {v: k for k, v in _CA_PROVINCES.items()}
 
 
 
+# Words that are part of a place name, not a place on their own — so
+# "Kansas City" is never split into "Kansas" + "City", and "Cuba City
+# Wisconsin" keeps "Cuba City" as the town.
+_GENERIC_PLACE_WORDS = {
+    "city", "town", "township", "village", "borough", "county", "lake",
+    "lakes", "springs", "falls", "beach", "heights", "junction", "station",
+    "park", "rapids", "hill", "hills", "creek", "river", "point", "fork",
+}
+
+
+def _split_trailing_region(query: str):
+    """('Cuba Missouri' -> ('Cuba', 'missouri')); ('', '') if not applicable.
+
+    Viewers type the state without a comma. Losing the region is worse than a
+    cosmetic problem: with no region, 'Cuba, Missouri' scores 118 and the
+    island nation scores 120, so the country outranks the town, and every
+    region guard in this module switches itself off.
+    """
+    words = query.strip().split()
+    if len(words) < 2:
+        return "", ""
+    known = set(_US_STATES) | set(_US_STATE_BY_NAME) | set(_CA_PROVINCES) \
+        | set(_CA_PROVINCE_BY_NAME)
+    for n in (2, 1):                      # "north carolina" before "carolina"
+        if len(words) <= n:
+            continue
+        cand = " ".join(words[-n:]).lower().strip(".")
+        if cand not in known:
+            continue
+        rest = " ".join(words[:-n]).strip(" ,;")
+        if rest and rest.lower().strip(".") not in _GENERIC_PLACE_WORDS:
+            return rest, cand
+    return "", ""
+
+
 def _query_core(query: str) -> str:
-    """The place name with the region (after a comma) removed: 'Mount Cobb'."""
+    """The place name with the region removed: 'Mount Cobb'."""
+    if not re.search(r"[,;|]", query):
+        rest, region = _split_trailing_region(query)
+        if region:
+            query = rest
     core = re.split(r"[,;|]", query, maxsplit=1)[0]
     core = re.sub(r"[^a-z0-9\s]", " ", core.lower())
     return " ".join(core.split())
 
 
 def _query_region(query: str) -> str:
-    """The region part after the first comma, if any: 'PA', 'Iowa', ..."""
+    """The region, with or without a comma: 'PA', 'Iowa', 'missouri'."""
     parts = re.split(r"[,;|]", query, maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    return re.sub(r"[^a-z0-9\s]", " ", parts[1].lower()).strip()
+    if len(parts) >= 2:
+        return re.sub(r"[^a-z0-9\s]", " ", parts[1].lower()).strip()
+    return _split_trailing_region(query)[1]
 
 
 def _title_tokens(title: str) -> str:
@@ -1225,6 +1264,8 @@ _REPUTATION = re.compile(
     r"\brenowned\b|\bcelebrated\b|\bnotorious(?:ly)?\b|\bhidden\s+gem\b|"
     r"\bmust[- ]see\b|\bsleepy\b|\bquaint\b|\bcharming\b|\bidyllic\b|"
     r"\bpicturesque\b|\btimeless\b|\bbeloved\b|\bstoried\b|"
+    r"\bthe\s+star\b|\bproud\b|\bcrown\b|\bbustling\b|\bheart\s+of\s+the\b|"
+    r"\bgem\s+of\b|\bshowpiece\b|\bboasts\b|"
     r"\bsurf\s+rock\b|\brock\s+(?:legends?|icons?)\b|\bpunk\s+rock\b|"
     r"\bhip\s+hop\b|\bcountry\s+music\b|\bheavy\s+metal\b",
     re.IGNORECASE,
