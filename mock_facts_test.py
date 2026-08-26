@@ -391,6 +391,100 @@ def test_county_hanging_reattribution():
     print("[PASS] county hanging can't be re-attributed to the town")
 
 
+def test_search_seeds_and_query():
+    """The debug log for `!funfact girard, OH`: the bot asked the web for
+    "history crime scandal", got a truncated page title, a crime-stats SEO
+    line and one police story, then let the model pad that into invented dark
+    history. The query must ask for interesting, and the noise must never be
+    treated as ground truth.
+    """
+    import json
+    import urllib.request
+
+    # 1. spicy mode must not ask the web for crime.
+    seen = {}
+    orig_get = funfacts._http_get_json
+
+    def fake_get(url, params, timeout=8.0):
+        seen["q"] = params.get("q")
+        return {"items": []}
+
+    funfacts._http_get_json = fake_get
+    try:
+        funfacts._google_search("girard, OH", True, 200,
+                                {"google_api_key": "k", "google_cx": "cx"})
+        assert "crime" not in seen["q"], seen
+        assert seen["q"] == "girard, OH history facts famous landmark record", seen
+    finally:
+        funfacts._http_get_json = orig_get
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"organic": []}).encode()
+
+    def fake_open(req, timeout=10):
+        captured["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    orig_open = urllib.request.urlopen
+    urllib.request.urlopen = fake_open
+    try:
+        funfacts._serper_search("girard, OH", True, 200, {"serper_api_key": "k"})
+        assert "crime" not in captured["body"]["q"], captured
+        assert captured["body"]["q"] == ("girard, OH history facts famous "
+                                         "landmark record"), captured
+    finally:
+        urllib.request.urlopen = orig_open
+
+    # 2. search noise is never ranked as a fact.
+    noise = [
+        "The Only Man Ever Hanged in Trumbull County: A True ...",
+        "Explore crime rates for Girard, OH including murder, assault, and "
+        "property crime statistics.",
+        "Past Times Arcade in Girard holds the Guinness World Record for the "
+        "largest free-play pinball and arcade collection, over 600 machines.",
+    ]
+    assert funfacts._is_junk_seed(noise[0]), noise[0]
+    assert funfacts._is_junk_seed(noise[1]), noise[1]
+    assert not funfacts._is_junk_seed(noise[2]), noise[2]
+    facts = funfacts._ranked_facts(noise, spice=True, limit=200, count=6)
+    assert facts == [noise[2]], facts
+    print("[PASS] search asks for interesting, and titles/SEO noise can't be facts")
+
+
+def test_short_year_grounding():
+    """The line the bot actually posted from that log: the seeds said "Jan. 4"
+    with no year at all, and the model supplied "back in '04"."""
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    seeds = ["Kristen V. Schmidt, of Girard, Ohio, charged with murder",
+             "Kristen V. Schmidt, 30, was originally charged with felonious "
+             "assault after a Jan. 4 shooting on Dearborn Street."]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "The last thing Kristen V. Schmidt's boyfriend expected? A bullet "
+            "from his own gal on Dearborn Street back in '04. True story.\n")
+        assert funfacts._llm_facts("girard, OH", "girard, OH", seeds, {}) == []
+        # The same line without the invented year survives.
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Kristen V. Schmidt of Girard was charged with murder after a "
+            "shooting on Dearborn Street.\n")
+        got = funfacts._llm_facts("girard, OH", "girard, OH", seeds, {})
+        assert got and "Dearborn Street" in got[0], got
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] invented '04-style years are dropped, undated lines survive")
+
+
 def test_namesake_ranking():
     """"Named after <somebody>" is a real fun fact, not filler — Girard, OH is
     named for the Philadelphia philanthropist Stephen Girard, and that used to
@@ -653,6 +747,8 @@ def main():
     test_grounded_filter()
     test_invented_claim_filter()
     test_county_hanging_reattribution()
+    test_search_seeds_and_query()
+    test_short_year_grounding()
     test_weird_fallback()
     test_merge_curated()
     test_region_dig()

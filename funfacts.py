@@ -125,6 +125,30 @@ _FILLER = re.compile(
 )
 
 
+# Search snippets and page titles are not facts. These two kinds were reaching
+# the LLM as "ground truth": truncated page titles ("The Only Man Ever Hanged
+# in Trumbull County: A True ...") and SEO boilerplate from crime-stats and
+# real-estate pages ("Explore crime rates for Girard, OH including murder,
+# assault, and property crime statistics."). A model asked to be witty about
+# that will invent the rest.
+_JUNK_SEED = re.compile(
+    r"(\.\.\.|\u2026)\s*$|"
+    r"\b(explore|view|browse|check out|see|compare|read|search|find)\b[^.]{0,40}"
+    r"\b(crime rates?|crime grade|statistics|stats|data|reviews?|photos?)\b|"
+    r"\bcrime (rates?|grade|statistics|stats)\b|"
+    r"\bis it safe\b|\bsafest (places|cities|towns)\b|"
+    r"\bbest places to live\b|\bcost of living\b|"
+    r"\bhomes for sale\b|\breal estate\b|\bapartments?\b|\bzillow\b|"
+    r"\brentals?\b|\bweather (forecast|today)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_seed(sentence: str) -> bool:
+    """True for search-result noise that must never be treated as a fact."""
+    return bool(_JUNK_SEED.search(sentence))
+
+
 def _is_filler(sentence: str) -> bool:
     """True for census/location boilerplate that is never a fun fact.
 
@@ -360,7 +384,7 @@ def _ranked_facts(sentences: list, spice: bool = False,
                     key=lambda p: (-p[1], len(p[0])))
     out, seen_norm = [], []
     for s, sc in ranked:
-        if _is_filler(s):
+        if _is_filler(s) or _is_junk_seed(s):
             continue
         if sc < 2 and out:
             break
@@ -680,9 +704,11 @@ def _google_search(query: str, spice: bool, limit: int, options: dict):
     if not key or not cx:
         return None
 
-    q = query
-    if spice:
-        q = f"{query} history crime scandal"  # nudge toward the racier results
+    # Ask the web what is *interesting* about the place. Spicy mode used to
+    # append "history crime scandal", which filled the seed list with
+    # crime-stats boilerplate and one recent police story — and the model then
+    # padded that thin, dark grist into invented dark history.
+    q = query if not spice else f"{query} history facts famous landmark record"
 
     data = _http_get_json(
         GOOGLE_API,
@@ -721,7 +747,8 @@ def _serper_search(query: str, spice: bool, limit: int, options: dict):
     if not key:
         return None
 
-    q = f"{query} history crime scandal" if spice else query
+    # Same as _google_search: ask for interesting, not for crime.
+    q = query if not spice else f"{query} history facts famous landmark record"
     body = json.dumps({"q": q, "num": 8}).encode("utf-8")
     req = urllib.request.Request(
         SERPER_API,
@@ -1028,6 +1055,9 @@ _META_LINE = re.compile(
 # mentions a year or a capitalized name not already present in the seed facts,
 # so the chat never gets a fabricated "Devil Jack Schramm"-style fact.
 _YEAR = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})s?\b")
+# "'04" style year references — the model's favourite way to smuggle in a date
+# that no source fact contains (the seeds said "Jan. 4", not 2004).
+_SHORT_YEAR = re.compile(r"['\u2019](\d{2})\b")
 _CAP_WORD = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _GROUNDED_STOP = {
     # determiners / pronouns
@@ -1202,6 +1232,9 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
     def _ok(line: str) -> bool:
         for y in _YEAR.findall(line):
             if y not in years:
+                return False
+        for yy in _SHORT_YEAR.findall(line):
+            if not any(y.endswith(yy) for y in years):
                 return False
         for cap in _CAP_WORD.findall(line):
             w = cap.lower()

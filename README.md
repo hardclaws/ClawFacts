@@ -224,13 +224,26 @@ fun facts. Three layers, in order:
    town still gets its region's claim to fame (e.g. the Poconos honeymoon
    resorts for a Pike County hamlet).
 4. **LLM writer (recommended)** — the real facts found above are handed to a
-   large language model with one prompt: *"Write up to 10 fun facts that are
-   crime, funny, bizarre, or the place's most popular claims to fame, each ≤
-   200 chars."* The model rewrites **only the supplied facts** (never invents
-   its own), returns up to 10 one-liners, and the bot serves the top one first,
-   then a random one on repeat calls. **This is what makes spicy mode actually
-   spicy** — but see the note below: for real adult output you want a **local
-   Ollama model**, because hosted models are filtered.
+   large language model with one prompt: *"Write up to 10 **interesting** true
+   facts about this place: what it is known for, its history, its oddities, and
+   any rowdy stories the supplied facts actually contain, each ≤ 200 chars."*
+   The model rewrites **only the supplied facts** (never invents its own),
+   returns up to 10 one-liners, and the bot serves the top one first, then a
+   random one on repeat calls. **This is what makes spicy mode actually spicy**
+   — but see the note below: for real adult output you want a **local Ollama
+   model**, because hosted models are filtered.
+
+**Ask for interesting, not for crime.** The web sources used to append
+`"history crime scandal"` to every spicy query. For Girard, OH that returned a
+truncated page title (*"The Only Man Ever Hanged in Trumbull County: A True
+…"*), an SEO line from a crime-stats site (*"Explore crime rates for Girard, OH
+including murder, assault, and property crime statistics."*) and one recent
+police story — thin, dark grist that the model then padded into invented dark
+history. Spicy mode now searches `<place> history facts famous landmark
+record`, and two kinds of search noise are never treated as facts: truncated
+titles/snippets (anything ending in `...`) and SEO boilerplate (crime-rate,
+"cost of living", real-estate, "is it safe" pages). Tone still comes from the
+model; the *subject matter* has to be real.
 
 **Fallback ladder** — for every lookup the bot tries, in order: ① **spicy**
 facts (brothels, crime, gambling, scandal…), then ② **weird/bizarre** facts
