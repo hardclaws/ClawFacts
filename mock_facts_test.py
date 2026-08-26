@@ -940,11 +940,14 @@ _INDIAN_LAKE_ITEMS = [
         "the bulkhead built in the 1850s by Irish laborers, is the beginning of "
         "the Great Miami River. At 5,104 acres (2,066 ha), Indian Lake is the "
         "second largest inland lake in Ohio.")},
-    {"title": "Lakeview, Ohio", "extract": (
-        "Lakeview is a village in Logan County, Ohio, United States. The first "
-        "European settlement in the area was founded in 1786 by Moravian "
-        "missionaries. Jan &amp; Dean included it on their 1985 album Silver "
-        "Summer.")},
+    # Stand-in for whichever northeast-Ohio article the live search returned
+    # for these two sentences (the 1786 Moravian settlement is Pilgerruh in the
+    # Cuyahoga Valley, near Cleveland — nps.gov). The exact title is not known;
+    # the sentences are verbatim from the 09:19 debug log.
+    {"title": "Cuyahoga Valley, Ohio", "extract": (
+        "The valley is in northeast Ohio. The first European settlement in the "
+        "area was founded in 1786 by Moravian missionaries. Jan &amp; Dean "
+        "included it on their 1985 album Silver Summer.")},
     {"title": "Avon Lake, Ohio", "extract": (
         "Avon Lake is a city in Lorain County, Ohio, United States. Avon Lake "
         "was first settled in the 17th century and was, along with Avon, Bay "
@@ -1011,8 +1014,8 @@ def test_curated_indian_lake_facts():
     assert res, "no curated entry for Indian Lake, OH"
     text = " ".join(res["facts"])
     for needle in ("Lewistown Reservoir", "Irish laborers", "Miami and Erie Canal",
-                   "5,104 acres", "Sandy Beach", "1924", "Minnewawa",
-                   "Great Miami River"):
+                   "5,104 acres", "Sandy Beach", "1924", "Minnewawa", "1931",
+                   "1961", "1975", "Great Miami River"):
         assert needle in text, f"missing from curated facts: {needle}"
     assert all(len(f) <= 200 for f in res["facts"])
 
