@@ -37,6 +37,15 @@ def main() -> int:
          hasattr(funfacts, "_llm_only_facts")),
         ("curated Girard, Ohio facts (arcade, Barnhisel, 1993 title)",
          bool(funfacts._spicy_db("girard, OH", 200))),
+        ("unrelated articles can't lend facts ('county seat is Painesville')",
+         "require_core" in open(funfacts.__file__, encoding="utf-8").read()),
+        ("HTML entities unescaped ('Jan &amp; Dean' -> 'Jan & Dean')",
+         funfacts._sentences("Jan &amp; Dean played there.") and
+         "&amp;" not in funfacts._sentences("Jan &amp; Dean played there.")[0]),
+        ("duplicate LLM lines collapsed",
+         "deduped" in open(funfacts.__file__, encoding="utf-8").read()),
+        ("curated Indian Lake, Ohio facts (Sandy Beach, Lewistown Reservoir)",
+         bool(funfacts._spicy_db("Indian Lake, OH", 200))),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

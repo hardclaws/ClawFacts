@@ -932,12 +932,97 @@ def test_llm_preamble_dropped():
     assert "real deal" not in joined, "preamble reached the pool"
     assert any("1800" in f for f in out)
 
+
+_INDIAN_LAKE_ITEMS = [
+    {"title": "Indian Lake (Ohio)", "extract": (
+        "Indian Lake (formerly Lewistown Reservoir) is a reservoir in Logan "
+        "County, western Ohio, in the United States. The outlet of the lake, at "
+        "the bulkhead built in the 1850s by Irish laborers, is the beginning of "
+        "the Great Miami River. At 5,104 acres (2,066 ha), Indian Lake is the "
+        "second largest inland lake in Ohio.")},
+    {"title": "Lakeview, Ohio", "extract": (
+        "Lakeview is a village in Logan County, Ohio, United States. The first "
+        "European settlement in the area was founded in 1786 by Moravian "
+        "missionaries. Jan &amp; Dean included it on their 1985 album Silver "
+        "Summer.")},
+    {"title": "Avon Lake, Ohio", "extract": (
+        "Avon Lake is a city in Lorain County, Ohio, United States. Avon Lake "
+        "was first settled in the 17th century and was, along with Avon, Bay "
+        "Village, and Westlake, inhabited by the Erie.")},
+    {"title": "Lake County, Ohio", "extract": (
+        "Lake County is a county in the U.S. state of Ohio. Its county seat is "
+        "Painesville, and its largest city is Mentor.")},
+]
+
+
+def test_wrong_place_harvest():
+    """The 09:19 lookup posted 'Its county seat is Painesville' and an Avon Lake
+    sentence for Indian Lake, Ohio. _title_relevance scores any Ohio article
+    containing the word 'lake' at 128 (20 for 'lake' + 100 for 'Ohio' + 8 for
+    the comma), so those titles enter the harvest — and before the fix every
+    sentence from them was treated as a fact about Indian Lake."""
+    assert funfacts._title_relevance("Avon Lake, Ohio", "indian lake", "oh") >= 70
+    assert funfacts._title_relevance("Lake County, Ohio", "indian lake", "oh") >= 70
+
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: [
+        dict(it) for it in _INDIAN_LAKE_ITEMS]
+    try:
+        res = funfacts._wikipedia("indian lake, oh", spice=True, limit=200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+    assert res, "no facts at all"
+    joined = " ".join(res["facts"])
+    for wrong in ("Painesville", "Mentor", "Avon", "Erie", "Moravian",
+                  "Silver Summer", "1786"):
+        assert wrong not in joined, f"another place's fact leaked: {wrong}"
+    assert "5,104 acres" in joined or "Great Miami River" in joined, \
+        "Indian Lake's own facts were lost"
+
+
+def test_html_entities_unescaped():
+    out = funfacts._sentences("Jan &amp; Dean included it on their 1985 album.")
+    assert out and "&amp;" not in out[0], out
+
+
+def test_llm_duplicate_lines_deduped():
+    """The 09:19 reply stated the 1786 settlement twice in different words."""
+    reply = ("- Moravian missionaries were the first Europeans to settle the "
+             "area way back in 1786.\n"
+             "- The first European settlement in the region was founded by "
+             "Moravian missionaries in 1786.")
+    import llm
+    orig = (llm.is_configured, llm.rewrite_fact)
+    llm.is_configured = lambda opts=None: True
+    llm.rewrite_fact = lambda *a, **k: reply
+    try:
+        out = funfacts._llm_facts(
+            "Indian Lake (Ohio)", "Indian Lake, OH",
+            ["The first European settlement in the area was founded in 1786 by "
+             "Moravian missionaries."],
+            {"spice": "spicy", "llm_api_key": "x"})
+    finally:
+        llm.is_configured, llm.rewrite_fact = orig
+    assert len(out) == 1, f"duplicate survived: {out}"
+
+
+def test_curated_indian_lake_facts():
+    res = funfacts._spicy_db("Indian Lake, OH", 200)
+    assert res, "no curated entry for Indian Lake, OH"
+    text = " ".join(res["facts"])
+    for needle in ("Lewistown Reservoir", "Irish laborers", "Miami and Erie Canal",
+                   "5,104 acres", "Sandy Beach", "1924", "Minnewawa",
+                   "Great Miami River"):
+        assert needle in text, f"missing from curated facts: {needle}"
+    assert all(len(f) <= 200 for f in res["facts"])
+
 def main():
     test_trim()
     test_rotation()
     test_busy_unavailable()
     test_spicy_db()
     test_curated_girard_facts()
+    test_curated_indian_lake_facts()
     test_ranked_dedupe()
     test_ranked_filter()
     test_parse_geocode()
@@ -966,8 +1051,11 @@ def main():
     test_filler_filter()
     test_meta_line_filter()
     test_llm_preamble_dropped()
+    test_llm_duplicate_lines_deduped()
     test_serper_source()
     test_wiki_multi_title()
+    test_wrong_place_harvest()
+    test_html_entities_unescaped()
     test_wiki_cooldown()
     print("\nALL PASSED ✔")
     return 0

@@ -21,6 +21,7 @@ place rotate through them, so you don't get the same answer twice in a row.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import random
@@ -330,6 +331,9 @@ def _sentence_split(paragraph: str) -> list:
 
 def _sentences(text: str) -> list:
     """Split raw extract text into clean, readable sentences."""
+    # Search APIs hand back HTML entities ("Jan &amp; Dean"); the chat should
+    # never see them.
+    text = html.unescape(text or "")
     text = _CITE.sub("", text)
     text = _TEMPLATE.sub(" ", text)
     text = _TAG.sub(" ", text)
@@ -724,7 +728,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     extracts = {t: e for _, t, e in items}
     pool, pool_norm = [], []
 
-    def harvest(titles):
+    def harvest(titles, require_core=False):
         for title in titles:
             extract = extracts.get(title, "")
             if not extract or _is_disambiguation(extract):
@@ -736,6 +740,13 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             facts = _ranked_facts(_filter_definitions(_sentences(extract)),
                                   spice=spice, limit=limit, count=8)
             for f in facts:
+                # Sentences from an article that merely shares a word with the
+                # place ("Avon Lake, Ohio" / "Lake County, Ohio" both score 128
+                # for a query about Indian Lake, Ohio) are only usable if they
+                # actually name the place. Without this the 09:19 lookup posted
+                # "Its county seat is Painesville" — Lake County, 100 miles away.
+                if require_core and core and core not in f.lower():
+                    continue
                 fn = " ".join(re.sub(r"[^a-z0-9 ]", "", f.lower()).split())
                 if any(_overlap(fn, pn) > 0.7 for pn in pool_norm):
                     continue
@@ -750,7 +761,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     if len(pool) < 3:
         harvest(same_name_titles[:3])
     if len(pool) < 3:
-        harvest(other_titles[:3])
+        harvest(other_titles[:3], require_core=True)
 
     if not pool:
         return None
@@ -1437,6 +1448,16 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         print(f"[funfacts] dropped {len(lines) - len(kept)} explicit/tasteless "
               f"LLM line(s) for {place}", flush=True)
     lines = _grounded_filter(kept, place, location, seed_facts)
+    # The model often restates the same fact twice in other words (the 09:19
+    # reply said the 1786 Moravian settlement twice back to back).
+    deduped, seen = [], []
+    for ln in lines:
+        ln_norm = " ".join(re.sub(r"[^a-z0-9 ]", "", ln.lower()).split())
+        if any(_overlap(ln_norm, pn) > 0.7 for pn in seen):
+            continue
+        seen.append(ln_norm)
+        deduped.append(ln)
+    lines = deduped
     if lines:
         print(f"[funfacts] llm wrote {len(lines)} facts for {place}", flush=True)
     return lines[:10]
