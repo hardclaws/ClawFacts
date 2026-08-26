@@ -508,6 +508,30 @@ def test_region_word_boundaries():
     print("[PASS] region check: 'United States' is home, Kansas != Arkansas")
 
 
+def test_attraction_ranking():
+    """A town's actual claim to fame must out-rank its census stub.
+
+    "The arcade boasts 600 pinball machines" scored 0 — no _STRONG word
+    matched — so the "score < 2" tail-trim dropped it, which is why Girard's
+    best fact (Past Times Arcade's Guinness record) never reached chat.
+    """
+    sents = [
+        "The arcade boasts 600 pinball machines, some dating back almost a "
+        "century and others just released.",
+        "One of the oldest remaining buildings in Girard, the Henry Barnhisel "
+        "House, shares tales of community and family history.",
+        "The population was 9,603 at the 2020 census.",
+        "Explore crime rates for Girard, OH including murder, assault, and "
+        "property crime statistics.",
+    ]
+    facts = funfacts._ranked_facts(sents, spice=True, limit=200, count=6)
+    assert any("pinball" in f for f in facts), facts
+    assert any("Barnhisel" in f for f in facts), facts
+    assert not any("population" in f for f in facts), facts
+    assert not any("crime rates" in f for f in facts), facts
+    print(f"[PASS] attraction facts rank -> {len(facts)} kept, pinball + Barnhisel in")
+
+
 def test_llm_only_mode():
     """`"fact_source": "llm"` — one prompt, no retrieval at all.
 
@@ -815,6 +839,7 @@ def main():
     test_definition_filter()
     test_region_word_boundaries()
     test_namesake_ranking()
+    test_attraction_ranking()
     test_explicit_filter()
     test_tasteless_filter()
     test_grounded_filter()

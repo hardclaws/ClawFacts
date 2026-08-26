@@ -54,7 +54,13 @@ _STRONG = re.compile(
     r"mile markers?|rest stops?|route 66|museum|landmark|monument|memorial|"
     r"president|civil war|battle|national register|artifact|relic|"
     r"takes its name|takes their name|named for|namesake|eponym|eponymous|"
-    r"philanthropist|billionaire|richest)\b",
+    r"philanthropist|billionaire|richest|"
+    # Things a town is actually known for. Without these, the best fact about a
+    # place ("600 pinball machines", "a state championship") scored 0 and was
+    # cut by the "score < 2" tail-trim, while a census stub survived.
+    r"arcade|pinball|amusement|roller coaster|roadside attraction|attraction|"
+    r"hall of fame|championship|tavern|covered bridge|lighthouse|waterfall|"
+    r"cave|hot springs|festival|collection)\b",
     re.IGNORECASE,
 )
 _WEAK = re.compile(
