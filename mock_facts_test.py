@@ -485,6 +485,29 @@ def test_short_year_grounding():
     print("[PASS] invented '04-style years are dropped, undated lines survive")
 
 
+def test_region_word_boundaries():
+    """'United States' is not another region.
+
+    Nearly every US article lead reads "a city in X County, <State>, United
+    States", and the substring check treated that as a foreign mention — so
+    harvest() skipped the town's OWN article and the lookup fell through to web
+    search (which is where the fabricated Girard crime facts came from).
+    """
+    cases = [
+        ("Girard is a city in southern Trumbull County, Ohio, United States.", "oh", False),
+        ("Milford is a borough in Pike County, Pennsylvania, United States.", "pa", False),
+        ("Lakemont is a place in Blair County, Pennsylvania, United States.", "wa", True),
+        # Word boundaries: Arkansas is not Kansas, West Virginia is not Virginia.
+        ("Little Rock is the capital of Arkansas, United States.", "oh", True),
+        ("Morgantown is a city in West Virginia, United States.", "wv", False),
+        ("Girard is a city in Kansas, United States.", "oh", True),
+    ]
+    for text, region, want in cases:
+        got = funfacts._text_names_other_region(text, region)
+        assert got == want, (text, region, want, got)
+    print("[PASS] region check: 'United States' is home, Kansas != Arkansas")
+
+
 def test_namesake_ranking():
     """"Named after <somebody>" is a real fun fact, not filler — Girard, OH is
     named for the Philadelphia philanthropist Stephen Girard, and that used to
@@ -741,6 +764,7 @@ def main():
     test_spicy_dig()
     test_bio_filter()
     test_definition_filter()
+    test_region_word_boundaries()
     test_namesake_ranking()
     test_explicit_filter()
     test_tasteless_filter()

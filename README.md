@@ -461,6 +461,19 @@ needed.
   python3 funfacts.py "Milford, PA"
   python3 funfacts.py --spicy "Las Vegas, NV"   # adult mode
   ```
+- **Replay a real lookup with no network** (for CI, or any machine that can't
+  reach Wikipedia):
+  ```
+  python3 mock_live_test.py
+  ```
+  `fixtures/wiki_girard.json` holds the MediaWiki responses recorded for
+  `!funfact girard, OH`. The harness swaps out `_http_get_json` only, so the
+  real `_wiki_search_extracts → _wikipedia → _ranked_facts → get_funfact` chain
+  runs end to end — including the two bugs that made Girard answer with
+  invented crime: plain-text extracts are capped at **one page per request**
+  (the API returns a `continue` token, which must be followed), and
+  `"United States"` in a lead sentence is *not* another region (matching it
+  discarded the town's own article and pushed the lookup onto web search).
 - **See exactly what's sent to the AI**: run with `--debug` (or set
   `TWITCH_DEBUG=1` / `"debug": true` in config.json). Every LLM call prints
   the full system prompt, user prompt (including the real facts found), model,
@@ -547,5 +560,7 @@ appends fake joke comments.
 | `mock_test.py`       | Offline end-to-end bot test.                    |
 | `mock_auth_test.py`  | Offline login-flow test.                        |
 | `mock_facts_test.py` | Offline fact-logic tests.                       |
+| `mock_live_test.py`  | End-to-end lookup replayed from recorded API responses. |
+| `fixtures/`          | Recorded MediaWiki responses for the replay.    |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
 | `tokens.json`        | Created on first login; holds the saved login.  |

@@ -202,6 +202,7 @@ def _note_wiki_429() -> None:
 # source down at once. Anonymous API use should stay well under ~1 req/s.
 _wiki_pace_lock = threading.Lock()
 _wiki_last_req = 0.0
+_EXTRACT_PAGE_CAP = 4   # follow `excontinue` at most this many pages
 _WIKI_PACE = 0.25
 
 
@@ -434,6 +435,16 @@ _COUNTRIES = {
 }
 
 
+# Region names, longest first, matched on word boundaries (see
+# _text_names_other_region for why substring matching is not safe here).
+_REGION_NAMES = sorted(set(_US_STATES.values()) | set(_CA_PROVINCES.values())
+                       | set(_COUNTRIES.values()), key=len, reverse=True)
+_REGION_NAME_RES = [(n, re.compile(r"\b" + re.escape(n) + r"\b"))
+                    for n in _REGION_NAMES]
+# The country a US state lives in — never "another region".
+_US_COUNTRY_WORDS = {"united states", "united states of america", "usa"}
+
+
 def _query_core(query: str) -> str:
     """The place name with the region (after a comma) removed: 'Mount Cobb'."""
     core = re.split(r"[,;|]", query, maxsplit=1)[0]
@@ -473,15 +484,35 @@ def _text_names_other_region(text: str, region: str) -> bool:
     than the one requested. Used two ways: on a title, to reject same-named
     places in other states ('Lakemont, Washington' when the viewer asked for
     Lakemont, PA); and on an article's opening, to reject a bare redirect
-    title that actually points at another state's place."""
+    title that actually points at another state's place.
+
+    Two traps this has to avoid:
+
+    * "United States" is not another region — nearly every US article lead
+      reads "a city in X County, <State>, United States", and treating that as
+      a foreign mention discarded the town's own article outright, so the
+      lookup fell through to web search.
+    * Names must match on word boundaries and must not fire on a longer
+      requested name: "Arkansas" is not "Kansas", and "West Virginia" is not
+      "Virginia".
+    """
     if not region:
         return False
-    t = _title_tokens(text)
+    text_norm = _title_tokens(text)
     requested = {region, _US_STATES.get(region, ""), _CA_PROVINCES.get(region, ""),
                  _COUNTRIES.get(region, "")}
     requested.discard("")
-    for name in set(_US_STATES.values()) | set(_CA_PROVINCES.values()) | set(_COUNTRIES.values()):
-        if name in t and name not in requested:
+    if region in _US_STATES:
+        requested |= _US_COUNTRY_WORDS      # "United States" == same place
+    elif region in _CA_PROVINCES:
+        requested.add("canada")
+    for name, rx in _REGION_NAME_RES:
+        if name in requested:
+            continue
+        # "virginia" inside a requested "west virginia" is not another region.
+        if any(name in req for req in requested):
+            continue
+        if rx.search(text_norm):
             return True
     return False
 
@@ -884,30 +915,47 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
 
 
 def _wiki_extracts(titles: list, exchars: int = 4000) -> dict:
-    """Fetch the text of several articles in ONE request (title -> extract)."""
+    """Fetch the text of several articles (title -> extract).
+
+    Plain-text extracts (`explaintext=1`) are capped at **one page per
+    request** for anonymous callers: the API answers with a warning
+    ('"exlimit" was too large ... lowered to 1'), returns the first page only
+    and hands back a `continue` token. Requesting `exlimit=max` and reading the
+    reply once therefore silently yields a single extract — every other title
+    comes back empty and gets dropped, which is how a town's real claim to
+    fame (living in a *related* article) went missing. So follow the token,
+    bounded so one lookup can't turn into a dozen requests.
+
+    `exchars` is likewise capped at 1200 by the API for plain-text extracts.
+    """
     if not titles or _wiki_blocked():
         return {}
-    try:
-        data = _http_get_json(
-            WIKI_API,
-            {
-                "action": "query",
-                "titles": "|".join(titles),
-                "prop": "extracts",
-                "explaintext": 1,
-                "exchars": exchars,
-                "exlimit": "max",
-                "format": "json",
-                "formatversion": "2",
-            },
-        )
-    except (urllib.error.URLError, OSError, ValueError):
-        return {}
+    params = {
+        "action": "query",
+        "titles": "|".join(titles),
+        "prop": "extracts",
+        "explaintext": 1,
+        "exchars": min(exchars, 1200),
+        "exlimit": "max",
+        "format": "json",
+        "formatversion": "2",
+    }
     out = {}
-    for page in data.get("query", {}).get("pages", []):
-        t = page.get("title", "")
-        if t:
-            out[t] = page.get("extract", "") or ""
+    for _ in range(min(len(titles), _EXTRACT_PAGE_CAP)):
+        if _wiki_blocked():
+            break
+        try:
+            data = _http_get_json(WIKI_API, params)
+        except (urllib.error.URLError, OSError, ValueError):
+            break
+        for page in data.get("query", {}).get("pages", []):
+            t = page.get("title", "")
+            if t and page.get("extract") and t not in out:
+                out[t] = page["extract"]
+        cont = data.get("continue") or {}
+        if not cont.get("excontinue") or len(out) >= len(titles):
+            break
+        params.update(cont)  # excontinue + continue: "||"
     return out
 
 
