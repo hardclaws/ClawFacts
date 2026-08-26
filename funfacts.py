@@ -47,7 +47,8 @@ SPICY_DB_PATH = os.path.join(
 # Words that make a sentence sound like a "fun fact" (higher score = better).
 # "Trucker-flavoured" words are included since the bot targets a trucking stream.
 _STRONG = re.compile(
-    r"\b(oldest|youngest|first|second|largest|smallest|tallest|longest|"
+    r"\b(visited|visits|emergency landing|rocking chair|"
+    r"oldest|youngest|first|second|largest|smallest|tallest|longest|"
     r"shortest|deepest|highest|lowest|only|last|birthplace|famous|"
     r"known for|best known|home of|named after|named for|world|"
     r"national|record|haunted|legend|rare|unique|"
@@ -147,7 +148,11 @@ _JUNK_SEED = re.compile(
     r"\bis it safe\b|\bsafest (places|cities|towns)\b|"
     r"\bbest places to live\b|\bcost of living\b|"
     r"\bhomes for sale\b|\breal estate\b|\bapartments?\b|\bzillow\b|"
-    r"\brentals?\b|\bweather (forecast|today)\b",
+    r"\brentals?\b|\bweather (forecast|today)\b|"
+    # The standard NRHP boilerplate is a list of buildings, not a fact, and it
+    # scored 5 for 'national register' — outranking Cuba MO's World's Largest
+    # Rocking Chair and its Bette Davis / Amelia Earhart visits.
+    r"\bare listed on the national register\b",
     re.IGNORECASE,
 )
 
@@ -254,6 +259,10 @@ def _note_wiki_429() -> None:
 _wiki_pace_lock = threading.Lock()
 _wiki_last_req = 0.0
 _EXTRACT_PAGE_CAP = 4   # follow `excontinue` at most this many pages
+# Bound on how much of a full article we keep in memory. Cuba, Missouri's is
+# ~7.6 KB; big cities run to a few hundred KB and everything past the first
+# sections is references and census tables anyway.
+_EXTRACT_CHAR_CAP = 20000
 _WIKI_PACE = 0.25
 
 
@@ -716,28 +725,29 @@ def _wiki_search(query: str) -> list:
 def _wiki_extract(title: str, exchars: int = 4000) -> str:
     if _wiki_blocked():
         return ""
-    # Fetch the start of the article (lead + beginning of History etc.),
-    # not just the intro — the fun facts usually live a little deeper.
-    try:
-        data = _http_get_json(
-            WIKI_API,
-            {
+    # exchars=0 means "the whole article". MediaWiki caps exchars at 1200 and
+    # silently clamps anything larger, so asking for 4000 or 7000 returns the
+    # lead only — which is why every town's best material was invisible. Omit
+    # the parameter entirely and a single-title request returns everything.
+    params = {
                 "action": "query",
                 "prop": "extracts",
                 "explaintext": 1,
-                "exchars": exchars,
                 "titles": title,
                 "redirects": 1,
                 "format": "json",
                 "formatversion": "2",
-            },
-        )
+    }
+    if exchars:
+        params["exchars"] = exchars
+    try:
+        data = _http_get_json(WIKI_API, params)
     except (urllib.error.URLError, OSError, ValueError):
         return ""
     pages = data.get("query", {}).get("pages", [])
     if not pages:
         return ""
-    return pages[0].get("extract", "") or ""
+    return (pages[0].get("extract", "") or "")[:_EXTRACT_CHAR_CAP]
 
 
 def _wikipedia(query: str, spice: bool = False, limit: int = 200):
@@ -793,6 +803,14 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     place = (region_titles or core_titles or [items[0][1]])[0]
 
     extracts = {t: e for _, t, e in items}
+    # The combined search+extract call is capped at 1200 chars a page, so the
+    # place's own article arrived lead-only. Re-fetch just that one article in
+    # full: Cuba MO's World's Largest Rocking Chair, Bette Davis and Amelia
+    # Earhart all sit below character 1200.
+    if place and not _wiki_blocked():
+        full = _wiki_extract(place, exchars=0)
+        if len(full) > len(extracts.get(place, "")):
+            extracts[place] = full
     pool, pool_norm = [], []
 
     def harvest(titles, require_core=False):

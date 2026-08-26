@@ -1173,6 +1173,56 @@ def test_padding_claims_dropped():
         assert funfacts._grounded_filter(
             [ln], "Cuba, Missouri", "Cuba, Missouri", seeds), ln
 
+
+def _cuba_fixture():
+    import json, os
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "fixtures", "wiki_cuba_mo.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_full_article_extract():
+    """MediaWiki clamps exchars to 1200 and says nothing about it, so asking
+    for 4000 or 7000 returned the lead only. Everything Cuba, Missouri is
+    actually known for — the World's Largest Rocking Chair, Bette Davis and
+    Amelia Earhart, the Wagon Wheel Motel — sits below character 1200 of the
+    real article. Recorded from the live API in fixtures/wiki_cuba_mo.json."""
+    full = _cuba_fixture()["extract"]
+    lead = full[:1200]
+
+    def ranked(text):
+        return funfacts._ranked_facts(
+            funfacts._filter_definitions(funfacts._sentences(text)),
+            spice=True, limit=200)
+
+    assert "Rocking Chair" not in " ".join(ranked(lead)), "the lead was not the problem"
+    assert any("Rocking Chair" in f for f in ranked(full)), "full article lost it too"
+    assert any("Wagon Wheel" in f for f in ranked(full))
+
+    # The single-title request must omit exchars entirely.
+    seen = {}
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = lambda url, params, timeout=8.0: (
+        seen.update(params) or {"query": {"pages": [{"extract": full}]}})
+    try:
+        got = funfacts._wiki_extract("Cuba, Missouri", exchars=0)
+    finally:
+        funfacts._http_get_json = orig
+    assert "exchars" not in seen, f"exchars still sent: {seen}"
+    assert "Rocking Chair" in got
+
+
+def test_curated_cuba_missouri():
+    res = funfacts._spicy_db("Cuba, Missouri", 200)
+    assert res, "no curated entry for Cuba, Missouri"
+    text = " ".join(res["facts"])
+    for needle in ("Red Rocker", "42 feet", "Big Red Apple", "Bette Davis",
+                   "Amelia Earhart", "Mural City", "Wagon Wheel", "1857"):
+        assert needle in text, f"missing: {needle}"
+    assert all(len(f) <= 200 for f in res["facts"])
+    # Bare "Cuba" is the island nation — it must not match.
+    assert funfacts._spicy_db("Cuba", 200) is None
+
 def main():
     test_trim()
     test_rotation()
@@ -1181,6 +1231,7 @@ def main():
     test_curated_girard_facts()
     test_curated_indian_lake_facts()
     test_curated_entry_region_match()
+    test_curated_cuba_missouri()
     test_ranked_dedupe()
     test_ranked_filter()
     test_parse_geocode()
@@ -1216,6 +1267,7 @@ def main():
     test_llm_duplicate_lines_deduped()
     test_serper_source()
     test_wiki_multi_title()
+    test_full_article_extract()
     test_wrong_place_harvest()
     test_work_titles_not_harvested()
     test_html_entities_unescaped()

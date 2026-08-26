@@ -60,6 +60,10 @@ def main() -> int:
          and funfacts._query_core("Kansas City") == "kansas city"),
         ("significance padding dropped ('holds the crown', 'the star')",
          "the\\s+star" in funfacts._REPUTATION.pattern),
+        ("full article read, not the 1200-char lead (exchars omitted)",
+         hasattr(funfacts, "_EXTRACT_CHAR_CAP")),
+        ("curated Cuba, Missouri facts (Red Rocker, Big Red Apple)",
+         bool(funfacts._spicy_db("Cuba, Missouri", 200))),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

@@ -219,6 +219,15 @@ chat: no invented names or dates, no invented claims, no county story handed to
 the town. Downside: a small town's article is often thin, so the answer can be
 plainer than you'd like.
 
+For the place's own article the bot reads the **whole article**, not the lead.
+MediaWiki's TextExtracts API caps `exchars` at 1200 and silently clamps anything
+larger, so asking for 4000 returned the first 1200 characters — the lead and a
+little of the history. Almost everything a town is actually known for sits below
+that line: Cuba, Missouri's *World's Largest Rocking Chair*, its Bette Davis and
+Amelia Earhart visits and the Wagon Wheel Motel are all further down. A
+single-title request with no `exchars` returns the entire article, which the bot
+then trims to `_EXTRACT_CHAR_CAP` (20,000 chars) and ranks.
+
 **`"llm"`** — skip retrieval entirely and ask the model for interesting facts
 from its own knowledge, capped at `max_fact_chars`. One prompt, no sources, no
 ranking — much simpler, and for well-documented places it often produces a
