@@ -94,11 +94,48 @@ DEFAULTS = {
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def _fail_config_syntax(path: str, exc: json.JSONDecodeError) -> None:
+    """A typo in config.json used to produce a Python traceback and then a
+    restart loop that could never succeed. Say what is wrong instead."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        lines = []
+    out = sys.stderr
+    print(f"\n[ERROR] {path} is not valid JSON.", file=out)
+    print(f"        {exc.msg} at line {exc.lineno}, column {exc.colno}.", file=out)
+    prev = lines[exc.lineno - 2].rstrip() if exc.lineno >= 2 else ""
+    bad = lines[exc.lineno - 1] if 0 < exc.lineno <= len(lines) else ""
+    if bad:
+        if prev:
+            print(f"   {exc.lineno - 1:>4} | {prev}", file=out)
+        print(f"   {exc.lineno:>4} | {bad}", file=out)
+        print(f"        | {' ' * max(0, exc.colno - 1)}^", file=out)
+    if prev and not prev.endswith((",", "{", "[", ":")):
+        print("\n  The line above does not end with a comma. That is nearly",
+              file=out)
+        print("  always the cause of this error - add one and try again:", file=out)
+        print(f"      {prev},", file=out)
+    elif prev.endswith(",") and bad.lstrip().startswith(("}", "]")):
+        print("\n  JSON does not allow a trailing comma before a closing",
+              file=out)
+        print("  bracket - remove the comma at the end of the line above.",
+              file=out)
+    print(f"\n  Check the whole file with:  python -m json.tool {path}\n",
+          file=out)
+    # Exit code 2 tells start-bot.bat this is not worth restarting for.
+    raise SystemExit(2)
+
+
 def load_config(path: str) -> dict:
     cfg = dict(DEFAULTS)
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as fh:
-            cfg.update(json.load(fh))
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                cfg.update(json.load(fh))
+        except json.JSONDecodeError as exc:
+            _fail_config_syntax(path, exc)
 
     cfg["nick"] = os.environ.get("TWITCH_NICK", cfg.get("nick", "")).strip()
     cfg["oauth_token"] = os.environ.get(

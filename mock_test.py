@@ -5,6 +5,8 @@ It boots a tiny IRC server on 127.0.0.1:6667, starts the bot against it,
 sends a few chat messages, and prints everything the bot said back.
 """
 
+import os
+import pathlib
 import socket
 import subprocess
 import sys
@@ -83,7 +85,38 @@ def server(bot_lines):
     srv.close()
 
 
+def test_bad_config_is_reported_plainly():
+    """A typo in config.json used to print a traceback and then loop forever
+    on 'Restart in 5 seconds?'. It must name the line, the cause, and exit with
+    code 2 so start-bot.bat stops instead of restarting."""
+    import io
+    import contextlib
+    import tempfile
+
+    good = pathlib.Path(__file__).parent.joinpath("config.example.json")
+    lines = good.read_text().splitlines()
+    i = next(n for n, l in enumerate(lines) if l.strip().startswith('"_llm_options"'))
+    broken = "\n".join(lines[:i]) + '\n  "_llm_options": "x"\n' + "\n".join(lines[i + 1:])
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "config.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(broken)
+        err = io.StringIO()
+        code = None
+        with contextlib.redirect_stderr(err):
+            try:
+                bot_mod.load_config(path)
+            except SystemExit as exc:
+                code = exc.code
+        text = err.getvalue()
+    assert code == 2, f"expected exit code 2, got {code}"
+    assert "line 24, column 3" in text, text
+    assert "does not end with a comma" in text, text
+    print("[PASS] a broken config.json names the line and stops the restart loop")
+
+
 def main():
+    test_bad_config_is_reported_plainly()
     cfg = {
         **DEFAULTS,
         "nick": "funfactbot",

@@ -112,6 +112,11 @@ def main() -> int:
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()
          and "45.0, self._say" not in open(
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
+        ("broken config.json is explained, not a traceback",
+         "_fail_config_syntax" in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()
+         and "does not end with a comma" in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

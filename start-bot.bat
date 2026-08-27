@@ -42,6 +42,15 @@ if "%EXITCODE%"=="0" (
     goto :stopped
 )
 
+rem Exit code 2 = config.json is not valid JSON. Restarting cannot fix
+rem that, so do not offer to - the user has to edit the file.
+if "%EXITCODE%"=="2" (
+    echo.
+    echo  [ERROR] config.json has a syntax error - see the message above.
+    echo          Fix the file, then start the bot again.
+    goto :stopped
+)
+
 echo.
 echo  [WARN] Bot exited with code %EXITCODE%.
 choice /c YN /t 5 /d Y /m "  Restart in 5 seconds? (Y=yes, N=no)"
