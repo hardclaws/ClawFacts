@@ -707,6 +707,67 @@ def _title_relevance(title: str, core: str, region: str) -> int:
     return score
 
 
+# Harvested articles must actually be about a place. The bare-name search that
+# finds related articles ("Lakemont Park" for Lakemont, PA) also returns every
+# person who shares the town's name, and each of those titles scores 120 in
+# _title_relevance (an exact match on the core word) so they clear the >= 70
+# gate. For "Jerome, Missouri" that poured in Saint Jerome of Stridon ("He is
+# best known for his translation of the Bible into Latin"), the writer Jerome
+# K. Jerome, and Jerome Barnes the Missouri state representative.
+_BIOGRAPHICAL = re.compile(
+    # "was an early Christian priest", "is an American politician",
+    # "(2 May 1859 - 14 June 1927) was an English writer and humorist".
+    r"\b(?:was|is|were|are)\s+(?:an?\s+)?(?:early|former|late|retired|current)?\s*"
+    r"(?:american|english|british|irish|scottish|welsh|canadian|australian|"
+    r"new zealand|french|german|italian|spanish|portuguese|dutch|swedish|"
+    r"norwegian|danish|polish|russian|japanese|chinese|indian|mexican|brazilian|"
+    r"african|greek|roman|byzantine|czech|hungarian|turkish|israeli|egyptian)?\s*"
+    r"(?:christian|catholic|orthodox|protestant|jewish|muslim)?\s*"
+    r"(?:politician|actor|actress|writer|author|poet|novelist|playwright|"
+    r"screenwriter|journalist|editor|publisher|critic|singer|songwriter|"
+    r"musician|composer|conductor|pianist|guitarist|drummer|violinist|rapper|"
+    r"dancer|choreographer|priest|theologian|bishop|saint|historian|"
+    r"philosopher|scientist|physicist|chemist|mathematician|astronomer|"
+    r"biologist|geologist|doctor|physician|surgeon|nurse|professor|teacher|"
+    r"lawyer|attorney|judge|architect|engineer|inventor|artist|painter|"
+    r"sculptor|photographer|filmmaker|director|producer|animator|comedian|"
+    r"model|athlete|sportsman|coach|referee|umpire|manager|businessman|"
+    r"entrepreneur|financier|banker|diplomat|ambassador|governor|senator|"
+    r"representative|congressman|congresswoman|mayor|monarch|king|queen|"
+    r"emperor|prince|princess|duke|duchess|count|countess|baron|general|"
+    r"admiral|soldier|sailor|officer|veteran|explorer|aviator|astronaut|"
+    r"baseball|football|basketball|hockey|cricket|soccer|golf|tennis|boxing|"
+    r"racing|swimming|cyclist|serial killer|criminal|gangster|outlaw|sheriff|"
+    r"marshal|detective|spy|monk|nun|missionary|evangelist|preacher|rabbi|"
+    r"translator|confessor|historiographer)\b",
+    re.IGNORECASE,
+)
+# A lifespan in the lead is the other reliable sign of a biography:
+# "Jerome of Stridon (... c. 342-347 - 30 September 420)", "(born 16 March 1963)".
+_LIFESPAN = re.compile(
+    r"\((?:[^()]{0,80}?(?:\bb\.\s?|\bborn\b|\bd\.\s?|\bdied\b|\bc\.\s?\d|"
+    r"\b(?:1[5-9]|20)\d\d\s*[–—-]\s*(?:1[5-9]|20)\d\d|\bfl\.))[\s\S]{0,60}?\)"
+    r"|\bborn\s+in\s+(?:january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_person_article(extract: str) -> bool:
+    """True if an article's opening describes a person, not a place.
+
+    Applied to every harvested title. Related-article harvesting is what lets a
+    tiny town borrow facts from a bigger article that shares its name, but the
+    same search also returns namesakes, and a biography's sentences are about
+    the person ("Barnes was born in Mississippi") with nothing tying them to
+    the town the viewer asked about.
+    """
+    lead = " ".join((extract or "").split())[:300]
+    if not lead:
+        return False
+    return bool(_LIFESPAN.search(lead) or _BIOGRAPHICAL.search(lead))
+
+
 def _is_disambiguation(extract: str) -> bool:
     head = " ".join(extract.split())[:140].lower()
     return any(k in head for k in (
@@ -785,7 +846,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             if _is_road_or_meta_title(title):
                 continue
             rel = _title_relevance(title, core, region)
-            if rel >= 70:
+            if rel >= 70 and not _is_person_article(it["extract"]):
                 items.append((rel, title, it["extract"]))
 
     gather(full)
@@ -833,6 +894,8 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
         for title in titles:
             extract = extracts.get(title, "")
             if not extract or _is_disambiguation(extract):
+                continue
+            if title != place and _is_person_article(extract):
                 continue
             # A bare redirect title may point at another state's place — check
             # the article's opening statement names the requested region.

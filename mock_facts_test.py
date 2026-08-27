@@ -5,6 +5,9 @@ Run:  python3 mock_facts_test.py
 
 import time
 
+import json
+import pathlib
+
 import funfacts
 
 
@@ -746,6 +749,44 @@ def test_meta_line_filter():
         llm.rewrite_fact = orig
 
 
+def test_namesake_articles_are_not_harvested():
+    """'!funfact Jerome, Missouri' at 10:40 posted four seeds and three of them
+    were about other Jeromes: Saint Jerome of Stridon ("He is best known for his
+    translation of the Bible into Latin") and Jerome Barnes, a Missouri state
+    representative ("Barnes was born in Mississippi"). Searching the bare word
+    returns every person who shares the town's name, and each of those titles
+    scores 120 in _title_relevance, so they cleared the >= 70 gate."""
+    fixture = json.loads((pathlib.Path(__file__).resolve().parent
+                          / "fixtures" / "wiki_jerome_mo.json").read_text())
+    orig = (funfacts._wiki_search_extracts, funfacts._wiki_extract)
+    funfacts._wiki_search_extracts = (
+        lambda q, exchars=4000, limit=6: fixture["queries"].get(q.strip(), []))
+    funfacts._wiki_extract = lambda t, exchars=0: ""
+    try:
+        facts = (funfacts._wikipedia("Jerome, Missouri", spice=True, limit=200)
+                 or {}).get("facts") or []
+    finally:
+        funfacts._wiki_search_extracts, funfacts._wiki_extract = orig
+
+    assert facts, "the town's own history fact must survive"
+    assert "Fremont Town" in facts[0], facts
+    joined = " ".join(facts).lower()
+    for bad in ("bible", "vulgate", "pope", "christian moral", "barnes", "mississippi"):
+        assert bad not in joined, "namesake fact leaked: %r in %r" % (bad, facts)
+
+    # The gate itself: biographies rejected, places and attractions kept.
+    assert funfacts._is_person_article(fixture["queries"]["jerome"][0]["extract"])
+    assert funfacts._is_person_article(
+        "Jerome Barnes is an American politician who was a member of the "
+        "Missouri House of Representatives.")
+    assert not funfacts._is_person_article(
+        "Jerome is an unincorporated community in western Phelps County, Missouri.")
+    assert not funfacts._is_person_article(
+        "Lakemont Park is an amusement park in Altoona, Pennsylvania, home to "
+        "Leap-The-Dips, the world's oldest surviving roller coaster.")
+    print("[PASS] namesake people can't lend a town its facts")
+
+
 def test_search_key_beats_duckduckgo():
     """A configured Serper key must be consulted before DuckDuckGo. It used to
     sit last in the ladder, which returns on the first source that yields
@@ -1327,6 +1368,7 @@ def main():
     test_llm_duplicate_lines_deduped()
     test_serper_source()
     test_search_key_beats_duckduckgo()
+    test_namesake_articles_are_not_harvested()
     test_wiki_multi_title()
     test_full_article_extract()
     test_wrong_place_harvest()

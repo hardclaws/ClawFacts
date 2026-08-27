@@ -80,6 +80,13 @@ def main() -> int:
         ("startup reports which fact sources are live",
          "fact sources:" in open(
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
+        ("namesake people rejected (Saint Jerome != Jerome, Missouri)",
+         hasattr(funfacts, "_is_person_article")
+         and funfacts._is_person_article(
+             "Jerome Barnes is an American politician in the Missouri House of "
+             "Representatives from the 28th district.")
+         and not funfacts._is_person_article(
+             "Jerome is an unincorporated community in Phelps County, Missouri.")),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
