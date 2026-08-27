@@ -16,6 +16,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 
 import names
 
@@ -185,6 +186,118 @@ def test_top_up_survives_a_dead_api(server_url):
         names.API = real
     assert added == 3, added          # the fake yields the same 3 people
     print("[PASS] top_up keeps going past a bad category and never raises")
+
+
+# ---- rate limiting --------------------------------------------------------
+class ThrottlingHandler(http.server.BaseHTTPRequestHandler):
+    """A fake Wikipedia that starts refusing after `allow` requests.
+
+    Mirrors the real failure exactly: the first ten requests in a cycle are
+    served, the rest come back 429 with a Retry-After.
+    """
+
+    allow = 10
+    hits = 0
+    retry_after = "300"
+
+    def do_GET(self):
+        cls = ThrottlingHandler
+        cls.hits += 1
+        if cls.hits > cls.allow:
+            self.send_response(429)
+            self.send_header("Retry-After", cls.retry_after)
+            self.end_headers()
+            return
+        body = json.dumps({"query": {"categorymembers": [
+            {"pageid": 1, "ns": 0, "title": "Beverly Aadland"}]}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_top_up_backs_off_on_a_rate_limit():
+    """The bug: 16 requests per cycle against a 10/min limit.
+
+    Six identical 429 lines every cycle, forever, with no backoff at all.
+    A refusal must stop the cycle, be honoured for Retry-After, and cost
+    nothing further until the cooldown expires.
+    """
+    import contextlib
+    import io as _io
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ThrottlingHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/w/api.php"
+
+    real_api, real_slow = names.API, names.SLOW_REPLY_SECONDS
+    names.API = url
+    names.SLOW_REPLY_SECONDS = 0.0
+    ThrottlingHandler.hits = 0
+    p = _pool()
+    p._cooldown = (0.0, 0)
+    try:
+        log = _io.StringIO()
+        with contextlib.redirect_stdout(log):
+            p.top_up(delay=0)
+        served = ThrottlingHandler.hits
+        # It must have stopped at the first 429, not fired all 16.
+        assert served == ThrottlingHandler.allow + 1, served
+        # Retry-After=300 must be what it waits, not an invented number.
+        left = p._cooldown[0] - time.time()
+        assert 295 <= left <= 300, left
+
+        # The next cycle must not touch Wikipedia at all.
+        before = ThrottlingHandler.hits
+        with contextlib.redirect_stdout(log):
+            added = p.top_up(delay=0)
+        assert added == 0, added
+        assert ThrottlingHandler.hits == before, (
+            "the cooldown was recorded but not enforced")
+
+        out = log.getvalue()
+        # One summary line per cycle, never one line per failing category.
+        assert out.count("rate-limited") + out.count("cooling off") == 2, out
+        assert "HTTPError 429" not in out, out
+    finally:
+        names.API, names.SLOW_REPLY_SECONDS = real_api, real_slow
+        srv.shutdown()
+    print("[PASS] a 429 stops the cycle, honours Retry-After, and logs once")
+
+
+def test_rate_limit_backoff_doubles():
+    """Without a Retry-After the wait must grow, not stay fixed."""
+    p = _pool()
+    p._cooldown = (0.0, 0)
+    first = p._note_refusal(None)
+    second = p._note_refusal(None)
+    third = p._note_refusal(None)
+    assert first < second < third, (first, second, third)
+    assert third <= names.COOLDOWN_MAX, third
+    # And the server's own number always wins over our doubling.
+    p._cooldown = (0.0, 0)
+    assert p._note_refusal(60.0) == 60.0
+    # A successful fetch clears the doubling.
+    p._note_success()
+    assert p._resumable() is True
+    assert p._cooldown == (0.0, 0), p._cooldown
+    print("[PASS] the backoff doubles, honours Retry-After, and clears on success")
+
+
+def test_user_agent_is_contactable():
+    """Wikimedia allows an identifiable client 200 req/min; anything else 10.
+
+    The old string had no URL or email in it, so we were held to the
+    unidentified tier - which is exactly why six categories 429'd every cycle.
+    """
+    ua = names.USER_AGENT
+    assert "http" in ua or "@" in ua, ua
+    assert ua.startswith("ClawFacts/"), ua
+    print(f"[PASS] the User-Agent is contactable: {ua}")
 
 
 # ---- persistence ----------------------------------------------------------
@@ -360,6 +473,9 @@ def main():
     for fn in (test_harvest_filters_and_dedupes,
                test_top_up_survives_a_dead_api, test_cache_round_trips):
         fn(url)
+    for fn in (test_top_up_backs_off_on_a_rate_limit,
+               test_rate_limit_backoff_doubles, test_user_agent_is_contactable):
+        fn()
     for fn in (test_harvest_raises_rather_than_returning_empty,
                test_corrupt_cache_is_ignored, test_malformed_rows_are_dropped,
                test_draw_shape, test_no_repeats_within_the_recency_window,

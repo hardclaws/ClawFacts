@@ -552,6 +552,48 @@ and the seed pool carries the game on its own. A Wikipedia outage, a corrupt
 `names.json` or a dead category all fall back to the seed without the command
 noticing.
 
+#### Being a polite guest on Wikipedia
+
+Wikimedia sorts API clients into two rate-limit tiers **by User-Agent**: an
+identifiable one carrying a contactable URL or email is allowed
+**200 requests per minute**; anything else is treated as unidentified and
+capped at **10**.
+
+The bot fetches 16 categories at 1.1s apart — about **55 requests per minute**.
+Against a 10/min cap that meant the first ten categories of every cycle
+succeeded and the **last six came back `429 Too Many Requests`**, every single
+cycle, forever:
+
+```
+[names] English film actors: <HTTPError 429: 'Too Many Requests'>
+[names] American male singers: <HTTPError 429: 'Too Many Requests'>
+...
+```
+
+Those are always the same six because they are always the last six. Three
+things fix it:
+
+- **A contactable User-Agent** — `ClawFacts/1.0 (+https://github.com/hardclaws/ClawFacts;
+  hobby Twitch chat bot, name pools)`. That alone moves the bot from the
+  10/min tier to the 200/min tier, where 55/min is unremarkable.
+- **`Retry-After` is honoured.** A 429 raises `RateLimited` carrying the
+  server's own header, and the pool waits that long. The server knows its
+  window and we do not, so its number always beats ours.
+- **The backoff is pool-wide and doubles.** A 429 is about *this client*, not
+  the one category that happened to trip it — the next category would have
+  been refused too. So the refusal ends the cycle immediately and every fetch
+  waits. With no `Retry-After` the wait doubles each time, to a day at most.
+
+The six lines become one:
+
+```
+[names] Wikipedia rate-limited the top-up; resuming in ~5 min.
+```
+
+Wikipedia also asks callers to back off after any request that took more than
+a second to serve; `harvest_category` sleeps five seconds when that happens,
+which is the signal that usually precedes a 429 rather than the 429 itself.
+
 ### The other games never run dry either
 
 `!joke`, `!randomfact`, `!riddle` and `!wyr` fetch live from their own

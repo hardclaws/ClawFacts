@@ -25,6 +25,7 @@ entries.
 
 from __future__ import annotations
 
+import datetime
 import json
 import random
 import re
@@ -39,11 +40,25 @@ import storage
 NAMES_PATH = "names.json"
 
 API = "https://en.wikipedia.org/w/api.php"
-USER_AGENT = "ClawFacts/1.0 (Twitch bot; name pools for chat games)"
+# Wikimedia sorts clients into two rate-limit tiers by User-Agent. An
+# *identifiable* one - a contactable URL or email - is allowed 200 requests per
+# minute; anything else is treated as unidentified and capped at 10. The old
+# string had no contact in it, so we were in the 10/min tier while asking for
+# 55/min, and the last six categories of every cycle came back 429.
+USER_AGENT = ("ClawFacts/1.0 (+https://github.com/hardclaws/ClawFacts; "
+              "hobby Twitch chat bot, name pools)")
 
-# Wikipedia asks bots to stay under ~1 request/second, and there is no reason
-# to be rude about a list of names.
+# 1.1s between requests is ~55/min: comfortably inside the identified tier,
+# and still polite. Anything that gets a 429 anyway is handled by backoff
+# below rather than by retrying at the same speed.
 FETCH_DELAY = 1.1
+# How long to leave a category alone after Wikipedia refuses it, and how far
+# that stretches if it keeps refusing. Stops the same six categories being
+# retried every single cycle forever.
+COOLDOWN_SECONDS = 3600
+COOLDOWN_MAX = 24 * 3600
+# Wikipedia's "expensive request" guidance: wait this long after a slow reply.
+SLOW_REPLY_SECONDS = 5.0
 CMLIMIT = 500            # the API maximum; one call per category
 MAX_HARVESTED = 4000     # cap the cache so names.json stays a small file
 RECENT_WINDOW = 240      # names not to reuse, across all rounds
@@ -349,6 +364,11 @@ class NamePool:
         # already holds this, and a plain Lock deadlocked on draw.
         self._lock = threading.RLock()
         self._recent = []
+        # (timestamp to resume, consecutive refusals) for the whole pool. A
+        # 429 is about this client, not one category, so every fetch waits.
+        # Each further refusal doubles the wait, so a persistently throttled
+        # pool costs one request a day instead of one per cycle.
+        self._cooldown = (0.0, 0)
         self.updated = None
         self._load()
 
@@ -504,26 +524,80 @@ class NamePool:
             self._recent.clear()
 
     # -- topping up ----------------------------------------------------
+    def _resumable(self) -> bool:
+        """True unless the whole pool is still cooling off after a 429."""
+        return time.time() >= self._cooldown[0]
+
+    def _note_refusal(self, retry_after: float | None) -> float:
+        """Record a refusal pool-wide and return how long every fetch waits.
+
+        A 429 is about this *client*, not about the one category that happened
+        to trip it - the next category would have been refused too. So the
+        backoff is pool-wide: the first version cooled off only the category
+        that failed, and the next cycle simply restarted at category 0 and
+        burned the same budget again.
+
+        Wikipedia's own Retry-After wins when it sends one, because the server
+        knows its window and we do not. Otherwise the wait doubles each time,
+        so a persistently throttled pool costs a fetch a day rather than one
+        per cycle.
+        """
+        fails = self._cooldown[1] + 1
+        wait = retry_after if retry_after else min(
+            COOLDOWN_SECONDS * (2 ** (fails - 1)), COOLDOWN_MAX)
+        self._cooldown = (time.time() + wait, fails)
+        return wait
+
+    def _note_success(self) -> None:
+        """Clear the doubling once a fetch gets through again."""
+        self._cooldown = (0.0, 0)
+
     def top_up(self, categories=None, delay: float = FETCH_DELAY,
                timeout: float = 8.0, limit: int | None = None) -> int:
         """Fetch category listings and add any new people. Returns how many.
 
         Runs from a keeper thread. Never raises: a Wikipedia outage must not
         take the bot down, and the seed pool keeps working regardless.
+
+        Refusals are summarised in ONE line per cycle rather than one per
+        category: six identical 429 lines every cycle buried the log and made
+        a single rate limit look like six separate faults.
         """
+        if not self._resumable():
+            left = self._cooldown[0] - time.time()
+            print(f"[names] still cooling off after a rate limit; "
+                  f"next top-up in ~{max(left / 60, 1):.0f} min.", flush=True)
+            return 0
         added = 0
+        throttled = 0
+        failed = []
+        wait_total = 0.0
         for title, gender, job in (categories or CATEGORIES)[:limit]:
             try:
                 rows = harvest_category(title, timeout=timeout)
+            except RateLimited as exc:
+                throttled += 1
+                wait_total = self._note_refusal(exc.retry_after)
+                # Everything after this in the cycle would be refused too, so
+                # stop here and let the cooldown run down.
+                break
             except Exception as exc:
-                print(f"[names] {title}: {exc!r}", flush=True)
+                failed.append(f"{title} ({type(exc).__name__})")
                 continue
+            self._note_success()
             added += self.add(rows, gender, job)
             if delay:
                 time.sleep(delay)
         if added:
             self.updated = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._save()
+        if throttled:
+            print(f"[names] Wikipedia rate-limited the top-up; resuming in "
+                  f"~{max(wait_total / 60, 1):.0f} min.", flush=True)
+        elif failed:
+            print(f"[names] {len(failed)} category lookup(s) failed: "
+                  + "; ".join(failed[:3])
+                  + (" ..." if len(failed) > 3 else ""), flush=True)
         return added
 
     def add(self, names, gender: str, job: str) -> int:
@@ -546,11 +620,44 @@ class NamePool:
         return min(len(fresh), max(0, room))
 
 
+class RateLimited(Exception):
+    """Wikipedia answered 429. Carries its Retry-After if it sent one.
+
+    Separate from a network failure because the two want opposite responses:
+    a timeout says "try again soon", a 429 says "stop, and come back later".
+    """
+
+    def __init__(self, retry_after: float | None = None):
+        self.retry_after = retry_after
+        super().__init__(f"429 Too Many Requests"
+                         + (f" (retry after {retry_after:.0f}s)"
+                            if retry_after else ""))
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """Seconds from a Retry-After header, which may be a count or a date."""
+    raw = (exc.headers or {}).get("Retry-After") if exc.headers else None
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(raw)
+        return max(0.0, (when - datetime.datetime.now(when.tzinfo)).total_seconds())
+    except Exception:
+        return None
+
+
 def harvest_category(title: str, timeout: float = 8.0) -> list:
     """Page titles in a Wikipedia category. Raises on a network failure.
 
     Raises rather than returning []: an empty list and an outage look the same
-    from the outside, and the caller needs to tell them apart.
+    from the outside, and the caller needs to tell them apart. A 429 raises
+    RateLimited so the caller can honour Retry-After instead of hammering.
     """
     qs = urllib.parse.urlencode({
         "action": "query", "list": "categorymembers",
@@ -560,9 +667,21 @@ def harvest_category(title: str, timeout: float = 8.0) -> list:
     })
     req = urllib.request.Request(
         f"{API}?{qs}", headers={"User-Agent": USER_AGENT,
-                                "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
+                                "Accept": "application/json",
+                                "Accept-Encoding": "identity"})
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise RateLimited(_retry_after(exc)) from exc
+        raise
+    # Wikimedia asks callers to back off after any request that took more than
+    # a second to serve. Cheap to honour, and it is the signal that precedes a
+    # 429 rather than the 429 itself.
+    if time.time() - started > 1.0:
+        time.sleep(SLOW_REPLY_SECONDS)
     members = ((data or {}).get("query") or {}).get("categorymembers") or []
     return [m.get("title") or "" for m in members if isinstance(m, dict)]
 

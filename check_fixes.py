@@ -224,6 +224,18 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c")),
              "_names_keeper")),
+        ("the Wikipedia top-up respects rate limits",
+         # Wikimedia allows an identifiable client 200 requests/min and an
+         # unidentifiable one 10. Sixteen categories at 1.1s apart is ~55/min,
+         # so a User-Agent with no contact in it put the bot in the 10/min tier
+         # and the last six categories of every cycle came back 429.
+         ("http" in __import__("names").USER_AGENT
+          or "@" in __import__("names").USER_AGENT)
+         and hasattr(__import__("names"), "RateLimited")
+         and hasattr(__import__("names").NamePool(
+             path=__import__("os").path.join(
+                 __import__("tempfile").mkdtemp(), "n.json")), "_note_refusal")
+         and hasattr(__import__("names"), "_retry_after")),
         ("the games survive a dead API instead of giving up",
          all(len(getattr(__import__("extras"), n)) >= 20 for n in
              ("JOKES", "FACTS", "RIDDLES", "WOULD_YOU_RATHER"))
