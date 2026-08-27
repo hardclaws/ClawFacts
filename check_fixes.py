@@ -194,16 +194,16 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_say_haul")),
-        ("!whois is Wikipedia, !whotwitch is Twitch, kept apart",
+        ("!whois is Wikipedia, !twitch is Twitch, kept apart",
          hasattr(__import__("whois"), "lookup")
          and hasattr(__import__("whois"), "twitch_lookup")
          and hasattr(__import__("whois"), "format_twitch")
          and hasattr(__import__("access").Helix("c", "t", "1"),
                      "channel_profile")
          and "whois" in __import__("bot").WHOIS_COMMANDS
-         and "whotwitch" in __import__("bot").WHOTWITCH_COMMANDS
+         and "twitch" in __import__("bot").TWITCH_COMMANDS
          and "helix" not in __import__("whois").lookup.__code__.co_varnames),
-        ("!whotwitch never invents a login out of a two-word name",
+        ("!twitch never invents a login out of a two-word name",
          __import__("whois").twitch_lookup(
              "Aubrey Plaza", type("H", (), {"channel_profile":
                  lambda self, l: {"display_name": l}})())["found"] is False),

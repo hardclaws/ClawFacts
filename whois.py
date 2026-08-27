@@ -1,10 +1,10 @@
-"""!whois and !whotwitch - two lookups, kept apart on purpose.
+"""!whois and !twitch - two lookups, kept apart on purpose.
 
 Neither is a model's opinion. Both post the source's own words, cut down to
 fit chat, so what they say can be checked.
 
     lookup(query)          Wikipedia's lead for a person.   !whois <name>
-    twitch_lookup(query,   The Twitch profile for a login.   !whotwitch <login>
+    twitch_lookup(query,   The Twitch profile for a login.   !twitch <login>
                         helix)
 
 They were one command for a while and that was a mistake: a name typed into a

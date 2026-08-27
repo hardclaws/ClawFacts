@@ -263,7 +263,18 @@ def test_reminders_are_moderator_only():
 
     b._reminder_command("amod", "moderator/1", "60mins Check the lights")
     assert len(said) == 1 and "reminder #1 set" in said[0], said
-    assert "tomorrow" not in said[0] and "today" in said[0], said[0]
+    # Derive the expected day word rather than hard-coding "today": a 60-minute
+    # reminder genuinely does fall tomorrow when the test runs after 23:00, and
+    # a fixed string turned the suite red every night for an hour.
+    due = b.reminders.pending()[0].due
+    if time.localtime(due)[:3] == time.localtime()[:3]:
+        expected = "today"
+    elif time.localtime(due)[:3] == time.localtime(time.time() + 86400)[:3]:
+        expected = "tomorrow"
+    else:
+        expected = "on "
+    assert expected in said[0], (expected, said[0])
+    assert ("tomorrow" in said[0]) == (expected == "tomorrow"), said[0]
     assert not said[0].endswith('"'), f"stray quote: {said[0]}"
     assert len(said[0]) <= 500
     print("[PASS] !reminder is silent for viewers and confirms for moderators")

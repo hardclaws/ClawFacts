@@ -335,27 +335,51 @@ def test_bot_whois_is_wikipedia_only():
           "profile")
 
 
-def test_bot_whotwitch():
+def test_bot_twitch():
     b, said = _bot()
 
     whois.clear_cache()
-    b._reply_whotwitch("viewer1", "hardclaws")
-    assert said[-1].startswith("WhoIs".replace("WhoIs", "WhoTwitch")
-                               + " | Hardclaws | Twitch Partner"), said[-1]
+    b._reply_twitch("viewer1", "hardclaws")
+    assert said[-1].startswith("Twitch | Hardclaws | Twitch Partner"), said[-1]
 
     # A leading # is how people actually type a channel.
     whois.clear_cache()
-    b._reply_whotwitch("viewer1", "#hardclaws")
+    b._reply_twitch("viewer1", "#hardclaws")
     assert "Twitch Partner" in said[-1], said[-1]
 
     whois.clear_cache()
-    b._reply_whotwitch("viewer1", "zzxqvnotaperson")
+    b._reply_twitch("viewer1", "zzxqvnotaperson")
     assert "no Twitch channel" in said[-1], said[-1]
 
     whois.clear_cache()
-    b._reply_whotwitch("viewer1", "")
+    b._reply_twitch("viewer1", "")
     assert "which Twitch name" in said[-1], said[-1]
-    print("[PASS] !whotwitch answers a login, a #channel, a miss and a blank")
+    print("[PASS] !twitch answers a login, a #channel, a miss and a blank")
+
+
+def test_twitch_legacy_spellings_still_work():
+    """!whotwitch / !whotw / !twitchwho keep working, unadvertised.
+
+    Renaming a command chat already knows should not break anybody mid-stream.
+    """
+    import bot as bot_mod
+
+    assert bot_mod.TWITCH_COMMANDS == {
+        "twitch", "whotwitch", "whotw", "twitchwho"}, bot_mod.TWITCH_COMMANDS
+    # !twitch is the only spelling that gets advertised.
+    b, said = _bot()
+    b._say_help("viewer1", "")
+    help_text = " ".join(said)
+    assert "!twitch <name>" in help_text, help_text
+    assert "!whotwitch" not in help_text, help_text
+
+    # Every spelling reaches the same reply.
+    for spelling in sorted(bot_mod.TWITCH_COMMANDS):
+        whois.clear_cache()
+        said.clear()
+        b._reply_twitch("viewer1", "hardclaws")
+        assert said[-1].startswith("Twitch | Hardclaws |"), (spelling, said[-1])
+    print("[PASS] all four spellings work; only !twitch appears in !help")
 
 
 def main():
@@ -375,7 +399,7 @@ def main():
                test_broken_twitch_says_so_instead_of_denying_the_channel,
                test_no_helix_is_reported_honestly, test_missing_channel,
                test_format_twitch_variants, test_bot_whois_is_wikipedia_only,
-               test_bot_whotwitch):
+               test_bot_twitch, test_twitch_legacy_spellings_still_work):
         fn()
     server.shutdown()
     print("ALL PASSED \u2714")

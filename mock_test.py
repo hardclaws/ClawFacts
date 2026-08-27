@@ -25,7 +25,7 @@ bot_mod.get_funfact = lambda location, options=None: {
     "place": f"{location.title()}",
     "fact": f"A completely offline fact about {location}.",
 }
-# !whois and !whotwitch would reach Wikipedia and api.twitch.tv; answer both
+# !whois and !twitch would reach Wikipedia and api.twitch.tv; answer both
 # locally and deterministically. Two functions because they are two commands.
 _WIKI = {"title": "Aubrey Plaza", "description": "American actress",
          "text": "Aubrey Christina Plaza (born June 26, 1984) is an American "
@@ -112,10 +112,12 @@ SCRIPT = [
     (46.0, privmsg("viewer10", "!whois Aubrey Plaza", "subscriber/01")),
     (47.5, privmsg("viewer11", "!whois Zzxqv Notaperson", "subscriber/01")),
     (49.0, privmsg("nobody", "!whois", "")),
-    # !whotwitch is its own command: a Twitch login, a miss, and a blank.
-    (50.5, privmsg("viewer12", "!whotwitch hardclaws", "subscriber/01")),
-    (52.0, privmsg("viewer13", "!whotwitch nosuchchannel", "subscriber/01")),
-    (53.5, privmsg("nobody", "!whotwitch", "")),
+    # !twitch is its own command: a login, a miss, a blank, and the old
+    # spelling still working so nobody's muscle memory breaks.
+    (50.5, privmsg("viewer12", "!twitch hardclaws", "subscriber/01")),
+    (52.0, privmsg("viewer13", "!twitch nosuchchannel", "subscriber/01")),
+    (53.5, privmsg("nobody", "!twitch", "")),
+    (54.5, privmsg("viewer18", "!whotwitch hardclaws", "subscriber/01")),
     (59.5, privmsg("viewer17", "!smk any", "vip/1")),
 ]
 
@@ -257,8 +259,8 @@ def main():
                and ("Reminder |" in l or "reminder #" in l
                     or "reminders:" in l or "no reminders" in l)]
     whois_lines = [l for l in bot_lines if "PRIVMSG" in l and "WhoIs |" in l]
-    whotw_lines = [l for l in bot_lines if "PRIVMSG" in l
-                   and "WhoTwitch |" in l]
+    twitch_lines = [l for l in bot_lines if "PRIVMSG" in l
+                    and "Twitch |" in l]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
@@ -349,26 +351,30 @@ def main():
     print(f"[PASS] !whois answered, refused a bad name, and showed usage "
           f"({len(whois_lines)} blurb(s))")
 
-    # !whotwitch is separate, and neither command answers for the other.
-    if not any(l.startswith("PRIVMSG #test :WhoTwitch | Hardclaws | Twitch "
+    # !twitch is separate, and neither command answers for the other.
+    if not any(l.startswith("PRIVMSG #test :Twitch | Hardclaws | Twitch "
                             "Partner, 45,231 followers, joined Mar 2019.")
-               for l in whotw_lines):
-        print(f"FAIL: !whotwitch did not post the channel: {whotw_lines}")
+               for l in twitch_lines):
+        print(f"FAIL: !twitch did not post the channel: {twitch_lines}")
+        return 1
+    # Two answers means the legacy !whotwitch spelling still works.
+    if len(twitch_lines) < 2:
+        print(f"FAIL: the old !whotwitch spelling stopped working: {twitch_lines}")
         return 1
     if any("Twitch" in l for l in whois_lines):
         print(f"FAIL: !whois leaked Twitch data: {whois_lines}")
         return 1
     if not any("no Twitch channel called nosuchchannel" in l for l in bot_lines):
-        print("FAIL: !whotwitch did not report a login it could not find")
+        print("FAIL: !twitch did not report a login it could not find")
         return 1
-    if not any("usage: !whotwitch <twitch name>" in l for l in bot_lines):
-        print("FAIL: !whotwitch with no argument did not show usage")
+    if not any("usage: !twitch <twitch name>" in l for l in bot_lines):
+        print("FAIL: !twitch with no argument did not show usage")
         return 1
-    if any(len(l) > 500 for l in whotw_lines):
-        print("FAIL: !whotwitch exceeded Twitch's 500-character limit")
+    if any(len(l) > 500 for l in twitch_lines):
+        print("FAIL: !twitch exceeded Twitch's 500-character limit")
         return 1
-    print(f"[PASS] !whotwitch answered a channel, refused a miss, showed "
-          f"usage ({len(whotw_lines)} profile(s))")
+    print(f"[PASS] !twitch answered a channel, refused a miss, showed usage, "
+          f"and still accepts !whotwitch ({len(twitch_lines)} profile(s))")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "

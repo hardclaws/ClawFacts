@@ -62,9 +62,11 @@ HELP_COMMANDS = {"help", "commands"}
 # !whois <name> posts the lead of that person's Wikipedia article. It is a
 # network call, so it goes through the same queue and rate limit as !funfact.
 WHOIS_COMMANDS = {"whois", "who"}
-# Deliberately separate: !whois is Wikipedia, !whotwitch is Twitch. One
+# Deliberately separate: !whois is Wikipedia, !twitch is Twitch. One
 # command that guesses which you meant answers about the wrong person.
-WHOTWITCH_COMMANDS = {"whotwitch", "whotw", "twitchwho"}
+# "twitch" is the command; the three older spellings still work so nobody's
+# muscle memory breaks, but only !twitch is advertised in !help.
+TWITCH_COMMANDS = {"twitch", "whotwitch", "whotw", "twitchwho"}
 # What gets posted into a quiet channel to get it going again. All six are
 # local or keyless, so this never spends the fact engine's budget.
 IDLE_COMMANDS = ("smk", "riddle", "joke", "randomfact", "wyr")
@@ -624,7 +626,7 @@ class TwitchBot:
         extras_enabled = bool(self.cfg.get("fun_commands", True))
         if command == "funfact" or command in HELP_COMMANDS \
                 or command in WHOIS_COMMANDS \
-                or command in WHOTWITCH_COMMANDS:
+                or command in TWITCH_COMMANDS:
             pass
         elif command in SMK_ALIASES:
             command = "smk"
@@ -655,10 +657,10 @@ class TwitchBot:
             )
             return
 
-        if command in WHOTWITCH_COMMANDS and not argument.strip():
+        if command in TWITCH_COMMANDS and not argument.strip():
             self._say(
-                f"@{nick} usage: {prefix}whotwitch <twitch name>  "
-                f"(e.g. {prefix}whotwitch hardclaws)"
+                f"@{nick} usage: {prefix}twitch <twitch name>  "
+                f"(e.g. {prefix}twitch hardclaws)"
             )
             return
 
@@ -794,7 +796,7 @@ class TwitchBot:
         self._say(self._fit(head + ": ", result.get("text") or ""))
         self._log(f"whois {query!r} -> {result.get('title')}")
 
-    def _reply_whotwitch(self, nick: str, query: str) -> None:
+    def _reply_twitch(self, nick: str, query: str) -> None:
         """Post the Twitch profile for a login - the streamer, not the celeb."""
         result = whois.twitch_lookup(query, self._access.helix)
         if not result.get("found"):
@@ -802,9 +804,9 @@ class TwitchBot:
                                 or "I couldn't find that channel."))
             return
         name = result.get("display_name") or query
-        self._say(self._fit(f"WhoTwitch | {name} | ",
+        self._say(self._fit(f"Twitch | {name} | ",
                             whois.format_twitch(result.get("profile") or {})))
-        self._log(f"whotwitch {query!r} -> {name}")
+        self._log(f"twitch {query!r} -> {name}")
 
     @staticmethod
     def _mention(nick: str) -> str:
@@ -1011,8 +1013,8 @@ class TwitchBot:
                     self._reply(nick, argument, result)
                 elif command in WHOIS_COMMANDS:
                     self._reply_whois(nick, argument)
-                elif command in WHOTWITCH_COMMANDS:
-                    self._reply_whotwitch(nick, argument)
+                elif command in TWITCH_COMMANDS:
+                    self._reply_twitch(nick, argument)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -1032,7 +1034,7 @@ class TwitchBot:
             f"{prefix}wyr - a would-you-rather",
             f"{prefix}haul - what the truck is hauling right now",
             f"{prefix}whois <name> - who that person is",
-            f"{prefix}whotwitch <name> - who that Twitch channel is",
+            f"{prefix}twitch <name> - who that Twitch channel is",
         ]
         self._say(f"@{nick} commands: " + " | ".join(lines))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "

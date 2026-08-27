@@ -207,7 +207,7 @@ Quick-and-dirty local alternatives:
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
 | `!haul`               | What the truck is hauling right now.                          |
 | `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
-| `!whotwitch hardclaws`| Who that Twitch channel is.                                   |
+| `!twitch hardclaws`   | Who that Twitch channel is.                                   |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -475,13 +475,13 @@ WhoIs | Aubrey Plaza (American actress): Aubrey Christina Plaza (born June 26,
 1984) is an American actress, comedian, producer, and writer. She gained
 recognition for playing April Ludgate on the NBC sitcom Parks and Recreation.
 
-!whotwitch hardclaws
-WhoTwitch | Hardclaws | Twitch Partner, 45,231 followers, joined Mar 2019. "Truck driver streaming from the cab."
+!twitch hardclaws
+Twitch | Hardclaws | Twitch Partner, 45,231 followers, joined Mar 2019. "Truck driver streaming from the cab."
 ```
 
 **Nothing here is written by a model.** `!whois` posts the lead of the
 person's Wikipedia article, cut to `whois_max_chars` (default 400) on a
-sentence boundary with `[1]`-style citation markers stripped. `!whotwitch`
+sentence boundary with `[1]`-style citation markers stripped. `!twitch`
 posts the channel's own bio, partner/affiliate status, follower count and join
 date. A blurb about a real person has to be something you can check.
 
@@ -490,7 +490,7 @@ decide whether you meant the actress or whoever owns the login `aubreyplaza` —
 and when it picked the login, it titled the answer after a stranger wearing a
 real person's name. Two commands, no guessing.
 
-`!whotwitch` uses `GET /helix/users` and the follower **count** from
+`!twitch` uses `GET /helix/users` and the follower **count** from
 `GET /helix/channels/followers`. Neither needs a scope, and the count comes
 back even for a channel the bot cannot moderate — only the per-user rows need
 `moderator:read:followers`. So this works with the token you already have, no
@@ -501,7 +501,9 @@ couldn't reach Twitch", never as "there is no such channel".
 name as typed is not a page title. Results are cached for six hours because
 Wikipedia rate-limits by IP.
 
-`!who` is an alias for `!whois`; `!whotw` and `!twitchwho` for `!whotwitch`.
+`!who` is an alias for `!whois`. `!twitch` was previously `!whotwitch`, and
+the old spellings `!whotwitch`, `!whotw` and `!twitchwho` all still work -
+only `!twitch` is advertised in `!help`, so nobody mid-conversation breaks.
 Both go through the same per-user rate limit as `!funfact`, since each makes a
 network call.
 
@@ -618,7 +620,7 @@ So every game has a live source and a floor:
 | `!riddle`      | riddles-api.vercel.app          | 25 riddles               |
 | `!wyr`         | api.truthordarebot.xyz          | 25 would-you-rathers     |
 | `!whois`       | Wikipedia                       | — (a miss is the answer) |
-| `!whotwitch`   | Twitch Helix                    | — (a miss is the answer) |
+| `!twitch`      | Twitch Helix                    | — (a miss is the answer) |
 
 ### Waking up a quiet channel
 
@@ -1132,7 +1134,7 @@ appends fake joke comments.
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
 | `haul.py`            | The `!haul` board.                              |
-| `whois.py`           | `!whois` (Wikipedia) and `!whotwitch` (Helix).  |
+| `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
@@ -1146,7 +1148,7 @@ appends fake joke comments.
 | `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
-| `mock_whois_test.py` | Offline `!whois` / `!whotwitch` tests.          |
+| `mock_whois_test.py` | Offline `!whois` / `!twitch` tests.             |
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_idle_test.py`  | Offline idle-chat tests.                        |
 | `tokens.json`        | Created on first login; holds the saved login.  |
