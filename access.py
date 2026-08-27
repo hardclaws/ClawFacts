@@ -162,6 +162,28 @@ class Helix:
                   flush=True)
             return None
 
+    def is_live(self, broadcaster_id: str = ""):
+        """True if the channel is streaming, False if it is not, None if the
+        question could not be settled.
+
+        Get Streams needs no scope, so the token the bot already holds is
+        enough - no extra --login just to find out whether anyone is home.
+        """
+        bid = (broadcaster_id or self.broadcaster_id or "").strip()
+        if not (bid and self.client_id and self.token):
+            return None
+        try:
+            data = _get(f"{HELIX}/helix/streams", {"user_id": bid, "first": 1},
+                        self.token, self.client_id, self.timeout)
+        except urllib.error.HTTPError as exc:
+            self.errors += 1
+            print(f"[access] streams lookup HTTP {exc.code}", flush=True)
+            return None
+        except (urllib.error.URLError, OSError, ValueError):
+            self.errors += 1
+            return None
+        return bool(data.get("data"))
+
     def moderator_of(self, broadcaster_id: str, user_id: str,
                      has_scope: bool = False):
         """True if this token's user moderates the channel, False if provably

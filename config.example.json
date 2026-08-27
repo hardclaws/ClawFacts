@@ -32,5 +32,8 @@
   "min_follow_age_seconds": 86400,
   "follower_check_failure": "deny",
   "riddle_answer_delay": 20,
-  "whois_max_chars": 400
+  "whois_max_chars": 400,
+  "idle_chat_enabled": true,
+  "idle_chat_minutes": 10,
+  "idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr"]
 }

@@ -500,6 +500,39 @@ which would be a lie about someone who exists.
 `!who` is an alias. It goes through the same per-user rate limit as `!funfact`,
 since it makes a network call.
 
+### Waking up a quiet channel
+
+Ten minutes with nobody saying anything, and the bot posts one of the five
+entertainment commands at random to give chat something to react to:
+
+```
+[04:12:31] chat idle for 600s - posting !smk
+ShagMarryKill [male] | Harrison Ford (actor), Viggo Mortensen (actor), Pedro Pascal (actor) - shag one, marry one, kill one.
+```
+
+```json
+"idle_chat_enabled": true,
+"idle_chat_minutes": 10,
+"idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr"]
+```
+
+Anything **anyone** says resets the clock — not just commands, and not just
+messages the bot acts on. The clock also resets after each post, so it is one
+per quiet window rather than one every time the checker wakes up.
+
+**It only fires while the channel is actually streaming.** A bot posting jokes
+into an offline room every ten minutes is not a feature; it is a channel that
+looks broken when the streamer comes back. The live check uses
+`GET /helix/streams`, which needs no scope, so the token the bot already holds
+is enough — no extra `--login`.
+
+Where the check cannot be settled (no token, no `client_id`, Twitch
+unreachable) it posts anyway. A missed check must not silently switch the
+feature off, and "unknown" is not the same as "offline".
+
+`!bot off` silences it, as does `"fun_commands": false`. An `!riddle` posted
+this way still reveals its answer on the timer.
+
 ### Rewrites cannot add character
 
 The LLM rewrite path is only allowed to re-word the facts the sources
@@ -967,6 +1000,7 @@ appends fake joke comments.
 | `mock_extras_test.py`| Offline extra-command tests.                    |
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
 | `mock_whois_test.py` | Offline `!whois` tests against a fake Wikipedia. |
+| `mock_idle_test.py`  | Offline idle-chat tests.                        |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |

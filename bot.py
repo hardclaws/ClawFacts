@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import random
 import re
 import socket
 import ssl
@@ -59,6 +60,9 @@ HELP_COMMANDS = {"help", "commands"}
 # !whois <name> posts the lead of that person's Wikipedia article. It is a
 # network call, so it goes through the same queue and rate limit as !funfact.
 WHOIS_COMMANDS = {"whois", "who"}
+# What gets posted into a quiet channel to get it going again. All five are
+# local or keyless, so this never spends the fact engine's budget.
+IDLE_COMMANDS = ("smk", "riddle", "joke", "randomfact", "wyr")
 # Moderator-owned state. Both stay reachable while the bot is switched off,
 # otherwise !bot off would strand a pending reminder or the cargo board.
 REMINDER_COMMANDS = {"reminder", "reminders"}
@@ -91,6 +95,12 @@ DEFAULTS = {
     # How much of the Wikipedia lead !whois posts. Trimmed on a sentence
     # boundary, so a lower number loses whole sentences, never half of one.
     "whois_max_chars": 400,
+    # Post something into a quiet channel to get it going again. Only fires
+    # while the channel is actually streaming, so it cannot chatter into an
+    # offline room all night.
+    "idle_chat_enabled": True,
+    "idle_chat_minutes": 10,
+    "idle_chat_commands": list(IDLE_COMMANDS),
     # If the follow check can't run (no token, API down, scope missing):
     # "deny" keeps the follower gate honest, "allow" falls back to badges only.
     "follower_check_failure": "deny",
@@ -248,6 +258,7 @@ class TwitchBot:
         self.reminders = reminders_mod.ReminderSet()
         self.cargo = haul_mod.Cargo()
         self._last_denial_note = {}         # login -> timestamp (spam guard)
+        self._last_chat = time.time()       # last message seen in the channel
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -417,6 +428,10 @@ class TwitchBot:
             target=self._reminder_keeper, name="reminder-keeper", daemon=True
         )
         ticker.start()
+        chatter = threading.Thread(
+            target=self._idle_chat_keeper, name="idle-chat", daemon=True
+        )
+        chatter.start()
 
         backoff = 2
         while self.running:
@@ -508,6 +523,8 @@ class TwitchBot:
     # ---- chat ---------------------------------------------------------
     def _on_message(self, nick: str, target: str, message: str,
                     login: str = "", badges: str = "") -> None:
+        # Anything anyone says counts as chat being alive, not just commands.
+        self._last_chat = time.time()
         prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
@@ -708,6 +725,64 @@ class TwitchBot:
         self._say(self._fit(head + ": ", result.get("text") or ""))
         self._log(f"whois {query!r} -> {result.get('title')}")
 
+    @staticmethod
+    def _mention(nick: str) -> str:
+        return f"@{nick} " if nick else ""
+
+    def _idle_chat_tick(self, now: float | None = None):
+        """One pass of the idle-chat clock. Returns the command it posted.
+
+        Fires when nobody has said anything in the channel for
+        `idle_chat_minutes`, and only while the channel is actually streaming -
+        a bot that posts jokes into an offline room every ten minutes is not a
+        feature. Where the live check cannot be settled it posts anyway: the
+        requested behaviour beats a guess, and a missed check must not turn the
+        whole feature off silently.
+        """
+        now = time.time() if now is None else now
+        if not self.cfg.get("idle_chat_enabled", True):
+            return None
+        if self.paused or not self.cfg.get("fun_commands", True):
+            return None
+        window = float(self.cfg.get("idle_chat_minutes", 10)) * 60.0
+        if window <= 0:
+            return None
+        idle_for = now - self._last_chat
+        if idle_for < window:
+            return None
+
+        helix = self._access.helix
+        if helix is not None and helix.is_live() is False:
+            # Offline. Hold the clock so this is not re-checked every tick.
+            self._last_chat = now
+            return None
+
+        # An explicitly empty list means "post nothing". `or IDLE_COMMANDS`
+        # would read that as "not configured" and post everything instead.
+        configured = self.cfg.get("idle_chat_commands")
+        if configured is None:
+            configured = IDLE_COMMANDS
+        pool = [c for c in configured if c in IDLE_COMMANDS]
+        if not pool:
+            return None
+        command = random.choice(pool)
+        argument = random.choice(("female", "male", "any")) \
+            if command == "smk" else ""
+        self._last_chat = now      # the next one is another window away
+        self._log(f"chat idle for {int(idle_for)}s - posting !{command}")
+        self._reply_extra("", command, argument)
+        return command
+
+    def _idle_chat_keeper(self) -> None:
+        while self.running:
+            time.sleep(15.0)
+            if not self.running:
+                return
+            try:
+                self._idle_chat_tick()
+            except Exception as exc:
+                self._log(f"idle-chat error: {exc!r}")
+
     def _tick_reminders(self) -> int:
         """One pass of the reminder clock. Returns how many it posted."""
         if not self.running or self.paused:
@@ -872,7 +947,8 @@ class TwitchBot:
             elif command == "smk":
                 picked = extras.get_smk(argument)
                 if not picked:
-                    self._say(f"@{nick} couldn't build a round right now \U0001F615")
+                    self._say(f"{self._mention(nick)}couldn't build a round "
+                              f"right now \U0001F615")
                     return
                 picks, label = picked
                 # No "you're up": naming the person who typed the command
@@ -897,7 +973,8 @@ class TwitchBot:
                     t.daemon = True
                     t.start()
                 else:
-                    self._say(f"@{nick} couldn't fetch a riddle right now 😕")
+                    self._say(f"{self._mention(nick)}couldn't fetch a riddle "
+                              f"right now 😕")
                 return
             else:
                 return
@@ -907,7 +984,8 @@ class TwitchBot:
         if text:
             self._say(_CONTROL.sub("", f"{label} | {text}")[:limit])
         else:
-            self._say(f"@{nick} couldn't fetch that right now 😕")
+            self._say(f"{self._mention(nick)}couldn't fetch that right now "
+                      f"😕")
 
     def _reply(self, nick: str, argument: str, result) -> None:
         if not result:

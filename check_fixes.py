@@ -195,6 +195,13 @@ def main() -> int:
               "deadpan."], "Aubrey Plaza", "Aubrey Plaza",
              ["Aubrey Plaza is an American actress, comedian and writer."])
          == []),
+        ("a quiet channel gets something to react to",
+         set(__import__("bot").IDLE_COMMANDS)
+         == {"smk", "riddle", "joke", "randomfact", "wyr"}
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
+                  oauth_token="oauth:x")), "_idle_chat_tick")
+         and hasattr(__import__("access").Helix("c", "t", "1"), "is_live")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),
