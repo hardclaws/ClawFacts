@@ -228,28 +228,31 @@ class FakeHelix:
 
 def test_twitch_only():
     whois.clear_cache()
-    got = whois.lookup("hardclaws", helix=FakeHelix())
-    assert got["found"] is True and got["twitch"], got
-    assert got["wiki"] is None, "there is no Wikipedia page for this login"
-    assert got["title"] == "Hardclaws", got
-    line = whois.format_twitch(got["twitch"])
+    got = whois.twitch_lookup("hardclaws", FakeHelix())
+    assert got["found"] is True, got
+    assert got["display_name"] == "Hardclaws", got
+    line = whois.format_twitch(got["profile"])
     assert line == ('Twitch Partner, 45,231 followers, joined Mar 2019. '
                     '"Truck driver streaming from the cab."'), line
-    print(f"[PASS] a streamer with no Wikipedia page: {line}")
+    print(f"[PASS] a streamer, from Twitch alone: {line}")
 
 
-def test_two_word_name_is_not_a_login():
-    """The bug this guards: squashing the spaces made 'Aubrey Plaza' match
-    whichever account owned 'aubreyplaza', and the answer was titled after a
-    stranger wearing a real person's name."""
+def test_whois_and_whotwitch_do_not_confuse_each_other():
+    """The whole reason these are two commands. 'Aubrey Plaza' is a person on
+    Wikipedia; 'aubreyplaza' is somebody else's Twitch account. Neither
+    command may answer with the other one's subject."""
     helix = FakeHelix()
     whois.clear_cache()
-    got = whois.lookup("Aubrey Plaza", helix=helix)
-    assert got["found"] is True and got["wiki"], got
-    assert got["twitch"] is None, "matched a squashed login"
-    assert got["title"] == "Aubrey Plaza", got
+    wiki = whois.lookup("Aubrey Plaza")
+    assert wiki["found"] is True and wiki["title"] == "Aubrey Plaza", wiki
     assert "aubreyplaza" not in helix.asked, helix.asked
-    print("[PASS] a two-word name is never matched to a squashed login")
+
+    whois.clear_cache()
+    tw = whois.twitch_lookup("Aubrey Plaza", helix)
+    assert tw["found"] is False, tw
+    assert "Aubrey Plaza" in tw["reason"], tw
+    assert "aubreyplaza" not in helix.asked, helix.asked
+    print("[PASS] !whois never reaches Twitch, !whotwitch never invents a login")
 
 
 def test_login_shapes_are_screened():
@@ -257,17 +260,36 @@ def test_login_shapes_are_screened():
     for query in ("hi", "way_too_long_to_be_a_real_twitch_login_name",
                   "has spaces", "punct!uation", ""):
         whois.clear_cache()
-        whois.lookup(query, helix=helix)
+        whois.twitch_lookup(query, helix)
     assert helix.asked == [], f"wasted API calls on impossible logins: {helix.asked}"
     print("[PASS] impossible logins are screened without an API call")
 
 
-def test_broken_twitch_does_not_sink_wikipedia():
+def test_broken_twitch_says_so_instead_of_denying_the_channel():
     whois.clear_cache()
-    got = whois.lookup("Aubrey Plaza", helix=FakeHelix(boom=True))
-    assert got["found"] is True and got["wiki"], got
-    assert got["twitch"] is None
-    print("[PASS] Helix failing still answers from Wikipedia")
+    got = whois.twitch_lookup("hardclaws", FakeHelix(boom=True))
+    assert got["found"] is False, got
+    assert "couldn't reach Twitch" in got["reason"], got
+    assert "no Twitch channel" not in got["reason"], got
+    # And it is not cached: the next try gets a real answer.
+    whois.clear_cache()
+    assert whois.twitch_lookup("hardclaws", FakeHelix())["found"] is True
+    print("[PASS] a Helix failure reports the failure, not 'no such channel'")
+
+
+def test_no_helix_is_reported_honestly():
+    whois.clear_cache()
+    got = whois.twitch_lookup("hardclaws", None)
+    assert got["found"] is False and "no Twitch login" in got["reason"], got
+    print("[PASS] no configured Twitch access is not reported as 'no channel'")
+
+
+def test_missing_channel():
+    whois.clear_cache()
+    got = whois.twitch_lookup("zzxqvnotaperson", FakeHelix())
+    assert got["found"] is False, got
+    assert "no Twitch channel called zzxqvnotaperson" in got["reason"], got
+    print("[PASS] a login nobody owns says so")
 
 
 def test_format_twitch_variants():
@@ -283,29 +305,57 @@ def test_format_twitch_variants():
     print("[PASS] partner / affiliate / plain, with and without bio and count")
 
 
-def test_bot_posts_both_sources():
+def _bot():
     b = bot_mod.TwitchBot(dict(bot_mod.DEFAULTS, nick="bot", channel="#test",
                                prefix="!"))
     said = []
     b._say = said.append
     b._access.helix = FakeHelix()
+    return b, said
 
-    # A login only Twitch knows.
+
+def test_bot_whois_is_wikipedia_only():
+    b, said = _bot()
+    # A person Wikipedia knows: one line, and only one.
+    whois.clear_cache()
+    b._reply_whois("viewer1", "Aubrey Plaza")
+    assert len(said) == 1, said
+    assert said[0].startswith("WhoIs | Aubrey Plaza (American actress): "), \
+        said[0]
+
+    # A login Wikipedia has never heard of. The fake Wikipedia correctly says
+    # there is no such page - and !whois must NOT quietly fall back to the
+    # Twitch profile that is sitting right there in the same object.
     whois.clear_cache()
     b._reply_whois("viewer1", "hardclaws")
-    assert len(said) == 1, said
-    assert said[0].startswith("WhoIs | Hardclaws | Twitch Partner"), said[0]
+    assert len(said) == 2, said
+    assert "couldn't find anyone called hardclaws" in said[1], said[1]
+    assert "Twitch" not in said[1], said[1]
+    print("[PASS] !whois answers from Wikipedia and never borrows the Twitch "
+          "profile")
 
-    # A person both know: Twitch line first, then the Wikipedia blurb.
-    whois.clear_cache()
-    b._reply_whois("viewer1", "smallstreamer")
-    assert said[-1].startswith("WhoIs | SmallStreamer | on Twitch"), said[-1]
 
-    # Nobody anywhere.
+def test_bot_whotwitch():
+    b, said = _bot()
+
     whois.clear_cache()
-    b._reply_whois("viewer1", "zzxqvnotaperson")
-    assert "couldn't find" in said[-1], said[-1]
-    print("[PASS] the bot posts the Twitch line, the Wikipedia line, or neither")
+    b._reply_whotwitch("viewer1", "hardclaws")
+    assert said[-1].startswith("WhoIs".replace("WhoIs", "WhoTwitch")
+                               + " | Hardclaws | Twitch Partner"), said[-1]
+
+    # A leading # is how people actually type a channel.
+    whois.clear_cache()
+    b._reply_whotwitch("viewer1", "#hardclaws")
+    assert "Twitch Partner" in said[-1], said[-1]
+
+    whois.clear_cache()
+    b._reply_whotwitch("viewer1", "zzxqvnotaperson")
+    assert "no Twitch channel" in said[-1], said[-1]
+
+    whois.clear_cache()
+    b._reply_whotwitch("viewer1", "")
+    assert "which Twitch name" in said[-1], said[-1]
+    print("[PASS] !whotwitch answers a login, a #channel, a miss and a blank")
 
 
 def main():
@@ -320,10 +370,12 @@ def main():
                test_disambiguation_is_not_an_answer, test_not_found,
                test_empty_extract, test_unreachable_raises_rather_than_denying,
                test_cached, test_bot_reply, test_twitch_only,
-               test_two_word_name_is_not_a_login,
+               test_whois_and_whotwitch_do_not_confuse_each_other,
                test_login_shapes_are_screened,
-               test_broken_twitch_does_not_sink_wikipedia,
-               test_format_twitch_variants, test_bot_posts_both_sources):
+               test_broken_twitch_says_so_instead_of_denying_the_channel,
+               test_no_helix_is_reported_honestly, test_missing_channel,
+               test_format_twitch_variants, test_bot_whois_is_wikipedia_only,
+               test_bot_whotwitch):
         fn()
     server.shutdown()
     print("ALL PASSED \u2714")

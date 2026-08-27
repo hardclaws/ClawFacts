@@ -1,12 +1,19 @@
-"""!whois <name> — a short, sourced blurb about a person.
+"""!whois and !whotwitch - two lookups, kept apart on purpose.
 
-Two sources, neither of them a model. Wikipedia's lead for the person, and -
-because this is a Twitch chat and most names typed into it are streamers - the
-Twitch profile for that login. The whole point of the command is that what it
-says can be checked, so both are the source's own words and the only thing done
-to them is cutting them down to fit chat.
+Neither is a model's opinion. Both post the source's own words, cut down to
+fit chat, so what they say can be checked.
 
-Two calls, at most:
+    lookup(query)          Wikipedia's lead for a person.   !whois <name>
+    twitch_lookup(query,   The Twitch profile for a login.   !whotwitch <login>
+                        helix)
+
+They were one command for a while and that was a mistake: a name typed into a
+Twitch chat is sometimes a streamer and sometimes a real-world celebrity, and
+no single command can tell which the asker meant. Guessing wrong produced an
+answer about the wrong person, which is worse than saying "I don't know".
+Two commands, two questions, no guessing.
+
+Wikipedia costs two calls at most:
 
     GET /api/rest_v1/page/summary/<Title>      the article, if the name matches
     GET /w/api.php?action=query&list=search=…  otherwise, find the best title
@@ -14,10 +21,8 @@ Two calls, at most:
 A disambiguation page is not an answer - "John Smith" is forty people - so
 that is reported instead of posting whichever one Wikipedia happened to list.
 
-The Twitch half is optional and duck-typed: pass anything with a
-`channel_profile(login)` method (access.Helix has one) and it is consulted,
-pass nothing and the command is Wikipedia-only. That keeps this module free of
-a Helix dependency and testable without one.
+`twitch_lookup` is duck-typed: pass anything with a `channel_profile(login)`
+method (access.Helix has one), or None and it reports that it has nothing.
 """
 
 import json
@@ -148,11 +153,12 @@ def _twitch_profile(query: str, helix):
     if not login or not 4 <= len(login) <= 25 or " " in login \
             or not re.match(r"^[a-z0-9_]+$", login):
         return None
-    try:
-        return helix.channel_profile(login)
-    except Exception as exc:          # a broken Helix must not sink the lookup
-        print(f"[whois] twitch lookup failed: {exc!r}", flush=True)
-        return None
+    # Deliberately NOT swallowed. Returning None here would make an outage
+    # indistinguishable from "that channel does not exist", and telling chat
+    # there is no such streamer when we simply could not ask is the one answer
+    # this bot is not allowed to guess at. Let it reach twitch_lookup, which
+    # reports the failure as a failure.
+    return helix.channel_profile(login)
 
 
 def _wikipedia(query: str, max_chars: int, timeout: float):
@@ -179,45 +185,28 @@ def _wikipedia(query: str, max_chars: int, timeout: float):
 
 
 def lookup(query: str, max_chars: int = DEFAULT_MAX_CHARS,
-           timeout: float = 6.0, now: float | None = None, helix=None):
-    """Find who `query` is, from Twitch and Wikipedia.
+           timeout: float = 6.0, now: float | None = None):
+    """Who is `query`, according to Wikipedia.
 
-    Returns a dict with "found", plus "twitch" and/or "wiki" when either
-    source has them, or "reason" when neither does.
-
-    Raises WhoisError when Wikipedia could not be reached *and* Twitch has
-    nothing either, so the caller can say "try again" instead of claiming the
-    person does not exist.
+    Returns {"found": True, "title", "description", "text"} or
+    {"found": False, "reason": ...}. Raises WhoisError when Wikipedia could
+    not be reached, so the caller can say "try again" rather than claiming
+    the person does not exist.
     """
     query = " ".join((query or "").split())[:MAX_QUERY]
     if len(query) < MIN_QUERY:
         return {"found": False, "reason": "who should I look up?"}
 
     now = time.time() if now is None else now
-    # Whether Twitch was consulted changes the answer, so it is part of the
-    # cache key - otherwise a Wikipedia-only result gets served to a caller
-    # that could have had the streamer's profile too.
-    key = query.lower() + ("|tw" if helix is not None else "")
+    key = query.lower()
     with _cache_lock:
         hit = _cache.get(key)
         if hit and now - hit["t"] < hit["ttl"]:
             return dict(hit["v"])
         _cache.pop(key, None)
 
-    twitch = _twitch_profile(query, helix)
-
-    wiki_error = False
-    try:
-        wiki, why = _wikipedia(query, max_chars, timeout)
-    except WhoisError:
-        wiki, why = None, "unreachable"
-        wiki_error = True
-
-    if twitch is None and wiki is None:
-        if wiki_error:
-            # Do not cache, and do not report "no such person": Wikipedia being
-            # down is not evidence that someone does not exist.
-            raise WhoisError("could not reach Wikipedia")
+    page, why = _wikipedia(query, max_chars, timeout)
+    if page is None:
         # Each failure needs a different answer: "nobody by that name" and
         # "forty people share that name" send the viewer in different
         # directions, and so does "the page exists but is empty".
@@ -231,14 +220,57 @@ def lookup(query: str, max_chars: int = DEFAULT_MAX_CHARS,
         _store(key, result, MISS_TTL, now)
         return result
 
-    result = {"found": True, "twitch": twitch, "wiki": wiki,
-              # Twitch wins the title when it has them: in a Twitch chat, a
-              # name that is a real login is almost certainly that streamer.
-              "title": (twitch or {}).get("display_name")
-                       or (wiki or {}).get("title") or query,
-              "description": (wiki or {}).get("description", ""),
-              "text": (wiki or {}).get("text", "")}
+    result = {"found": True, "title": page["title"],
+              "description": page["description"], "text": page["text"]}
     _store(key, result, HIT_TTL, now)
+    return result
+
+
+def twitch_lookup(query: str, helix, now: float | None = None,
+                  ttl: float = HIT_TTL):
+    """Who is `query` on Twitch.
+
+    Returns {"found": True, "display_name", "profile"} or
+    {"found": False, "reason": ...}. Never raises: a broken Helix is reported
+    as "I couldn't check", not as "there is no such channel".
+    """
+    # No truncation here. Cutting a 40-character name down to 25 would
+    # turn it into something that *looks* like a valid login, and then the
+    # shape check in _twitch_profile would happily spend an API call on it.
+    login = " ".join((query or "").split()).strip().lstrip("#")
+    if len(login) < MIN_QUERY:
+        return {"found": False, "reason": "which Twitch name should I look up?"}
+
+    now = time.time() if now is None else now
+    key = "tw|" + login.lower()
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and now - hit["t"] < hit["ttl"]:
+            return dict(hit["v"])
+        _cache.pop(key, None)
+
+    if helix is None:
+        return {"found": False,
+                "reason": "I have no Twitch login to check against"}
+
+    try:
+        profile = _twitch_profile(login, helix)
+    except Exception as exc:          # a broken Helix must not raise into chat
+        print(f"[whois] twitch lookup failed: {exc!r}", flush=True)
+        return {"found": False,
+                "reason": "I couldn't reach Twitch just now - try again in a "
+                          "moment"}
+
+    if not profile:
+        result = {"found": False,
+                  "reason": f"there is no Twitch channel called {login}"}
+        _store(key, result, MISS_TTL, now)
+        return result
+
+    result = {"found": True,
+              "display_name": profile.get("display_name") or login,
+              "profile": profile}
+    _store(key, result, ttl, now)
     return result
 
 

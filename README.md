@@ -206,7 +206,8 @@ Quick-and-dirty local alternatives:
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
 | `!haul`               | What the truck is hauling right now.                          |
-| `!whois hardclaws`    | Who that person is — Twitch profile and/or Wikipedia.         |
+| `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
+| `!whotwitch hardclaws`| Who that Twitch channel is.                                   |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -465,61 +466,94 @@ to carry over.
 
 ### !whois
 
-Someone in chat sees a name and wants to know who it is. Two sources are
-consulted, and whichever has them answers:
+Two commands, because they answer two different questions and guessing
+between them produces an answer about the wrong person:
 
 ```
-!whois hardclaws
-WhoIs | Hardclaws | Twitch Partner, 45,231 followers, joined Mar 2019. "Truck driver streaming from the cab."
-
 !whois Aubrey Plaza
 WhoIs | Aubrey Plaza (American actress): Aubrey Christina Plaza (born June 26,
 1984) is an American actress, comedian, producer, and writer. She gained
 recognition for playing April Ludgate on the NBC sitcom Parks and Recreation.
+
+!whotwitch hardclaws
+WhoTwitch | Hardclaws | Twitch Partner, 45,231 followers, joined Mar 2019. "Truck driver streaming from the cab."
 ```
 
-When both know the name you get both lines, Twitch first — in a Twitch chat a
-name that is a real login is almost certainly that streamer.
+**Nothing here is written by a model.** `!whois` posts the lead of the
+person's Wikipedia article, cut to `whois_max_chars` (default 400) on a
+sentence boundary with `[1]`-style citation markers stripped. `!whotwitch`
+posts the channel's own bio, partner/affiliate status, follower count and join
+date. A blurb about a real person has to be something you can check.
 
-**Nothing here is written by a model.** The Wikipedia half is the lead of the
-article, cut to `whois_max_chars` (default 400) on a sentence boundary with
-`[1]`-style citation markers stripped. The Twitch half is the account's own
-bio, partner/affiliate status, follower count and join date. A blurb about a
-real person has to be something you can check.
+These were one command for a while. That meant `!whois Aubrey Plaza` had to
+decide whether you meant the actress or whoever owns the login `aubreyplaza` —
+and when it picked the login, it titled the answer after a stranger wearing a
+real person's name. Two commands, no guessing.
 
-The Twitch lookup uses `GET /helix/users` and `GET /helix/channels/followers`.
-Neither needs a scope, and the follower **count** comes back even for a channel
-the bot cannot moderate — only the per-user rows need
+`!whotwitch` uses `GET /helix/users` and the follower **count** from
+`GET /helix/channels/followers`. Neither needs a scope, and the count comes
+back even for a channel the bot cannot moderate — only the per-user rows need
 `moderator:read:followers`. So this works with the token you already have, no
-re-login.
+re-login. A leading `#` is stripped, and a Helix failure is reported as "I
+couldn't reach Twitch", never as "there is no such channel".
 
-**The login is matched exactly as typed.** Squashing the spaces to catch
-"Aubrey Plaza" as `aubreyplaza` was tried and removed: it matched whichever
-account happened to own that login and titled the answer after it, which is a
-claim about a stranger wearing a real person's name. Twitch does not allow
-spaces in logins, so a two-word name is simply not one, and Wikipedia answers
-instead.
-
-Wikipedia costs two calls at most — the article, and its search when the name
-as typed is not a page title. Results are cached for six hours because
+`!whois` costs two calls at most — the article, and Wikipedia's search when the
+name as typed is not a page title. Results are cached for six hours because
 Wikipedia rate-limits by IP.
 
-Three refusals are distinguished, because they need different answers:
+`!who` is an alias for `!whois`; `!whotw` and `!twitchwho` for `!whotwitch`.
+Both go through the same per-user rate limit as `!funfact`, since each makes a
+network call.
+
+### !smk — and why the name pool has two layers
 
 ```
-@viewer11 I couldn't find anyone called Zzxqv Notaperson
-@viewer12 several people are called John Smith - be more specific
-@viewer13 I couldn't reach Wikipedia just now - try again in a moment.
+!smk female
+ShagMarryKill [female] | Dolly Parton (singer), Kate McKinnon (comedian), Rihanna (singer) - shag one, marry one, kill one.
 ```
 
-A disambiguation page is not an answer — "John Smith" is forty people — so it
-says so rather than posting whichever one Wikipedia happened to list. And
-Wikipedia being unreachable raises rather than reporting "no such person",
-which would be a lie about someone who exists.
+The command never names the person who asked — the round belongs to the whole
+chat, not to whoever typed it — and every name carries its occupation so the
+round is playable by people who do not recognise every face.
 
-`!who` is an alias. It goes through the same per-user rate limit as `!funfact`,
-since it makes a network call. If Helix is down or unconfigured the Wikipedia
-half still answers — one broken source must not take the command with it.
+**The pool used to be 44 names.** Draw three of those, several times a night,
+and chat sees the same faces repeatedly no matter how well it is shuffled: the
+list is simply shorter than the number of rounds people play. So:
+
+1. **A seed pool of 389 hand-picked names** (`names.py`, 185 female / 204
+   male), each with an occupation — famous enough that a round still works for
+   someone who does not follow that field. Always available, no network.
+
+2. **Wikipedia category listings, topped up in the background.** A keeper
+   thread fetches `Category:American film actresses` and 15 siblings and caches
+   whatever people it finds to `names.json`. Thousands more names, growing
+   every 12 hours (`names_topup_hours`).
+
+3. **A recency memory** of the last 240 names used, so a big pool behaves like
+   one. Without it, a 4,000-name pool still hands out the same three faces.
+
+Two things worth knowing:
+
+**The tiers are blended, not stacked.** Drawing seed-first with a recency
+window smaller than the seed pool means the harvested names are *never*
+reached, and the whole top-up does nothing. Each name in a round is drawn
+~75% from the seed pool and ~25% from the harvested tail, so new names
+actually reach chat while rounds stay recognisable.
+
+**A category listing is not a list of people.** `Category:American film
+actresses` contains `List of American film actresses`, awards pages and
+namesake pages. `person_name()` rejects those — posting one into chat as
+someone to marry is the failure mode this guards. Namesakes
+(`Jane Doe (actress)`) are skipped rather than coin-flipped, because picking
+one at random names the wrong person.
+
+The top-up is a nicety, never a dependency. Set `"names_topup_enabled": false`
+and the seed pool carries the game on its own. A Wikipedia outage, a corrupt
+`names.json` or a dead category all fall back to the seed without the command
+noticing.
+
+The other games (`!joke`, `!randomfact`, `!riddle`, `!wyr`) already fetch live
+from their own APIs, so they have no fixed pool to run dry.
 
 ### Waking up a quiet channel
 
@@ -1007,7 +1041,8 @@ appends fake joke comments.
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
 | `haul.py`            | The `!haul` board.                              |
-| `whois.py`           | `!whois` lookups against Wikipedia.             |
+| `whois.py`           | `!whois` (Wikipedia) and `!whotwitch` (Helix).  |
+| `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
@@ -1020,8 +1055,10 @@ appends fake joke comments.
 | `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
-| `mock_whois_test.py` | Offline `!whois` tests against a fake Wikipedia. |
+| `mock_whois_test.py` | Offline `!whois` / `!whotwitch` tests.          |
+| `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_idle_test.py`  | Offline idle-chat tests.                        |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |
+| `names.json`         | Harvested `!smk` names; written at runtime.     |

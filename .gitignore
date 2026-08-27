@@ -9,3 +9,6 @@ transporting.json
 # Python
 __pycache__/
 *.pyc
+
+# harvested !smk name cache (rebuilt in the background, never hand-edited)
+names.json

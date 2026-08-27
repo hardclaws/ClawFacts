@@ -54,15 +54,16 @@ def test_trim_keeps_whole_sentences():
 def test_smk_game():
     """!smk female|male|any — three distinct names from the right pool."""
     import extras
-    for gender, pool in (("female", extras._SMK_FEMALE),
-                         ("male", extras._SMK_MALE)):
+    import names
+    for gender in ("female", "male"):
+        pool = set(names.pool.available(gender))
         picks, label = extras.get_smk(gender)
         assert label == gender
         assert len(picks) == 3 and len(set(picks)) == 3, picks
         assert all(n in pool for n in picks), picks
+    both = set(names.pool.available("any"))
     picks, label = extras.get_smk("any")
     assert label == "any" and len(set(picks)) == 3
-    both = set(extras._SMK_FEMALE) | set(extras._SMK_MALE)
     assert all(n in both for n in picks)
     # Unknown or missing argument falls back to a mixed round, never crashes.
     for arg in ("", "bogus", None):
@@ -73,7 +74,7 @@ def test_smk_game():
 
     # Every entry carries what the person is known for, so a round is
     # playable by people who do not recognise every name in the pool.
-    for name, job in extras._SMK_FEMALE + extras._SMK_MALE:
+    for name, job in names.SEED_FEMALE + names.SEED_MALE:
         assert name.strip() and job.strip(), (name, job)
     picks, _ = extras.get_smk("any")
     line = extras.format_smk(picks)

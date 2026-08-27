@@ -183,20 +183,39 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_say_haul")),
-        ("!whois answers from Twitch and Wikipedia",
+        ("!whois is Wikipedia, !whotwitch is Twitch, kept apart",
          hasattr(__import__("whois"), "lookup")
+         and hasattr(__import__("whois"), "twitch_lookup")
          and hasattr(__import__("whois"), "format_twitch")
          and hasattr(__import__("access").Helix("c", "t", "1"),
                      "channel_profile")
          and "whois" in __import__("bot").WHOIS_COMMANDS
-         and hasattr(__import__("bot").TwitchBot(
-             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
-                  oauth_token="oauth:x")), "_reply_whois")),
-        ("!whois never matches a squashed Twitch login",
-         " " in "Aubrey Plaza"
-         and __import__("whois")._twitch_profile(
+         and "whotwitch" in __import__("bot").WHOTWITCH_COMMANDS
+         and "helix" not in __import__("whois").lookup.__code__.co_varnames),
+        ("!whotwitch never invents a login out of a two-word name",
+         __import__("whois").twitch_lookup(
              "Aubrey Plaza", type("H", (), {"channel_profile":
-                 lambda self, l: {"display_name": l}})()) is None),
+                 lambda self, l: {"display_name": l}})())["found"] is False),
+        ("a Helix failure is not reported as 'no such channel'",
+         "couldn't reach Twitch" in __import__("whois").twitch_lookup(
+             "hardclaws", type("H", (), {"channel_profile":
+                 lambda self, l: (_ for _ in ()).throw(OSError())})())[
+             "reason"]),
+        ("!smk draws from a pool far bigger than the old 44 names",
+         __import__("names").NamePool(
+             path=__import__("os").path.join(
+                 __import__("tempfile").mkdtemp(), "n.json")
+         ).counts()["seed"] > 300),
+        ("!smk tops itself up from Wikipedia in the background",
+         hasattr(__import__("names"), "harvest_category")
+         and hasattr(__import__("names"), "CATEGORIES")
+         and __import__("bot").DEFAULTS["names_topup_enabled"] is True
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c")),
+             "_names_keeper")),
+        ("!smk avoids names it has used recently",
+         __import__("names").RECENT_WINDOW >= 200
+         and "SEED_WEIGHT" in __import__("names").__dict__),
         ("an LLM rewrite cannot add character the source never had",
          __import__("funfacts")._grounded_filter(
              ["Aubrey Plaza: actress - and deadpan delivered with extra "

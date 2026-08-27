@@ -25,24 +25,42 @@ bot_mod.get_funfact = lambda location, options=None: {
     "place": f"{location.title()}",
     "fact": f"A completely offline fact about {location}.",
 }
-# !whois would reach en.wikipedia.org; answer it locally and deterministically.
+# !whois and !whotwitch would reach Wikipedia and api.twitch.tv; answer both
+# locally and deterministically. Two functions because they are two commands.
 _WIKI = {"title": "Aubrey Plaza", "description": "American actress",
          "text": "Aubrey Christina Plaza (born June 26, 1984) is an American "
                  "actress, comedian, producer, and writer. She gained "
                  "recognition for playing April Ludgate on Parks and "
                  "Recreation."}
 
+_TWITCH = {"id": "1", "login": "hardclaws", "display_name": "Hardclaws",
+           "bio": "Truck driver streaming from the cab.",
+           "broadcaster_type": "partner",
+           "created_at": "2019-03-04T00:00:00Z", "followers": 45231}
+
 
 def _fake_lookup(q, max_chars=400, **kw):
-    """Current whois.lookup shape: "found" plus "twitch" and/or "wiki"."""
+    """Wikipedia only. It has never heard of a Twitch login."""
     if "plaza" in (q or "").lower():
-        return {"found": True, "twitch": None, "wiki": dict(_WIKI),
-                "title": _WIKI["title"],
-                "description": _WIKI["description"], "text": _WIKI["text"]}
+        return {"found": True, **_WIKI}
     return {"found": False, "reason": f"I couldn't find anyone called {q}"}
 
 
+def _fake_twitch_lookup(q, helix=None, **kw):
+    """Twitch only. It has never heard of an actress."""
+    login = (q or "").strip().lstrip("#").lower()
+    if login == "hardclaws":
+        return {"found": True, "display_name": "Hardclaws",
+                "profile": dict(_TWITCH)}
+    if not login:
+        return {"found": False,
+                "reason": "which Twitch name should I look up?"}
+    return {"found": False,
+            "reason": f"there is no Twitch channel called {login}"}
+
+
 bot_mod.whois.lookup = _fake_lookup
+bot_mod.whois.twitch_lookup = _fake_twitch_lookup
 
 HOST, PORT = "127.0.0.1", 6667
 
@@ -94,6 +112,10 @@ SCRIPT = [
     (46.0, privmsg("viewer10", "!whois Aubrey Plaza", "subscriber/01")),
     (47.5, privmsg("viewer11", "!whois Zzxqv Notaperson", "subscriber/01")),
     (49.0, privmsg("nobody", "!whois", "")),
+    # !whotwitch is its own command: a Twitch login, a miss, and a blank.
+    (50.5, privmsg("viewer12", "!whotwitch hardclaws", "subscriber/01")),
+    (52.0, privmsg("viewer13", "!whotwitch nosuchchannel", "subscriber/01")),
+    (53.5, privmsg("nobody", "!whotwitch", "")),
 ]
 
 
@@ -219,6 +241,8 @@ def main():
                and ("Reminder |" in l or "reminder #" in l
                     or "reminders:" in l or "no reminders" in l)]
     whois_lines = [l for l in bot_lines if "PRIVMSG" in l and "WhoIs |" in l]
+    whotw_lines = [l for l in bot_lines if "PRIVMSG" in l
+                   and "WhoTwitch |" in l]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
@@ -308,6 +332,27 @@ def main():
         return 1
     print(f"[PASS] !whois answered, refused a bad name, and showed usage "
           f"({len(whois_lines)} blurb(s))")
+
+    # !whotwitch is separate, and neither command answers for the other.
+    if not any(l.startswith("PRIVMSG #test :WhoTwitch | Hardclaws | Twitch "
+                            "Partner, 45,231 followers, joined Mar 2019.")
+               for l in whotw_lines):
+        print(f"FAIL: !whotwitch did not post the channel: {whotw_lines}")
+        return 1
+    if any("Twitch" in l for l in whois_lines):
+        print(f"FAIL: !whois leaked Twitch data: {whois_lines}")
+        return 1
+    if not any("no Twitch channel called nosuchchannel" in l for l in bot_lines):
+        print("FAIL: !whotwitch did not report a login it could not find")
+        return 1
+    if not any("usage: !whotwitch <twitch name>" in l for l in bot_lines):
+        print("FAIL: !whotwitch with no argument did not show usage")
+        return 1
+    if any(len(l) > 500 for l in whotw_lines):
+        print("FAIL: !whotwitch exceeded Twitch's 500-character limit")
+        return 1
+    print(f"[PASS] !whotwitch answered a channel, refused a miss, showed "
+          f"usage ({len(whotw_lines)} profile(s))")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "

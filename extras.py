@@ -75,37 +75,10 @@ def get_wyr() -> str | None:
     return question or None
 
 # ---- shag / marry / kill ---------------------------------------------------
-# A local pool rather than an API: no third-party dependency, no waiting on a
-# network call mid-command, and every name is a public figure so nobody in chat
-# gets named by accident.
-# (name, what they are known for). The job is printed with the name so a round
-# is playable by people who do not recognise every face in the pool.
-_SMK_FEMALE = [
-    ("Rihanna", "singer"), ("Beyonc\u00e9", "singer"), ("Dolly Parton", "singer"),
-    ("Florence Pugh", "actress"), ("Margot Robbie", "actress"),
-    ("Sandra Bullock", "actress"), ("Zendaya", "actress"),
-    ("Viola Davis", "actress"), ("Charlize Theron", "actress"),
-    ("Aubrey Plaza", "actress"), ("Betty White", "actress"),
-    ("Lucille Ball", "comedienne"), ("Jamie Lee Curtis", "actress"),
-    ("Olivia Colman", "actress"), ("Hayley Atwell", "actress"),
-    ("Kate McKinnon", "comedian"), ("Tina Fey", "comedian"),
-    ("Sofia Vergara", "actress"), ("Emma Thompson", "actress"),
-    ("Sigourney Weaver", "actress"), ("Rachel McAdams", "actress"),
-    ("Awkwafina", "rapper"),
-]
-_SMK_MALE = [
-    ("Idris Elba", "actor"), ("Keanu Reeves", "actor"),
-    ("Danny DeVito", "actor"), ("Pedro Pascal", "actor"),
-    ("Steve Buscemi", "actor"), ("Matthew McConaughey", "actor"),
-    ("Bryan Cranston", "actor"), ("Oscar Isaac", "actor"),
-    ("Jeff Goldblum", "actor"), ("Paul Rudd", "actor"),
-    ("Harrison Ford", "actor"), ("Morgan Freeman", "actor"),
-    ("Tom Hanks", "actor"), ("Jason Momoa", "actor"), ("Dev Patel", "actor"),
-    ("Giancarlo Esposito", "actor"), ("Willem Dafoe", "actor"),
-    ("Chris Pratt", "actor"), ("Daniel Kaluuya", "actor"),
-    ("Rami Malek", "actor"), ("Viggo Mortensen", "actor"),
-    ("Seth Rogen", "comedian"),
-]
+# The names live in names.py: a hand-picked seed pool plus Wikipedia category
+# listings topped up in the background. This module just formats the round.
+
+import names
 
 
 def format_smk(picks) -> str:
@@ -116,20 +89,8 @@ def format_smk(picks) -> str:
 def get_smk(gender: str = "any"):
     """Three (name, job) pairs for shag / marry / kill.
 
-    `gender` is "female", "male" or "any" (mixed). Returns None if the pool is
-    too small to draw three distinct names.
+    `gender` is "female", "male" or "any" (mixed). Returns None only if the
+    pool genuinely has fewer than three names, which the seed pool alone makes
+    impossible - this is here so a caller never has to trust that.
     """
-    g = (gender or "any").strip().lower()
-    if g in ("f", "female", "women", "woman", "her"):
-        pool = list(_SMK_FEMALE)
-        label = "female"
-    elif g in ("m", "male", "men", "man", "him"):
-        pool = list(_SMK_MALE)
-        label = "male"
-    else:
-        pool = list(_SMK_FEMALE) + list(_SMK_MALE)
-        label = "any"
-    if len(pool) < 3:
-        return None
-    picks = random.sample(pool, 3)
-    return picks, label
+    return names.get_smk(gender)

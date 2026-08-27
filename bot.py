@@ -43,6 +43,7 @@ import access
 import extras
 import reminders as reminders_mod
 import haul as haul_mod
+import names as names_mod
 import whois
 from funfacts import get_funfact, trim_to_fit
 
@@ -60,6 +61,9 @@ HELP_COMMANDS = {"help", "commands"}
 # !whois <name> posts the lead of that person's Wikipedia article. It is a
 # network call, so it goes through the same queue and rate limit as !funfact.
 WHOIS_COMMANDS = {"whois", "who"}
+# Deliberately separate: !whois is Wikipedia, !whotwitch is Twitch. One
+# command that guesses which you meant answers about the wrong person.
+WHOTWITCH_COMMANDS = {"whotwitch", "whotw", "twitchwho"}
 # What gets posted into a quiet channel to get it going again. All five are
 # local or keyless, so this never spends the fact engine's budget.
 IDLE_COMMANDS = ("smk", "riddle", "joke", "randomfact", "wyr")
@@ -101,6 +105,11 @@ DEFAULTS = {
     "idle_chat_enabled": True,
     "idle_chat_minutes": 10,
     "idle_chat_commands": list(IDLE_COMMANDS),
+    # !smk draws from a seed pool plus Wikipedia category listings fetched in
+    # the background. Turn this off and the seed pool (a few hundred names)
+    # carries the game on its own - it never depends on the network.
+    "names_topup_enabled": True,
+    "names_topup_hours": 12,
     # If the follow check can't run (no token, API down, scope missing):
     # "deny" keeps the follower gate honest, "allow" falls back to badges only.
     "follower_check_failure": "deny",
@@ -432,6 +441,10 @@ class TwitchBot:
             target=self._idle_chat_keeper, name="idle-chat", daemon=True
         )
         chatter.start()
+        librarian = threading.Thread(
+            target=self._names_keeper, name="names-topup", daemon=True
+        )
+        librarian.start()
 
         backoff = 2
         while self.running:
@@ -562,7 +575,8 @@ class TwitchBot:
 
         extras_enabled = bool(self.cfg.get("fun_commands", True))
         if command == "funfact" or command in HELP_COMMANDS \
-                or command in WHOIS_COMMANDS:
+                or command in WHOIS_COMMANDS \
+                or command in WHOTWITCH_COMMANDS:
             pass
         elif command in SMK_ALIASES:
             command = "smk"
@@ -590,6 +604,13 @@ class TwitchBot:
             self._say(
                 f"@{nick} usage: {prefix}whois <name>  "
                 f"(e.g. {prefix}whois Aubrey Plaza)"
+            )
+            return
+
+        if command in WHOTWITCH_COMMANDS and not argument.strip():
+            self._say(
+                f"@{nick} usage: {prefix}whotwitch <twitch name>  "
+                f"(e.g. {prefix}whotwitch hardclaws)"
             )
             return
 
@@ -704,12 +725,11 @@ class TwitchBot:
         return f"{clock} {zone} on " + time.strftime("%a %d %b", due_lt)
 
     def _reply_whois(self, nick: str, query: str) -> None:
-        """Post what Twitch and Wikipedia say - not a model's take."""
+        """Post Wikipedia's own words about a person - not a model's take."""
         try:
             result = whois.lookup(
                 query, int(self.cfg.get("whois_max_chars",
-                                        whois.DEFAULT_MAX_CHARS)),
-                helix=self._access.helix)
+                                        whois.DEFAULT_MAX_CHARS)))
         except whois.WhoisError as exc:
             self._log(f"whois {query!r} failed: {exc}")
             self._say(f"@{nick} I couldn't reach Wikipedia just now - "
@@ -719,27 +739,24 @@ class TwitchBot:
             self._say(self._fit(f"@{nick} ", result.get("reason")
                                 or "I couldn't find that."))
             return
+        head = f"WhoIs | {result.get('title') or query}"
+        description = (result.get("description") or "").strip()
+        if description:
+            head += f" ({description})"
+        self._say(self._fit(head + ": ", result.get("text") or ""))
+        self._log(f"whois {query!r} -> {result.get('title')}")
 
-        twitch, wiki = result.get("twitch"), result.get("wiki")
-        # A caller that found someone must always be answered. Older callers
-        # put title/description/text at the top level rather than under
-        # "wiki", and a silent no-op is the worst possible reply.
-        if wiki is None and result.get("text"):
-            wiki = {k: result.get(k) for k in ("title", "description",
-                                               "text")}
-        if twitch:
-            self._say(self._fit(
-                f"WhoIs | {twitch.get('display_name') or query} | ",
-                whois.format_twitch(twitch)))
-        if wiki:
-            head = f"WhoIs | {wiki.get('title') or query}"
-            description = (wiki.get("description") or "").strip()
-            if description:
-                head += f" ({description})"
-            self._say(self._fit(head + ": ", wiki.get("text") or ""))
-        sources = "+".join(n for n, have in (("twitch", twitch),
-                                             ("wikipedia", wiki)) if have)
-        self._log(f"whois {query!r} -> {result.get('title')} ({sources})")
+    def _reply_whotwitch(self, nick: str, query: str) -> None:
+        """Post the Twitch profile for a login - the streamer, not the celeb."""
+        result = whois.twitch_lookup(query, self._access.helix)
+        if not result.get("found"):
+            self._say(self._fit(f"@{nick} ", result.get("reason")
+                                or "I couldn't find that channel."))
+            return
+        name = result.get("display_name") or query
+        self._say(self._fit(f"WhoTwitch | {name} | ",
+                            whois.format_twitch(result.get("profile") or {})))
+        self._log(f"whotwitch {query!r} -> {name}")
 
     @staticmethod
     def _mention(nick: str) -> str:
@@ -788,6 +805,37 @@ class TwitchBot:
         self._log(f"chat idle for {int(idle_for)}s - posting !{command}")
         self._reply_extra("", command, argument)
         return command
+
+    def _names_tick(self) -> int:
+        """Top the !smk name pool up from Wikipedia. Returns names added.
+
+        Runs off-thread: this makes one API call per category at about a
+        second apart, and a chat command must never wait on it.
+        """
+        if not self.cfg.get("names_topup_enabled", True):
+            return 0
+        added = names_mod.pool.top_up()
+        if added:
+            counts = names_mod.pool.counts()
+            self._log(f"names: +{added} harvested "
+                      f"({counts['harvested']} cached, "
+                      f"{counts['female']}f/{counts['male']}m available)")
+        return added
+
+    def _names_keeper(self) -> None:
+        # A short first wait so a restart does not stall the join, then the
+        # configured interval. Harvesting is a nicety, never a dependency.
+        time.sleep(30.0)
+        while self.running:
+            try:
+                self._names_tick()
+            except Exception as exc:
+                self._log(f"names top-up error: {exc!r}")
+            for _ in range(int(float(self.cfg.get("names_topup_hours", 12))
+                               * 3600)):
+                if not self.running:
+                    return
+                time.sleep(1.0)
 
     def _idle_chat_keeper(self) -> None:
         while self.running:
@@ -915,6 +963,8 @@ class TwitchBot:
                     self._reply(nick, argument, result)
                 elif command in WHOIS_COMMANDS:
                     self._reply_whois(nick, argument)
+                elif command in WHOTWITCH_COMMANDS:
+                    self._reply_whotwitch(nick, argument)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -934,6 +984,7 @@ class TwitchBot:
             f"{prefix}wyr - a would-you-rather",
             f"{prefix}haul - what the truck is hauling right now",
             f"{prefix}whois <name> - who that person is",
+            f"{prefix}whotwitch <name> - who that Twitch channel is",
         ]
         self._say(f"@{nick} commands: " + " | ".join(lines))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
