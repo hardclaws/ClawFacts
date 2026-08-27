@@ -78,24 +78,43 @@ def get_wyr() -> str | None:
 # A local pool rather than an API: no third-party dependency, no waiting on a
 # network call mid-command, and every name is a public figure so nobody in chat
 # gets named by accident.
+# (name, what they are known for). The job is printed with the name so a round
+# is playable by people who do not recognise every face in the pool.
 _SMK_FEMALE = [
-    "Rihanna", "Beyoncé", "Dolly Parton", "Florence Pugh", "Margot Robbie",
-    "Sandra Bullock", "Zendaya", "Viola Davis", "Charlize Theron", "Aubrey Plaza",
-    "Betty White", "Lucille Ball", "Jamie Lee Curtis", "Olivia Colman",
-    "Hayley Atwell", "Kate McKinnon", "Tina Fey", "Sofia Vergara",
-    "Emma Thompson", "Sigourney Weaver", "Rachel McAdams", "Awkwafina",
+    ("Rihanna", "singer"), ("Beyonc\u00e9", "singer"), ("Dolly Parton", "singer"),
+    ("Florence Pugh", "actress"), ("Margot Robbie", "actress"),
+    ("Sandra Bullock", "actress"), ("Zendaya", "actress"),
+    ("Viola Davis", "actress"), ("Charlize Theron", "actress"),
+    ("Aubrey Plaza", "actress"), ("Betty White", "actress"),
+    ("Lucille Ball", "comedienne"), ("Jamie Lee Curtis", "actress"),
+    ("Olivia Colman", "actress"), ("Hayley Atwell", "actress"),
+    ("Kate McKinnon", "comedian"), ("Tina Fey", "comedian"),
+    ("Sofia Vergara", "actress"), ("Emma Thompson", "actress"),
+    ("Sigourney Weaver", "actress"), ("Rachel McAdams", "actress"),
+    ("Awkwafina", "rapper"),
 ]
 _SMK_MALE = [
-    "Idris Elba", "Keanu Reeves", "Danny DeVito", "Pedro Pascal", "Steve Buscemi",
-    "Matthew McConaughey", "Bryan Cranston", "Oscar Isaac", "Jeff Goldblum",
-    "Paul Rudd", "Harrison Ford", "Morgan Freeman", "Tom Hanks", "Jason Momoa",
-    "Dev Patel", "Giancarlo Esposito", "Willem Dafoe", "Chris Pratt",
-    "Daniel Kaluuya", "Rami Malek", "Viggo Mortensen", "Seth Rogen",
+    ("Idris Elba", "actor"), ("Keanu Reeves", "actor"),
+    ("Danny DeVito", "actor"), ("Pedro Pascal", "actor"),
+    ("Steve Buscemi", "actor"), ("Matthew McConaughey", "actor"),
+    ("Bryan Cranston", "actor"), ("Oscar Isaac", "actor"),
+    ("Jeff Goldblum", "actor"), ("Paul Rudd", "actor"),
+    ("Harrison Ford", "actor"), ("Morgan Freeman", "actor"),
+    ("Tom Hanks", "actor"), ("Jason Momoa", "actor"), ("Dev Patel", "actor"),
+    ("Giancarlo Esposito", "actor"), ("Willem Dafoe", "actor"),
+    ("Chris Pratt", "actor"), ("Daniel Kaluuya", "actor"),
+    ("Rami Malek", "actor"), ("Viggo Mortensen", "actor"),
+    ("Seth Rogen", "comedian"),
 ]
+
+
+def format_smk(picks) -> str:
+    """[(name, job), ...] -> 'Rihanna (singer), Zendaya (actress), ...'"""
+    return ", ".join(f"{name} ({job})" if job else name for name, job in picks)
 
 
 def get_smk(gender: str = "any"):
-    """Three names for shag / marry / kill.
+    """Three (name, job) pairs for shag / marry / kill.
 
     `gender` is "female", "male" or "any" (mixed). Returns None if the pool is
     too small to draw three distinct names.

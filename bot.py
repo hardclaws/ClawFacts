@@ -834,11 +834,15 @@ class TwitchBot:
                 if not picked:
                     self._say(f"@{nick} couldn't build a round right now \U0001F615")
                     return
-                names, label = picked
-                a, bb, c = names
+                picks, label = picked
+                # No "you're up": naming the person who typed the command
+                # turns a game the whole chat can play into a solo turn. Each
+                # name carries what they are known for, so a round is playable
+                # by people who do not recognise every face in the pool.
                 self._say(_CONTROL.sub(
-                    "", f"ShagMarryKill [{label}] | {a}, {bb}, {c} - "
-                        f"shag one, marry one, kill one. {nick}, you're up.")[:limit])
+                    "", f"ShagMarryKill [{label}] | "
+                        f"{extras.format_smk(picks)} - shag one, marry one, "
+                        f"kill one.")[:limit])
                 return
             elif command == "riddle":
                 pair = extras.get_riddle()

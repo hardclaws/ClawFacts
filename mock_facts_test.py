@@ -70,7 +70,19 @@ def test_smk_game():
     # Shorthands work too.
     assert extras.get_smk("f")[1] == "female"
     assert extras.get_smk("M")[1] == "male"
-    print("[PASS] !smk draws three distinct names per gender")
+
+    # Every entry carries what the person is known for, so a round is
+    # playable by people who do not recognise every name in the pool.
+    for name, job in extras._SMK_FEMALE + extras._SMK_MALE:
+        assert name.strip() and job.strip(), (name, job)
+    picks, _ = extras.get_smk("any")
+    line = extras.format_smk(picks)
+    assert line.count("(") == 3 and line.count(")") == 3, line
+    assert ", " in line and line.count(", ") == 2, line
+    for name, job in picks:
+        assert f"{name} ({job})" in line, line
+    assert extras.format_smk([("Prince", "")]) == "Prince"
+    print(f"[PASS] !smk draws three distinct names, each with a job: {line}")
 
 
 def test_rotation():

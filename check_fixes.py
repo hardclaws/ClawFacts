@@ -136,10 +136,12 @@ def main() -> int:
              "A first sentence that is complete. A second one that runs on and "
              "on until it is far past any sensible limit for a chat message.",
              60).endswith("\u2026")),
-        ("!smk female|male|any game",
+        ("!smk female|male|any game, names carry an occupation",
          hasattr(__import__("extras"), "get_smk")
          and __import__("extras").get_smk("female")[1] == "female"
-         and __import__("extras").get_smk("any")[1] == "any"),
+         and __import__("extras").get_smk("any")[1] == "any"
+         and __import__("extras").format_smk(
+             __import__("extras").get_smk("any")[0]).count("(") == 3),
         ("!help lists the commands",
          "_say_help" in open(
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),

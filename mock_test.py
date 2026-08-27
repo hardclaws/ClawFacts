@@ -295,6 +295,19 @@ def main():
         if body.count(",") < 2 or "shag one, marry one, kill one" not in body:
             print(f"FAIL: malformed !smk line: {line}")
             return 1
+        # The round belongs to the whole chat: no "you're up", and no mention
+        # of whoever typed the command.
+        if "you're up" in line or "you\u2019re up" in line:
+            print(f"FAIL: !smk nominated someone: {line}")
+            return 1
+        for asker in ("viewer7", "viewer8", "viewer9"):
+            if asker in line:
+                print(f"FAIL: !smk named the person who asked: {line}")
+                return 1
+        # Each of the three names must say who they are.
+        if line.count("(") < 3 or line.count(")") < 3:
+            print(f"FAIL: !smk did not give every name an occupation: {line}")
+            return 1
     print(f"[PASS] !help and !smk female/male/any -> "
           f"{len(helps)} help line(s), {len(smk)} round(s)")
     if not turned_away:

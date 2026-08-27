@@ -350,7 +350,7 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 | Command | What it does |
 |---|---|
 | `!funfact <place>` | A real fun fact about a town. `!funfacts` is the same command |
-| `!smk female\|male\|any` | Shag, marry or kill — three names from that pool |
+| `!smk female\|male\|any` | Shag, marry or kill — three names, each with their occupation |
 | `!joke` | A joke |
 | `!randomfact` | A random fact |
 | `!riddle` | A riddle; the answer follows after `riddle_answer_delay` seconds |
@@ -365,6 +365,15 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 `!smk` is also accepted as `!shagmarrykill` or `!marryshagkill`, and `f`/`m`
 work as shorthands for `female`/`male`. Its names come from a local pool of
 public figures — no API call, and nobody in chat gets named by accident.
+
+```
+ShagMarryKill [female] | Dolly Parton (singer), Kate McKinnon (comedian), Rihanna (singer) - shag one, marry one, kill one.
+```
+
+The round is posted on its own, with no one nominated to answer it — anyone in
+chat can play, not just whoever typed the command. Each name carries what that
+person is known for, so a round is playable by people who do not recognise
+every face in the pool.
 
 `!help` is answered before the rate limiter, so a viewer can read what the bot
 does even if they aren't allowed to run a command yet. Everything else is
