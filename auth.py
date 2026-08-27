@@ -269,8 +269,20 @@ def refresh_if_possible(cfg: dict) -> str | None:
             print("[auth] refreshed access token.")
             return _store_tokens(new, client_id)
         except OAuthError as exc:
-            print(f"[auth] refresh failed ({exc}); a fresh login is needed.",
-                  file=sys.stderr)
+            if not client_secret and "client secret" in str(exc).lower():
+                # Twitch only lets a *public* client refresh without a secret.
+                # A confidential app - the console default - must send one, and
+                # device-flow access tokens only last 4 hours, so without it
+                # the bot needs a human to re-authorise four times a day.
+                print("[auth] refresh failed: your app is a Confidential "
+                      "client, so Twitch needs client_secret to renew the "
+                      "token. Add \"client_secret\" to config.json (Dev "
+                      "Console -> your app -> New Secret), or set the app's "
+                      "client type to Public. Until then the login expires "
+                      "about every 4 hours.", file=sys.stderr)
+            else:
+                print(f"[auth] refresh failed ({exc}); a fresh login is "
+                      f"needed.", file=sys.stderr)
     return None
 
 

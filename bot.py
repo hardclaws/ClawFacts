@@ -410,6 +410,16 @@ class TwitchBot:
                       "oauth token. Only badged users (mod/VIP/subscriber) can "
                       "use the commands; everyone else is refused.")
             return
+        if not (self.cfg.get("client_secret") or "").strip():
+            # Device-flow access tokens last about 4 hours, and a
+            # Confidential app (the Dev Console default) cannot renew one
+            # without its secret. Say so now rather than letting the login
+            # quietly die mid-stream and then blaming something else.
+            self._log("[auth] no client_secret in config.json - if your app is "
+                      "a Confidential client the login expires in about 4 "
+                      "hours and will need 'python3 bot.py --login' again. "
+                      "Set the app's client type to Public, or add the "
+                      "secret.")
         self._resolve_broadcaster(self.cfg.get("channel", ""))
         if not helix.broadcaster_id:
             self._log("[access] could not look up the channel's id, so follow "

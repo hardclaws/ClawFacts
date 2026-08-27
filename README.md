@@ -110,7 +110,7 @@ Edit `config.json`:
 | `nick`             | The bot account's username (lowercase).                        |
 | `oauth_token`      | Leave blank — the bot fills this in automatically after login. |
 | `client_id`        | Client ID from step 2.                                         |
-| `client_secret`    | Optional; only needed to revoke the login later.               |
+| `client_secret`    | **Needed to stay logged in** unless your app is a Public client. |
 | `channel`          | Channel to join, e.g. `#your_channel`.                         |
 | `prefix`           | Command prefix (default `!`).                                  |
 | `cooldown_seconds` | Minimum seconds between lookups (default 5).                   |

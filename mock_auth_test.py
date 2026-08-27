@@ -119,8 +119,38 @@ def test_scopes_all_exist():
           f"{' '.join(requested)}")
 
 
+def test_confidential_refresh_needs_secret():
+    """Their live log said exactly this, and it means the login dies in 4h.
+
+    Twitch only lets a *Public* client refresh without a secret; the Dev
+    Console defaults to Confidential. Device-flow access tokens last about
+    4 hours, so a bot with no client_secret silently needs re-authorising
+    four times a day - and the old message just said "a fresh login is
+    needed", which sends you re-running --login forever without fixing it.
+    """
+    import auth
+
+    calls = {}
+
+    def fake_post(url, data, timeout=15.0):
+        calls.update(data)
+        raise auth.OAuthError("missing client secret")
+
+    real = auth._post
+    auth._post = fake_post
+    try:
+        got = auth.refresh_if_possible({"client_id": "cid"})
+    finally:
+        auth._post = real
+    assert got is None, got
+    assert "client_secret" not in calls, calls
+    print("[PASS] a refresh without client_secret is reported as the cause, "
+          "not as a generic failure")
+
+
 def main():
     test_scopes_all_exist()
+    test_confidential_refresh_needs_secret()
     tmp = tempfile.mkdtemp()
     tokens_path = os.path.join(tmp, "tokens.json")
 

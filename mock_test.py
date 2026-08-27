@@ -214,7 +214,15 @@ def test_bad_config_is_reported_plainly():
                 code = exc.code
         text = err.getvalue()
     assert code == 2, f"expected exit code 2, got {code}"
-    assert "line 24, column 3" in text, text
+    # Derive the expected line instead of hard-coding it: config.example.json
+    # gains keys over time, and a fixed number turns an unrelated edit into a
+    # false failure here. json reports the line AFTER the missing comma.
+    bad = broken.splitlines()
+    expected = next(n for n, l in enumerate(bad, 1)
+                    if l.strip().startswith('"_llm_options"')) + 1
+    assert f"line {expected}, column 3" in text, text
+    # And it must be pointing at a real line of that file, not a guess.
+    assert bad[expected - 1].strip().startswith('"access_control"'), bad[expected - 1]
     assert "does not end with a comma" in text, text
     print("[PASS] a broken config.json names the line and stops the restart loop")
 
