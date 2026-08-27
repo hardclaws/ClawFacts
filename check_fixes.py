@@ -64,6 +64,10 @@ def main() -> int:
          hasattr(funfacts, "_EXTRACT_CHAR_CAP")),
         ("curated Cuba, Missouri facts (Red Rocker, Big Red Apple)",
          bool(funfacts._spicy_db("Cuba, Missouri", 200))),
+        ("'It is located on...' no longer outranks real history",
+         hasattr(funfacts, "_LOCATION_ONLY")),
+        ("curated Jerome, Missouri facts (Stony Dell, Trail of Tears)",
+         bool(funfacts._spicy_db("Jerome, Missouri", 200))),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

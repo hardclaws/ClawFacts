@@ -1223,6 +1223,28 @@ def test_curated_cuba_missouri():
     # Bare "Cuba" is the island nation — it must not match.
     assert funfacts._spicy_db("Cuba", 200) is None
 
+
+def test_location_line_never_outranks_history():
+    """Jerome, Missouri's entire article is one 'It is located on the Gasconade
+    River near Interstate 44...' sentence and one history sentence. The location
+    line scored 6 (because 'interstate' is a ranking word) and the history 4, so
+    the dull line was the only seed the model got."""
+    both = ["It is located on the Gasconade River near Interstate 44.",
+            'Jerome was originally called "Fremont Town", and under the latter '
+            "name was platted in 1867 when the railroad was extended."]
+    out = funfacts._ranked_facts(both, spice=True, limit=200)
+    assert out and "Fremont Town" in out[0], out
+    assert not any("It is located" in f for f in out)
+    # A pool of nothing but a location line stays empty, so the caller falls
+    # through to the next source rather than posting "it is near the interstate".
+    assert funfacts._ranked_facts(
+        ["It is located on the Gasconade River near Interstate 44."],
+        spice=True, limit=200) == []
+    # ...and a namesake person stub is never posted either.
+    assert funfacts._ranked_facts(
+        ["Joe Girard, Guinness Book of World Records winning American salesman"],
+        spice=True, limit=200) == []
+
 def main():
     test_trim()
     test_rotation()
@@ -1245,6 +1267,7 @@ def main():
     test_comma_less_region()
     test_namesake_ranking()
     test_namesake_person_stubs()
+    test_location_line_never_outranks_history()
     test_attraction_ranking()
     test_explicit_filter()
     test_tasteless_filter()

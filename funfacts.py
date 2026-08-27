@@ -48,6 +48,7 @@ SPICY_DB_PATH = os.path.join(
 # "Trucker-flavoured" words are included since the bot targets a trucking stream.
 _STRONG = re.compile(
     r"\b(visited|visits|emergency landing|rocking chair|"
+    r"originally called|originally named|formerly known as|formerly called|renamed|"
     r"oldest|youngest|first|second|largest|smallest|tallest|longest|"
     r"shortest|deepest|highest|lowest|only|last|birthplace|famous|"
     r"known for|best known|home of|named after|named for|world|"
@@ -184,6 +185,16 @@ _STUB_VERB = re.compile(
     r"\b(is|are|was|were|be|been|being|has|have|had|became|becomes|serves?|"
     r"served|founded|opened|built|established|born|died|lived|located|stands?|"
     r"holds?|hosted|won|named|settled|incorporated)\b", re.IGNORECASE)
+
+
+# "It is located on the Gasconade River near Interstate 44, and is approximately
+# ten miles west of Rolla" is where-a-place-is, not a fun fact — but it scored 6
+# because 'interstate' is a _STRONG word, which also suppressed the filler check,
+# so it outranked Jerome MO's only piece of history (platted 1867 as Fremont
+# Town) and reached the model as the sole seed.
+_LOCATION_ONLY = re.compile(
+    r"^\s*(?:it|there|the\s+(?:community|town|city|village|cdp|hamlet))\s+"
+    r"(?:is\s+|was\s+)?(?:located|situated|lies|sits)\b", re.IGNORECASE)
 
 
 def _is_person_stub(sentence: str) -> bool:
@@ -448,7 +459,12 @@ def _ranked_facts(sentences: list, spice: bool = False,
                     key=lambda p: (-p[1], len(p[0])))
     out, seen_norm = [], []
     for s, sc in ranked:
-        if _is_filler(s) or _is_junk_seed(s) or _is_person_stub(s):
+        # All four of these are skipped outright, even when nothing else
+        # survives: an empty pool makes the caller fall through to the next
+        # source (or a related article) instead of posting a census line, a
+        # "it is located near..." line, SEO boilerplate or a namesake person.
+        if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
+                or _LOCATION_ONLY.match(s)):
             continue
         if sc < 2 and out:
             break
