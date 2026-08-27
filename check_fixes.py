@@ -162,8 +162,19 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_diagnose_access")),
-        ("moderation:read:moderators is requested at login",
-         "moderation:read:moderators" in __import__("auth").SCOPES),
+        ("only scopes Twitch actually has are requested at login",
+         # "moderation:read:moderators" is not a Twitch scope. One invented
+         # name aborts the whole device flow with "invalid scope requested",
+         # so the bot could not log in at all.
+         "moderation:read:moderators" not in __import__("auth").SCOPES
+         and all(x in {"chat:read", "chat:edit", "moderator:read:followers",
+                       "moderation:read", "channel:moderate",
+                       "moderator:read:chatters"}
+                 for x in __import__("auth").SCOPES.split())),
+        ("the bot learns its own moderator status from chat, not the API",
+         hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c")),
+             "_note_own_state")),
         ("!reminder takes a duration (60mins, 1h30m)",
          __import__("reminders").parse_delay("60mins")[0] == 3600.0
          and __import__("reminders").parse_delay("1h30m")[0] == 5400.0),

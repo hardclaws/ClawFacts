@@ -329,13 +329,26 @@ def test_startup_diagnosis(port):
         STATE["not_a_mod"] = False
     text = "\n".join(logged)
     assert "PROBLEM" in text and "moderator:read:followers" in text, text
-    assert "is not a moderator" in text, text
-    assert "/mod truckingwithdocbot" in text, text
     assert "could not verify your follow status" in text, text
+    # The startup probe must NOT claim to know moderator status. Get
+    # Moderators only answers for the broadcaster's own token, so for a bot
+    # account it 401s every time and proves nothing either way. Guessing here
+    # is what put an invented scope name in auth.SCOPES and locked the bot out
+    # of login entirely; the answer comes from USERSTATE instead.
+    assert "is not a moderator" not in text, text
+    assert "USERSTATE" in text, text
+    # And the USERSTATE path does answer it.
+    b._bot_is_mod = None
+    b._note_own_state({"mod": "0", "badges": ""})
+    assert b._bot_is_mod is False, b._bot_is_mod
+    state_text = "\n".join(logged)
+    assert "is NOT a moderator" in state_text, state_text
+    assert "/mod truckingwithdocbot" in state_text, state_text
     print("---- what the bot now prints at startup when it is misconfigured ----")
     for line in logged:
         print("   ", line)
-    print("[PASS] the startup diagnosis names both causes and the fix")
+    print("[PASS] the startup diagnosis names the follow-scope cause, and "
+          "moderator status comes from chat")
 
 
 def test_startup_diagnosis_clean(port):

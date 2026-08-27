@@ -156,6 +156,13 @@ def server(bot_lines):
     conn, _ = srv.accept()
     conn.settimeout(1.0)
     conn.sendall(b":tmi.twitch.tv 001 funfactbot :Welcome, GLHF!\r\n")
+    # Twitch sends USERSTATE on join, carrying the bot's OWN badges. It has
+    # only three fields, so it also guards the line parser: a parse that
+    # demanded four silently dropped every one of these.
+    conn.sendall(
+        b"@badge-info=;badges=moderator/1;color=;display-name=funfactbot;"
+        b"emote-sets=0;mod=1;subscriber=0;user-type=mod "
+        b":tmi.twitch.tv USERSTATE #test\r\n")
     buf = b""
     start = time.time()
     next_idx = 0
@@ -456,6 +463,15 @@ def main():
         return 1
     print(f"[PASS] !ftl quoted a line, revealed the next, and refused a "
           f"dead filter ({len(prompts)} prompt(s), {len(answers)} answer(s))")
+
+    # The bot learns whether it is a moderator from USERSTATE, not the API.
+    if bot_mod.TwitchBot and not hasattr(bot, "_bot_is_mod"):
+        print("FAIL: the bot does not track its own moderator status")
+        return 1
+    if bot._bot_is_mod is not True:
+        print(f"FAIL: USERSTATE was not read (got {bot._bot_is_mod!r})")
+        return 1
+    print("[PASS] the bot read its own moderator badge from USERSTATE on join")
 
     print(f"[PASS] !help and !smk female/male/any -> "
           f"{len(helps)} help line(s), {len(smk)} round(s)")

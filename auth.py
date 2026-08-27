@@ -36,8 +36,17 @@ ACTIVATE_URL = "https://www.twitch.tv/activate"
 # follows the channel (access.py). It is not in the IRC tags, so there is no
 # other way to enforce "followers only". Adding a scope means the stored
 # token no longer has it - run `python3 bot.py --login` once after updating.
-SCOPES = ("chat:read chat:edit moderator:read:followers "
-          "moderation:read:moderators")
+#
+# Only scopes that actually exist belong in this list. It once carried
+# "moderation:read:moderators", which is not a Twitch scope at all - the real
+# one is "moderation:read" - and Twitch refused the whole device flow with
+# "invalid scope requested", so the bot could not log in at all. The scope was
+# pointless even under its correct name: Get Moderators requires broadcaster_id
+# to equal the token's own user id, so a bot account that is not the
+# broadcaster can never read another channel's moderator list. Whether *this*
+# bot is a moderator comes from the USERSTATE line Twitch sends on join, which
+# is free and needs no scope - see _note_own_state in bot.py.
+SCOPES = "chat:read chat:edit moderator:read:followers"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
 TOKENS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tokens.json")

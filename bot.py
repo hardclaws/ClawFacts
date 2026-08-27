@@ -266,6 +266,10 @@ class TwitchBot:
         self._last_say = 0.0
         self._last_ping = 0.0               # keep-alive pacing
         self._jobs = queue.Queue()          # (nick, login, badges, cmd, arg)
+        # Whether *this* bot is a moderator of the channel. Learned from the
+        # USERSTATE line Twitch sends on join, never from the API - see
+        # _note_own_state. None means "not known yet".
+        self._bot_is_mod = None
         self._last_used = {}                # channel -> timestamp
         # Role-based rate limiting. broadcaster_id is resolved lazily on the
         # first command so a failed Helix call can never block startup.
@@ -364,6 +368,30 @@ class TwitchBot:
             self._last_say = time.time()
 
     # ---- startup diagnostics -------------------------------------------
+    def _note_own_state(self, tags: dict) -> None:
+        """Record and report this bot's own standing in the channel.
+
+        Driven by USERSTATE, so it runs on join and after every message we
+        send. Logs only when the answer changes: without that, a bot that
+        replies to every command would reprint the same line constantly.
+        """
+        mod, badges = tags.get("mod"), tags.get("badges", "")
+        if mod is None and not badges:
+            return                          # nothing to learn from this line
+        is_mod = (mod == "1") or ("moderator/1" in badges) \
+            or ("broadcaster/1" in badges)
+        if is_mod == self._bot_is_mod:
+            return
+        self._bot_is_mod = is_mod
+        if is_mod:
+            self._log(f"[access] {self.nick} is a moderator of "
+                      f"{self.channel}.")
+        else:
+            self._log(f"[access] PROBLEM: {self.nick} is NOT a moderator of "
+                      f"{self.channel}. Run /mod {self.nick} in that channel - "
+                      f"until then {self.cfg.get('prefix', '!')}bot and "
+                      f"{self.cfg.get('prefix', '!')}reminder will refuse it.")
+
     def _diagnose_access(self) -> None:
         """Print exactly why follow checks will or will not work.
 
@@ -408,16 +436,14 @@ class TwitchBot:
                             f"connects as {self.nick!r} - /mod the token's "
                             f"account, not this one")
 
-        me = helix.user_id(self.nick)
-        is_mod = helix.moderator_of(helix.broadcaster_id, me,
-                                    has_scope="moderation:read:moderators" in scopes)
-        if is_mod is False:
-            problems.append(f"{self.nick} is not a moderator of "
-                            f"{self.cfg.get('channel', '')} - run "
-                            f"/mod {self.nick} in that channel")
-        elif is_mod is None:
-            self._log("[access] could not confirm moderator status (needs the "
-                      "moderation:read:moderators scope).")
+        # Moderator status is deliberately NOT probed here. Get Moderators
+        # only answers for the broadcaster's own token, so for a bot account
+        # it 401s every time and proves nothing either way - which is how an
+        # invented scope name ended up in auth.SCOPES and locked the bot out
+        # of login entirely. The truth arrives on the USERSTATE line when we
+        # join, and _note_own_state reports it.
+        self._log("[access] moderator status is read from chat on join "
+                  "(USERSTATE), not from the API.")
 
         # The probe is the ground truth: it is the exact call the gate makes.
         if helix.authorised is True and not problems:
@@ -525,13 +551,19 @@ class TwitchBot:
                     k, _, v = kv.partition("=")
                     tags[k] = v
 
+        # Only three fields are guaranteed. PRIVMSG carries a fourth (the
+        # text), but USERSTATE and ROOMSTATE stop at the target:
+        #   :tmi.twitch.tv USERSTATE #channel
+        # Requiring four here made every USERSTATE line fall through, which
+        # is why the bot never learned its own moderator status.
         parts = line.split(" ", 3)
-        if len(parts) < 4:
+        if len(parts) < 3:
             if " NOTICE " in line:
                 self._log("NOTICE " + line)
             return
 
-        src, command, target, trailing = parts
+        src, command, target = parts[0], parts[1], parts[2]
+        trailing = parts[3] if len(parts) > 3 else ""
         if command == "PRIVMSG":
             match = re.match(r":([^!]+)!", src)
             nick = match.group(1) if match else "?"
@@ -541,6 +573,11 @@ class TwitchBot:
             login = (login_match.group(1) if login_match else nick).lower()
             self._on_message(nick, target, message, login,
                              tags.get("badges", ""))
+        elif command == "USERSTATE":
+            # Twitch sends this when we join a channel and again after every
+            # PRIVMSG we send, and it carries OUR OWN badges. That is the only
+            # scope-free way to learn whether this bot is a moderator here.
+            self._note_own_state(tags)
         elif command == "NOTICE":
             self._log("NOTICE " + line)
 

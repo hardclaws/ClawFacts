@@ -86,7 +86,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"message": "not found"})
 
 
+# Every scope this bot asks for, checked against Twitch's published scope list
+# (https://dev.twitch.tv/docs/authentication/scopes/). A name that is not in
+# here does not exist, and Twitch rejects the ENTIRE device flow over one bad
+# entry - not just that entry. That is what "invalid scope requested:
+# 'moderation:read:moderators'" did: the bot could not log in at all.
+KNOWN_GOOD_SCOPES = {
+    "chat:read", "chat:edit", "chat:manage:moderated_messages",
+    "moderator:read:followers", "moderator:read:chatters",
+    "moderator:manage:banned_users", "moderation:read",
+    "channel:moderate", "channel:manage:moderators",
+    "user:read:moderated_channels", "user:read:email",
+    "whispers:read", "whispers:edit",
+}
+
+
+def test_scopes_all_exist():
+    """A single invented scope name locks the bot out of login entirely."""
+    import auth
+    requested = auth.SCOPES.split()
+    bogus = [s for s in requested if s not in KNOWN_GOOD_SCOPES]
+    assert not bogus, (
+        f"these are not Twitch scopes and will abort the device flow: {bogus}")
+    # The specific mistake that shipped once.
+    assert "moderation:read:moderators" not in requested, (
+        "that scope does not exist; the real one is 'moderation:read', and it "
+        "is useless to a bot account anyway")
+    # moderator:read:followers is load-bearing: without it the follower gate
+    # cannot work at all.
+    assert "moderator:read:followers" in requested, requested
+    print(f"[PASS] all {len(requested)} requested scopes exist: "
+          f"{' '.join(requested)}")
+
+
 def main():
+    test_scopes_all_exist()
     tmp = tempfile.mkdtemp()
     tokens_path = os.path.join(tmp, "tokens.json")
 

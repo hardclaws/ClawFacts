@@ -734,31 +734,57 @@ the broadcaster or one of the channel's moderators — the device-login token
    python3 bot.py --login
    ```
 
-The token also asks for `moderation:read:moderators` so the bot can settle the
-second half of that on its own instead of guessing. Both arrive with the same
-single `--login`.
+Only three scopes are requested: `chat:read`, `chat:edit` and
+`moderator:read:followers`. Nothing else, because Twitch **rejects the entire
+device flow over one scope name it does not recognise** — the bot would print
+`invalid scope requested` and exit, unable to log in at all.
+
+> This shipped broken once. The list carried `moderation:read:moderators`,
+> which is not a Twitch scope (the real one is `moderation:read`), and login
+> failed outright. The scope was pointless even under its correct name: Get
+> Moderators requires `broadcaster_id` to equal the token's own user id, so a
+> bot account that is not the broadcaster can never read another channel's
+> moderator list. Asking for it bought nothing and cost the ability to log in.
 
 #### The bot says why, at startup
 
 Four different faults all produce the same chat message — *"could not verify
 your follow status"* — and only two of them are yours to fix. So the bot reads
-its own token and the channel's moderator list back from Twitch on the way up
-and prints the cause rather than leaving you to guess:
+its own token back from Twitch on the way up and prints the cause rather than
+leaving you to guess:
 
 ```
 [access] token account='truckingwithdocbot' scopes=chat:read,chat:edit
+[access] moderator status is read from chat on join (USERSTATE), not from the API.
 [access] PROBLEM: the token is missing the moderator:read:followers scope -
          run 'python3 bot.py --login' to re-authorise.
-[access] PROBLEM: truckingwithdocbot is not a moderator of #hardclaws -
-         run /mod truckingwithdocbot in that channel.
 [access] until the above is fixed, followers will be told 'could not verify
          your follow status'.
 ```
 
-With both in place it says so plainly:
+**Moderator status comes from chat, not the API.** When the bot joins, Twitch
+sends a `USERSTATE` line carrying the bot's *own* badges — free, no scope,
+authoritative. The bot reads it and tells you what it found:
 
 ```
-[access] token account='truckingwithdocbot' scopes=chat:read,chat:edit,moderator:read:followers,moderation:read:moderators
+[access] TruckingWithDocBot is a moderator of #hardclaws.
+```
+
+or, if it is not:
+
+```
+[access] PROBLEM: TruckingWithDocBot is NOT a moderator of #hardclaws. Run
+         /mod TruckingWithDocBot in that channel - until then !bot and
+         !reminder will refuse it.
+```
+
+That also re-reports itself if you `/mod` or `/unmod` the bot mid-stream,
+since Twitch resends `USERSTATE` after every message the bot sends.
+
+With the scope in place it says so plainly:
+
+```
+[access] token account='truckingwithdocbot' scopes=chat:read,chat:edit,moderator:read:followers
 [access] follower check OK - token may read this channel's followers (total=812).
 [access] follow checks are working.
 ```
