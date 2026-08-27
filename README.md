@@ -206,7 +206,7 @@ Quick-and-dirty local alternatives:
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
 | `!haul`               | What the truck is hauling right now.                          |
-| `!whois Aubrey Plaza` | Who that person is, from Wikipedia.                           |
+| `!whois hardclaws`    | Who that person is — Twitch profile and/or Wikipedia.         |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -359,7 +359,7 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 | `!help` | Lists all of the above, plus who may use them |
 | `!bot off` / `!bot on` / `!bot status` | **Moderators only** — switch every command off and on again |
 | `!haul` | What the truck is hauling — anyone in chat can ask |
-| `!whois <name>` | Who that person is, in Wikipedia's own words |
+| `!whois <name>` | Who that person is, from Twitch and Wikipedia |
 | `!haul update <cargo>` / `delete` | **Moderators only** — set or clear it |
 | `!reminder <when> <message>` | **Moderators only** — post into chat later |
 | `!reminder list` / `cancel <n>` / `cancel all` | **Moderators only** — see and clear them |
@@ -465,24 +465,44 @@ to carry over.
 
 ### !whois
 
-Someone in chat sees a name and wants to know who it is:
+Someone in chat sees a name and wants to know who it is. Two sources are
+consulted, and whichever has them answers:
 
 ```
+!whois hardclaws
+WhoIs | Hardclaws | Twitch Partner, 45,231 followers, joined Mar 2019. "Truck driver streaming from the cab."
+
 !whois Aubrey Plaza
 WhoIs | Aubrey Plaza (American actress): Aubrey Christina Plaza (born June 26,
 1984) is an American actress, comedian, producer, and writer. She gained
 recognition for playing April Ludgate on the NBC sitcom Parks and Recreation.
 ```
 
-**Nothing here is written by a model.** The text is the lead of the person's
-Wikipedia article, and the only thing done to it is cutting it to
-`whois_max_chars` (default 400) on a sentence boundary. Citation markers like
-`[1]` are stripped. That is deliberate: a blurb about a real person has to be
-something you can check.
+When both know the name you get both lines, Twitch first — in a Twitch chat a
+name that is a real login is almost certainly that streamer.
 
-It costs two API calls at most — the article itself, and Wikipedia's search
-when the name as typed is not a page title. Results are cached for six hours
-because Wikipedia rate-limits by IP.
+**Nothing here is written by a model.** The Wikipedia half is the lead of the
+article, cut to `whois_max_chars` (default 400) on a sentence boundary with
+`[1]`-style citation markers stripped. The Twitch half is the account's own
+bio, partner/affiliate status, follower count and join date. A blurb about a
+real person has to be something you can check.
+
+The Twitch lookup uses `GET /helix/users` and `GET /helix/channels/followers`.
+Neither needs a scope, and the follower **count** comes back even for a channel
+the bot cannot moderate — only the per-user rows need
+`moderator:read:followers`. So this works with the token you already have, no
+re-login.
+
+**The login is matched exactly as typed.** Squashing the spaces to catch
+"Aubrey Plaza" as `aubreyplaza` was tried and removed: it matched whichever
+account happened to own that login and titled the answer after it, which is a
+claim about a stranger wearing a real person's name. Twitch does not allow
+spaces in logins, so a two-word name is simply not one, and Wikipedia answers
+instead.
+
+Wikipedia costs two calls at most — the article, and its search when the name
+as typed is not a page title. Results are cached for six hours because
+Wikipedia rate-limits by IP.
 
 Three refusals are distinguished, because they need different answers:
 
@@ -498,7 +518,8 @@ Wikipedia being unreachable raises rather than reporting "no such person",
 which would be a lie about someone who exists.
 
 `!who` is an alias. It goes through the same per-user rate limit as `!funfact`,
-since it makes a network call.
+since it makes a network call. If Helix is down or unconfigured the Wikipedia
+half still answers — one broken source must not take the command with it.
 
 ### Waking up a quiet channel
 

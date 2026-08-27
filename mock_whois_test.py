@@ -190,6 +190,124 @@ def test_bot_reply():
     print("[PASS] not found, ambiguous and unreachable each say the right thing")
 
 
+# ---- the Twitch half ----------------------------------------------------
+class FakeHelix:
+    """Duck-typed stand-in for access.Helix.
+
+    Owns the squashed login 'aubreyplaza' on purpose: some stranger always
+    does, and the lookup must not hand their account to a real person.
+    """
+
+    def __init__(self, boom=False):
+        self.boom = boom
+        self.asked = []
+
+    def channel_profile(self, login):
+        self.asked.append(login)
+        if self.boom:
+            raise OSError("helix down")
+        if login == "hardclaws":
+            return {"id": "1", "login": "hardclaws",
+                    "display_name": "Hardclaws",
+                    "bio": "Truck driver streaming from the cab.",
+                    "broadcaster_type": "partner",
+                    "created_at": "2019-03-04T00:00:00Z",
+                    "followers": 45231}
+        if login == "aubreyplaza":
+            return {"id": "9", "login": "aubreyplaza",
+                    "display_name": "Aubreyplaza", "bio": "fan account",
+                    "broadcaster_type": "", "created_at": "2021-01-01T00:00:00Z",
+                    "followers": 3}
+        if login == "smallstreamer":
+            return {"id": "2", "login": "smallstreamer",
+                    "display_name": "SmallStreamer", "bio": "",
+                    "broadcaster_type": "", "created_at": "",
+                    "followers": None}
+        return None
+
+
+def test_twitch_only():
+    whois.clear_cache()
+    got = whois.lookup("hardclaws", helix=FakeHelix())
+    assert got["found"] is True and got["twitch"], got
+    assert got["wiki"] is None, "there is no Wikipedia page for this login"
+    assert got["title"] == "Hardclaws", got
+    line = whois.format_twitch(got["twitch"])
+    assert line == ('Twitch Partner, 45,231 followers, joined Mar 2019. '
+                    '"Truck driver streaming from the cab."'), line
+    print(f"[PASS] a streamer with no Wikipedia page: {line}")
+
+
+def test_two_word_name_is_not_a_login():
+    """The bug this guards: squashing the spaces made 'Aubrey Plaza' match
+    whichever account owned 'aubreyplaza', and the answer was titled after a
+    stranger wearing a real person's name."""
+    helix = FakeHelix()
+    whois.clear_cache()
+    got = whois.lookup("Aubrey Plaza", helix=helix)
+    assert got["found"] is True and got["wiki"], got
+    assert got["twitch"] is None, "matched a squashed login"
+    assert got["title"] == "Aubrey Plaza", got
+    assert "aubreyplaza" not in helix.asked, helix.asked
+    print("[PASS] a two-word name is never matched to a squashed login")
+
+
+def test_login_shapes_are_screened():
+    helix = FakeHelix()
+    for query in ("hi", "way_too_long_to_be_a_real_twitch_login_name",
+                  "has spaces", "punct!uation", ""):
+        whois.clear_cache()
+        whois.lookup(query, helix=helix)
+    assert helix.asked == [], f"wasted API calls on impossible logins: {helix.asked}"
+    print("[PASS] impossible logins are screened without an API call")
+
+
+def test_broken_twitch_does_not_sink_wikipedia():
+    whois.clear_cache()
+    got = whois.lookup("Aubrey Plaza", helix=FakeHelix(boom=True))
+    assert got["found"] is True and got["wiki"], got
+    assert got["twitch"] is None
+    print("[PASS] Helix failing still answers from Wikipedia")
+
+
+def test_format_twitch_variants():
+    assert whois.format_twitch(
+        {"broadcaster_type": "affiliate", "followers": 12,
+         "created_at": "2022-07-01T00:00:00Z", "bio": ""}) \
+        == "Twitch Affiliate, 12 followers, joined Jul 2022"
+    assert whois.format_twitch(
+        {"broadcaster_type": "", "followers": None, "created_at": "",
+         "bio": "just chatting"}) == 'on Twitch. "just chatting"'
+    assert whois._joined("nonsense") == ""
+    assert whois._joined("2019-03-04T00:00:00Z") == "Mar 2019"
+    print("[PASS] partner / affiliate / plain, with and without bio and count")
+
+
+def test_bot_posts_both_sources():
+    b = bot_mod.TwitchBot(dict(bot_mod.DEFAULTS, nick="bot", channel="#test",
+                               prefix="!"))
+    said = []
+    b._say = said.append
+    b._access.helix = FakeHelix()
+
+    # A login only Twitch knows.
+    whois.clear_cache()
+    b._reply_whois("viewer1", "hardclaws")
+    assert len(said) == 1, said
+    assert said[0].startswith("WhoIs | Hardclaws | Twitch Partner"), said[0]
+
+    # A person both know: Twitch line first, then the Wikipedia blurb.
+    whois.clear_cache()
+    b._reply_whois("viewer1", "smallstreamer")
+    assert said[-1].startswith("WhoIs | SmallStreamer | on Twitch"), said[-1]
+
+    # Nobody anywhere.
+    whois.clear_cache()
+    b._reply_whois("viewer1", "zzxqvnotaperson")
+    assert "couldn't find" in said[-1], said[-1]
+    print("[PASS] the bot posts the Twitch line, the Wikipedia line, or neither")
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
@@ -201,7 +319,11 @@ def main():
     for fn in (test_exact_title, test_sentence_boundary, test_search_fallback,
                test_disambiguation_is_not_an_answer, test_not_found,
                test_empty_extract, test_unreachable_raises_rather_than_denying,
-               test_cached, test_bot_reply):
+               test_cached, test_bot_reply, test_twitch_only,
+               test_two_word_name_is_not_a_login,
+               test_login_shapes_are_screened,
+               test_broken_twitch_does_not_sink_wikipedia,
+               test_format_twitch_variants, test_bot_posts_both_sources):
         fn()
     server.shutdown()
     print("ALL PASSED \u2714")

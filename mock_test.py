@@ -26,13 +26,23 @@ bot_mod.get_funfact = lambda location, options=None: {
     "fact": f"A completely offline fact about {location}.",
 }
 # !whois would reach en.wikipedia.org; answer it locally and deterministically.
-bot_mod.whois.lookup = lambda q, max_chars=400, **kw: (
-    {"found": True, "title": "Aubrey Plaza", "description": "American actress",
-     "text": "Aubrey Christina Plaza (born June 26, 1984) is an American "
-             "actress, comedian, producer, and writer. She gained recognition "
-             "for playing April Ludgate on Parks and Recreation."}
-    if "plaza" in (q or "").lower()
-    else {"found": False, "reason": f"I couldn't find anyone called {q}"})
+_WIKI = {"title": "Aubrey Plaza", "description": "American actress",
+         "text": "Aubrey Christina Plaza (born June 26, 1984) is an American "
+                 "actress, comedian, producer, and writer. She gained "
+                 "recognition for playing April Ludgate on Parks and "
+                 "Recreation."}
+
+
+def _fake_lookup(q, max_chars=400, **kw):
+    """Current whois.lookup shape: "found" plus "twitch" and/or "wiki"."""
+    if "plaza" in (q or "").lower():
+        return {"found": True, "twitch": None, "wiki": dict(_WIKI),
+                "title": _WIKI["title"],
+                "description": _WIKI["description"], "text": _WIKI["text"]}
+    return {"found": False, "reason": f"I couldn't find anyone called {q}"}
+
+
+bot_mod.whois.lookup = _fake_lookup
 
 HOST, PORT = "127.0.0.1", 6667
 

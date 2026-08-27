@@ -229,6 +229,57 @@ class Helix:
             self._ids[login] = uid
         return uid
 
+    def channel_profile(self, login: str):
+        """What Twitch says about a channel, or None if there is no such user.
+
+        Both calls are scope-free. Get Users answers with any app or user
+        token, and Get Channel Followers returns the follower *count* even for
+        a channel this token is not allowed to moderate - it is only the
+        per-user rows that need moderator:read:followers. So this works with
+        the token the bot already has, no re-login.
+        """
+        login = (login or "").strip().lstrip("#").lower()
+        if not login or not (self.client_id and self.token):
+            return None
+        try:
+            data = _get(f"{HELIX}/helix/users", {"login": login},
+                        self.token, self.client_id, self.timeout)
+        except urllib.error.HTTPError as exc:
+            self.errors += 1
+            print(f"[access] helix users HTTP {exc.code} for {login!r}",
+                  flush=True)
+            return None
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self.errors += 1
+            print(f"[access] helix users lookup failed for {login!r}: {exc!r}",
+                  flush=True)
+            return None
+        users = data.get("data") or []
+        if not users:
+            return None
+        user = users[0]
+        profile = {
+            "id": str(user.get("id") or ""),
+            "login": user.get("login") or login,
+            "display_name": user.get("display_name") or login,
+            "bio": " ".join((user.get("description") or "").split()),
+            "broadcaster_type": (user.get("broadcaster_type") or "").lower(),
+            "created_at": user.get("created_at") or "",
+            "followers": None,
+        }
+        if profile["id"]:
+            try:
+                follows = _get(f"{HELIX}/helix/channels/followers",
+                               {"broadcaster_id": profile["id"], "first": 1},
+                               self.token, self.client_id, self.timeout)
+                total = follows.get("total")
+                profile["followers"] = int(total) if total is not None else None
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                    ValueError, TypeError):
+                # The count is a nicety. Never fail the whole lookup over it.
+                pass
+        return profile
+
     def followed_at(self, user_id: str):
         """ISO-8601 follow time, '' if not following, None if unknown."""
         if not user_id:

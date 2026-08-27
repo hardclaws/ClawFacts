@@ -1,9 +1,10 @@
 """!whois <name> — a short, sourced blurb about a person.
 
-Reads the lead of the person's Wikipedia article and posts it, trimmed on a
-sentence boundary. Nothing here is written by a model: the whole point of the
-command is that what it says can be checked, so the text is Wikipedia's own
-words and the only thing done to it is cutting it down to fit chat.
+Two sources, neither of them a model. Wikipedia's lead for the person, and -
+because this is a Twitch chat and most names typed into it are streamers - the
+Twitch profile for that login. The whole point of the command is that what it
+says can be checked, so both are the source's own words and the only thing done
+to them is cutting them down to fit chat.
 
 Two calls, at most:
 
@@ -12,6 +13,11 @@ Two calls, at most:
 
 A disambiguation page is not an answer - "John Smith" is forty people - so
 that is reported instead of posting whichever one Wikipedia happened to list.
+
+The Twitch half is optional and duck-typed: pass anything with a
+`channel_profile(login)` method (access.Helix has one) and it is consulted,
+pass nothing and the command is Wikipedia-only. That keeps this module free of
+a Helix dependency and testable without one.
 """
 
 import json
@@ -93,28 +99,64 @@ def _search_title(query: str, timeout: float):
     return hits[0].get("title") or None
 
 
-def lookup(query: str, max_chars: int = DEFAULT_MAX_CHARS,
-           timeout: float = 6.0, now: float | None = None):
-    """Find who `query` is.
+def _joined(iso: str) -> str:
+    """'2019-03-04T...' -> 'Mar 2019'."""
+    try:
+        return time.strftime("%b %Y", time.strptime((iso or "")[:7], "%Y-%m"))
+    except (ValueError, TypeError):
+        return ""
 
-    Returns a dict:
-      found  -> {"found": True, "title", "text", "description"}
-      no one -> {"found": False, "reason": "..."}
-    Raises WhoisError when Wikipedia could not be reached, so the caller can
-    say "try again" instead of claiming the person does not exist.
+
+def format_twitch(profile: dict) -> str:
+    """The Twitch line: what they are, how big, how long, and their bio."""
+    parts = []
+    kind = (profile.get("broadcaster_type") or "").lower()
+    if kind == "partner":
+        parts.append("Twitch Partner")
+    elif kind == "affiliate":
+        parts.append("Twitch Affiliate")
+    else:
+        parts.append("on Twitch")
+    if profile.get("followers") is not None:
+        parts.append(f"{int(profile['followers']):,} followers")
+    joined = _joined(profile.get("created_at") or "")
+    if joined:
+        parts.append(f"joined {joined}")
+    line = ", ".join(parts)
+    bio = (profile.get("bio") or "").strip()
+    if bio:
+        line += f'. "{bio}"'
+    return line
+
+
+def _twitch_profile(query: str, helix):
+    """The Twitch profile for `query`, or None.
+
+    The login is matched exactly as typed, spaces and all. Squashing the
+    spaces to catch "Aubrey Plaza" as "aubreyplaza" was tried and removed: it
+    happily matched whatever account happened to hold that login and titled
+    the answer after it, which is a claim about a stranger wearing a real
+    person's name. A two-word name simply is not a Twitch login - Twitch does
+    not allow spaces in them - so the honest answer is that Twitch has no one
+    by that name and Wikipedia carries it instead.
     """
-    query = " ".join((query or "").split())[:MAX_QUERY]
-    if len(query) < MIN_QUERY:
-        return {"found": False, "reason": "who should I look up?"}
+    if helix is None:
+        return None
+    login = query.strip().lstrip("#").lower()
+    # Twitch logins are 4-25 characters of [a-z0-9_]. Anything else cannot be
+    # one, so do not spend an API call finding that out.
+    if not login or not 4 <= len(login) <= 25 or " " in login \
+            or not re.match(r"^[a-z0-9_]+$", login):
+        return None
+    try:
+        return helix.channel_profile(login)
+    except Exception as exc:          # a broken Helix must not sink the lookup
+        print(f"[whois] twitch lookup failed: {exc!r}", flush=True)
+        return None
 
-    now = time.time() if now is None else now
-    key = query.lower()
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit and now - hit["t"] < hit["ttl"]:
-            return dict(hit["v"])
-        _cache.pop(key, None)
 
+def _wikipedia(query: str, max_chars: int, timeout: float):
+    """The Wikipedia half. (dict, None) on a hit, (None, reason) otherwise."""
     page = _summary_for(query, timeout)
     if page is None:
         # The name as typed is not a page title. Wikipedia's own search is
@@ -123,32 +165,79 @@ def lookup(query: str, max_chars: int = DEFAULT_MAX_CHARS,
         if title:
             page = _summary_for(title, timeout)
     if page is None:
-        result = {"found": False,
-                  "reason": f"I couldn't find anyone called {query}"}
-        _store(key, result, MISS_TTL, now)
-        return result
-
+        return None, "no Wikipedia page"
     if page.get("type") == "disambiguation":
-        result = {"found": False,
-                  "reason": f"several people are called {query} - be more "
-                            f"specific"}
-        _store(key, result, MISS_TTL, now)
-        return result
-
+        return None, "disambiguation"
     extract = _clean(page.get("extract") or "")
     if not extract:
-        result = {"found": False,
-                  "reason": f"Wikipedia has a page for {query} but no summary"}
+        return None, "no summary"
+    return {"title": page.get("title") or query,
+            "description": (page.get("description") or "").strip(),
+            # Cut on a sentence boundary, never mid-phrase - the same rule the
+            # fact engine uses.
+            "text": funfacts.trim_to_fit(extract, max(80, int(max_chars)))}, None
+
+
+def lookup(query: str, max_chars: int = DEFAULT_MAX_CHARS,
+           timeout: float = 6.0, now: float | None = None, helix=None):
+    """Find who `query` is, from Twitch and Wikipedia.
+
+    Returns a dict with "found", plus "twitch" and/or "wiki" when either
+    source has them, or "reason" when neither does.
+
+    Raises WhoisError when Wikipedia could not be reached *and* Twitch has
+    nothing either, so the caller can say "try again" instead of claiming the
+    person does not exist.
+    """
+    query = " ".join((query or "").split())[:MAX_QUERY]
+    if len(query) < MIN_QUERY:
+        return {"found": False, "reason": "who should I look up?"}
+
+    now = time.time() if now is None else now
+    # Whether Twitch was consulted changes the answer, so it is part of the
+    # cache key - otherwise a Wikipedia-only result gets served to a caller
+    # that could have had the streamer's profile too.
+    key = query.lower() + ("|tw" if helix is not None else "")
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and now - hit["t"] < hit["ttl"]:
+            return dict(hit["v"])
+        _cache.pop(key, None)
+
+    twitch = _twitch_profile(query, helix)
+
+    wiki_error = False
+    try:
+        wiki, why = _wikipedia(query, max_chars, timeout)
+    except WhoisError:
+        wiki, why = None, "unreachable"
+        wiki_error = True
+
+    if twitch is None and wiki is None:
+        if wiki_error:
+            # Do not cache, and do not report "no such person": Wikipedia being
+            # down is not evidence that someone does not exist.
+            raise WhoisError("could not reach Wikipedia")
+        # Each failure needs a different answer: "nobody by that name" and
+        # "forty people share that name" send the viewer in different
+        # directions, and so does "the page exists but is empty".
+        if why == "disambiguation":
+            reason = f"several people are called {query} - be more specific"
+        elif why == "no summary":
+            reason = f"Wikipedia has a page for {query} but no summary"
+        else:
+            reason = f"I couldn't find anyone called {query}"
+        result = {"found": False, "reason": reason}
         _store(key, result, MISS_TTL, now)
         return result
 
-    # Cut on a sentence boundary, never mid-phrase - the same rule the fact
-    # engine uses.
-    text = funfacts.trim_to_fit(extract, max(80, int(max_chars)))
-    result = {"found": True,
-              "title": page.get("title") or query,
-              "description": (page.get("description") or "").strip(),
-              "text": text}
+    result = {"found": True, "twitch": twitch, "wiki": wiki,
+              # Twitch wins the title when it has them: in a Twitch chat, a
+              # name that is a real login is almost certainly that streamer.
+              "title": (twitch or {}).get("display_name")
+                       or (wiki or {}).get("title") or query,
+              "description": (wiki or {}).get("description", ""),
+              "text": (wiki or {}).get("text", "")}
     _store(key, result, HIT_TTL, now)
     return result
 

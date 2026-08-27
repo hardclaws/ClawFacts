@@ -364,6 +364,24 @@ def test_startup_diagnosis_clean(port):
     print("[PASS] a correctly configured bot says so")
 
 
+def test_channel_profile(port):
+    """What !whois shows for a streamer. Both calls are scope-free, and the
+    follower *count* comes back even for a channel this token cannot
+    moderate - only the per-user rows need moderator:read:followers."""
+    h = make_helix()
+    profile = h.channel_profile("hardclaws")
+    assert profile is not None, "no profile for a known login"
+    assert profile["id"] == "999hardclaws", profile
+    assert profile["display_name"] == "hardclaws", profile
+    assert profile["followers"] == 1234, profile
+    assert h.channel_profile("") is None
+    assert h.channel_profile("#hardclaws") is not None, "a leading # must work"
+    # Without the pieces it needs the answer is None, never a blank profile.
+    assert access.Helix("", "token", "1").channel_profile("hardclaws") is None
+    assert access.Helix("cid", "", "1").channel_profile("hardclaws") is None
+    print("[PASS] channel_profile: id, display name and follower count")
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
@@ -380,7 +398,7 @@ def main():
                test_set_token_recovers_after_a_refresh,
                test_moderator_check, test_describe_token,
                test_startup_diagnosis, test_startup_diagnosis_clean,
-               test_disabled):
+               test_channel_profile, test_disabled):
         fn(port)
     server.shutdown()
     print("ALL PASSED ✔")

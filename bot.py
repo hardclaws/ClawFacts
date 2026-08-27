@@ -704,11 +704,12 @@ class TwitchBot:
         return f"{clock} {zone} on " + time.strftime("%a %d %b", due_lt)
 
     def _reply_whois(self, nick: str, query: str) -> None:
-        """Post Wikipedia's own words about a person - not a model's take."""
+        """Post what Twitch and Wikipedia say - not a model's take."""
         try:
             result = whois.lookup(
                 query, int(self.cfg.get("whois_max_chars",
-                                        whois.DEFAULT_MAX_CHARS)))
+                                        whois.DEFAULT_MAX_CHARS)),
+                helix=self._access.helix)
         except whois.WhoisError as exc:
             self._log(f"whois {query!r} failed: {exc}")
             self._say(f"@{nick} I couldn't reach Wikipedia just now - "
@@ -718,12 +719,27 @@ class TwitchBot:
             self._say(self._fit(f"@{nick} ", result.get("reason")
                                 or "I couldn't find that."))
             return
-        head = f"WhoIs | {result.get('title') or query}"
-        description = (result.get("description") or "").strip()
-        if description:
-            head += f" ({description})"
-        self._say(self._fit(head + ": ", result.get("text") or ""))
-        self._log(f"whois {query!r} -> {result.get('title')}")
+
+        twitch, wiki = result.get("twitch"), result.get("wiki")
+        # A caller that found someone must always be answered. Older callers
+        # put title/description/text at the top level rather than under
+        # "wiki", and a silent no-op is the worst possible reply.
+        if wiki is None and result.get("text"):
+            wiki = {k: result.get(k) for k in ("title", "description",
+                                               "text")}
+        if twitch:
+            self._say(self._fit(
+                f"WhoIs | {twitch.get('display_name') or query} | ",
+                whois.format_twitch(twitch)))
+        if wiki:
+            head = f"WhoIs | {wiki.get('title') or query}"
+            description = (wiki.get("description") or "").strip()
+            if description:
+                head += f" ({description})"
+            self._say(self._fit(head + ": ", wiki.get("text") or ""))
+        sources = "+".join(n for n, have in (("twitch", twitch),
+                                             ("wikipedia", wiki)) if have)
+        self._log(f"whois {query!r} -> {result.get('title')} ({sources})")
 
     @staticmethod
     def _mention(nick: str) -> str:

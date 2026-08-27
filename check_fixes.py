@@ -183,12 +183,20 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_say_haul")),
-        ("!whois posts Wikipedia's own words",
+        ("!whois answers from Twitch and Wikipedia",
          hasattr(__import__("whois"), "lookup")
+         and hasattr(__import__("whois"), "format_twitch")
+         and hasattr(__import__("access").Helix("c", "t", "1"),
+                     "channel_profile")
          and "whois" in __import__("bot").WHOIS_COMMANDS
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_reply_whois")),
+        ("!whois never matches a squashed Twitch login",
+         " " in "Aubrey Plaza"
+         and __import__("whois")._twitch_profile(
+             "Aubrey Plaza", type("H", (), {"channel_profile":
+                 lambda self, l: {"display_name": l}})()) is None),
         ("an LLM rewrite cannot add character the source never had",
          __import__("funfacts")._grounded_filter(
              ["Aubrey Plaza: actress - and deadpan delivered with extra "
