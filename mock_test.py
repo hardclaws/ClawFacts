@@ -14,7 +14,6 @@ import threading
 import time
 
 import bot as bot_mod
-import lyrics as lyrics_mod
 import extras
 from bot import DEFAULTS, TwitchBot  # noqa: E402
 
@@ -62,29 +61,6 @@ def _fake_twitch_lookup(q, helix=None, **kw):
 
 bot_mod.whois.lookup = _fake_lookup
 bot_mod.whois.twitch_lookup = _fake_twitch_lookup
-
-# !ftl would reach lrclib.net. Stub the round, not the HTTP: the point of this
-# test is the bot's handling, and the lyric text here is invented placeholder
-# text so no real lyric ever lands in the repo.
-_FTL_ROUND = {"prompt": "First line of a made up song about nothing",
-              "answer": "Second line that follows it quite naturally",
-              "artist": "The Nobodies", "title": "Made Up Song",
-              "genre": "rock", "year": 1985, "label": "80s rock"}
-
-
-def _fake_get_round(argument="", **kw):
-    """Same label rule as the real get_round, which is what the bot posts."""
-    if (argument or "").strip() in ("zzznosuch", "nothing matches this"):
-        return None
-    filt = lyrics_mod.parse_filter(argument)
-    if filt["genre"] and filt["decade"]:
-        label = f"{filt['decade']} {filt['genre']}"
-    else:
-        label = filt["genre"] or filt["decade"] or "any"
-    return dict(_FTL_ROUND, label=label)
-
-
-bot_mod.lyrics_mod.get_round = _fake_get_round
 
 HOST, PORT = "127.0.0.1", 6667
 
@@ -140,10 +116,6 @@ SCRIPT = [
     (50.5, privmsg("viewer12", "!whotwitch hardclaws", "subscriber/01")),
     (52.0, privmsg("viewer13", "!whotwitch nosuchchannel", "subscriber/01")),
     (53.5, privmsg("nobody", "!whotwitch", "")),
-    # !ftl posts one line now and the next one after ftl_answer_delay.
-    (55.0, privmsg("viewer14", "!ftl 80s rock", "subscriber/01")),
-    (56.5, privmsg("viewer15", "!ftl zzznosuch", "subscriber/01")),
-    (58.0, privmsg("viewer16", "!finishthelyric", "subscriber/01")),
     (59.5, privmsg("viewer17", "!smk any", "vip/1")),
 ]
 
@@ -236,7 +208,6 @@ def main():
         "channel": "#test",
         "cooldown_seconds": 1,
         "riddle_answer_delay": 3,   # short, so the test need not wait 20s
-        "ftl_answer_delay": 3,      # short, so the reveal lands in the run
         "host": HOST,
         "port": PORT,
         "use_tls": False,
@@ -288,9 +259,6 @@ def main():
     whois_lines = [l for l in bot_lines if "PRIVMSG" in l and "WhoIs |" in l]
     whotw_lines = [l for l in bot_lines if "PRIVMSG" in l
                    and "WhoTwitch |" in l]
-    ftl_lines = [l for l in bot_lines if "PRIVMSG" in l
-                 and ("FinishTheLyric" in l or l.split(":", 2)[-1].strip()
-                      .startswith("Answer |"))]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
@@ -444,33 +412,6 @@ def main():
         if line.count("(") < 3 or line.count(")") < 3:
             print(f"FAIL: !smk did not give every name an occupation: {line}")
             return 1
-    # !ftl quotes one line, reveals the next, and says so when nothing matches.
-    prompts = [l for l in ftl_lines if "FinishTheLyric" in l]
-    answers = [l for l in ftl_lines if "Answer |" in l]
-    if len(prompts) < 2:
-        print(f"FAIL: expected a !ftl round and an alias round: {prompts}")
-        return 1
-    if not any("FinishTheLyric [80s rock] | " in l for l in prompts):
-        print(f"FAIL: !ftl did not label the round with its filter: {prompts}")
-        return 1
-    if not any('"First line of a made up song about nothing"' in l
-               for l in prompts):
-        print(f"FAIL: !ftl did not post the prompt line: {prompts}")
-        return 1
-    if not answers:
-        print("FAIL: !ftl never revealed the next line")
-        return 1
-    if not any("The Nobodies - Made Up Song" in l for l in answers):
-        print(f"FAIL: the answer did not credit the song: {answers}")
-        return 1
-    if not any("no songs match 'zzznosuch'" in l for l in bot_lines):
-        print("FAIL: !ftl did not say so when nothing matched")
-        return 1
-    if any(len(l) > 500 for l in ftl_lines):
-        print("FAIL: !ftl exceeded Twitch's 500-character limit")
-        return 1
-    print(f"[PASS] !ftl quoted a line, revealed the next, and refused a "
-          f"dead filter ({len(prompts)} prompt(s), {len(answers)} answer(s))")
 
     # The bot learns whether it is a moderator from USERSTATE, not the API.
     if bot_mod.TwitchBot and not hasattr(bot, "_bot_is_mod"):

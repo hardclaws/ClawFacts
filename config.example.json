@@ -36,9 +36,7 @@
   "whois_max_chars": 400,
   "idle_chat_enabled": true,
   "idle_chat_minutes": 10,
-  "idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr", "ftl"],
-  "ftl_enabled": true,
-  "ftl_answer_delay": 30,
+  "idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr"],
   "names_topup_enabled": true,
   "names_topup_hours": 12
 }
