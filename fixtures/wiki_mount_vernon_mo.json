@@ -1,0 +1,32 @@
+{
+  "_note": "Verbatim from en.wikipedia.org, fetched 2026-08-27. The Baltimore district is what _spicy_dig returned for '!funfact Mount Vernon, MO' - it searches by name alone and had no region check.",
+  "queries": {
+    "Mount Vernon, Missouri": [
+      {
+        "title": "Mount Vernon, Missouri",
+        "extract": "Mount Vernon is a city in and the county seat of Lawrence County, Missouri, United States. As of the 2020 census, its population was 4,526. Mount Vernon is located halfway between Springfield and Joplin along I-44.\n\n\n== History ==\nMount Vernon was platted in 1845. The city was named after Mount Vernon, the estate of George Washington. A post office called Mount Vernon has been in operation since 1846.\nLawrence County Courthouse and Old Spanish Fort Archeological Site are listed on the National Register of Historic Places."
+      },
+      {
+        "title": "Mount Vernon Township, Lawrence County, Missouri",
+        "extract": "Mount Vernon Township is a civil township located in Lawrence County, Missouri."
+      },
+      {
+        "title": "Julia Butterfly Hill",
+        "extract": "Julia Lorraine Hill (born February 18, 1974) is an American environmental activist, born in Mount Vernon, Missouri."
+      }
+    ],
+    "\"Mount Vernon, Missouri\" murder": [
+      {
+        "title": "Mount Vernon Place Historic District",
+        "extract": "The Mount Vernon Place Historic District is a national historic district located at Mount Vernon Place in Baltimore, Maryland. It was listed on the National Register of Historic Places on November 11, 1971 and designated a National Historic Landmark the same day."
+      }
+    ],
+    "\"Mount Vernon, Missouri\" brothel": [
+      {
+        "title": "Lawrence County Courthouse (Missouri)",
+        "extract": "The Lawrence County Courthouse in Mount Vernon, Missouri is listed on the National Register of Historic Places. It was built in 1888 and still serves as a courthouse."
+      }
+    ],
+    "\"Mount Vernon, Missouri\" scandal": []
+  }
+}

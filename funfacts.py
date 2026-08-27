@@ -1135,10 +1135,12 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
     core = " ".join(re.sub(r"[^a-z0-9 ]", " ", _query_core(location).lower()).split())
     if not core or len(core) < 2:
         return []
+    region = _query_region(location)
 
     existing_norm = [" ".join(re.sub(r"[^a-z0-9 ]", "", f.lower()).split()) for f in existing]
     core_title = _title_tokens(place_title)
     found = []
+    found_norm = []
 
     for hint in _SPICY_HINTS[:3]:
         if len(found) >= max_facts or _wiki_blocked():
@@ -1160,9 +1162,23 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
             extract = it["extract"]
             if not extract or _is_disambiguation(extract):
                 continue
+            # Same-name places are everywhere, and this dig searches by name
+            # alone. "Mount Vernon, MO" surfaced the Mount Vernon Place Historic
+            # District in Baltimore, Maryland - listed on the National Register
+            # 11 Nov 1971 - and posted it as one of the Missouri town's facts,
+            # because the only gate here was "the sentence contains the name".
+            # harvest() has always checked the region; this path never did.
+            if _text_names_other_region(extract[:250], region):
+                continue
+            if _is_non_place_article(extract):
+                continue
             for s in _sentences(extract):
                 s_norm = " ".join(re.sub(r"[^a-z0-9 ]", " ", s.lower()).split())
                 if core not in s_norm:
+                    continue
+                # A sentence can name the wrong state even inside a correct
+                # article, so check the sentence too.
+                if _text_names_other_region(s, region):
                     continue
                 if _score(s, spice=True) < 1:
                     continue
@@ -1172,9 +1188,13 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
                 fn = " ".join(re.sub(r"[^a-z0-9 ]", "", fact.lower()).split())
                 if any(_overlap(fn, e) > 0.7 for e in existing_norm):
                     continue
-                if any(_overlap(fn, f) > 0.7 for f in found):
+                # Compare normalised to normalised: `found` holds the raw
+                # clipped text, so this used to match nothing and the same
+                # sentence came back once per search hint.
+                if any(_overlap(fn, f) > 0.7 for f in found_norm):
                     continue
                 found.append(fact)
+                found_norm.append(fn)
                 if len(found) >= max_facts:
                     break
     return found
@@ -1555,6 +1575,25 @@ def _uniqueness_ok(line: str, line_claims: set, seed_facts: list,
     return True
 
 
+# Unfalsifiable praise. The prompt forbids padding a bland fact with "made-up
+# puns or cute filler", and models do it anyway: Mount Vernon, MO came back as
+# "keeps its past alive through a historic downtown square and those classic
+# small-town traditions everyone loves". There is no seed fact behind any of
+# that, and no amount of grounding can check a compliment. Such a line is
+# dropped whole - a dropped line costs nothing, the plain real facts post
+# instead.
+_VAGUE = re.compile(
+    r"\b(?:everyone|everybody) loves\b|\bkeeps? (?:its|their) past alive\b|"
+    r"\bsmall[- ]town (?:charm|traditions?|values|feel|vibe)\b|"
+    r"\bclassic small[- ]town\b|\bsteeped in history\b|\brich history\b|"
+    r"\bhidden gems?\b|\bmust[- ]see\b|\bworth (?:a visit|the trip)\b|"
+    r"\bquaint\b|\bpic(?:ture)?[- ]perfect\b|\bstep back in time\b|"
+    r"\boozes? (?:charm|character)\b|\bfull of character\b|"
+    r"\bstrong sense of community\b|\btreasure trove\b|\btime capsule\b",
+    re.IGNORECASE,
+)
+
+
 def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -> list:
     """Drop LLM lines that claim something the seed facts don't support.
 
@@ -1596,6 +1635,9 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
                 alias = _CAP_ALIASES.get(w)
                 if not alias or not all(a in tokens for a in alias.split()):
                     return False
+        # 1a. praise is not a fact — drop the whole line rather than post it.
+        if _VAGUE.search(line):
+            return False
         # 1b. a residence claim needs a seed that places someone in the town.
         if _RESIDENCE.search(line) and not _RESIDENCE.search(corpus):
             return False
@@ -1620,7 +1662,7 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
     kept = [ln for ln in lines if _ok(ln)]
     if len(kept) != len(lines):
         print(f"[funfacts] grounded filter dropped {len(lines) - len(kept)} "
-              f"line(s) with invented or unsupported claims", flush=True)
+              f"line(s) with invented, unsupported or padded claims", flush=True)
     return kept
 
 

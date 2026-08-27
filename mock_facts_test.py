@@ -749,6 +749,67 @@ def test_meta_line_filter():
         llm.rewrite_fact = orig
 
 
+def test_spicy_dig_respects_the_region():
+    """'!funfact Mount Vernon, MO' posted "the Mount Vernon Place Historic
+    District scored a spot on the National Register back on November 11, 1971."
+    That district is in Baltimore, Maryland (NRHP 71001037), around Baltimore's
+    Washington Monument - it has nothing to do with the Lawrence County town.
+
+    _spicy_dig searches by place name alone and its only gate was "the sentence
+    contains the name", so any Mount Vernon anywhere qualified. harvest() has
+    always checked the region; this path never did."""
+    fixture = json.loads((pathlib.Path(__file__).resolve().parent
+                          / "fixtures" / "wiki_mount_vernon_mo.json").read_text())
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = (
+        lambda q, exchars=7000, limit=2: fixture["queries"].get(q.strip(), []))
+    try:
+        found = funfacts._spicy_dig(
+            "Mount Vernon, Missouri", "Mount Vernon, MO",
+            ["Mount Vernon was platted in 1845."], 200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+
+    joined = " ".join(found).lower()
+    for bad in ("baltimore", "maryland", "november 11, 1971"):
+        assert bad not in joined, "wrong-place fact leaked: %r in %r" % (bad, found)
+    assert any("Lawrence County Courthouse" in f for f in found), found
+    assert len(found) == len(set(found)), "the same line came back twice: %r" % found
+    print("[PASS] the spicy dig can't borrow another state's landmark")
+
+
+def test_padded_praise_is_dropped():
+    """The prompt forbids "made-up puns or cute filler" and the model does it
+    anyway: Mount Vernon came back as "keeps its past alive through a historic
+    downtown square and those classic small-town traditions everyone loves."
+    No seed supports any of that, and a compliment cannot be grounded."""
+    padded = [
+        "Founded way back in 1845, Mt. Vernon keeps its past alive through a "
+        "historic downtown square and those classic small-town traditions "
+        "everyone loves.",
+        "Girard has a small-town charm everyone loves.",
+        "This hidden gem is steeped in history.",
+        "It's a quaint, picture-perfect spot worth a visit.",
+    ]
+    seeds = ["Mount Vernon was platted in 1845.", "Girard was platted in 1803.",
+             "The downtown square dates to 1845."]
+    assert funfacts._grounded_filter(
+        padded, "Mount Vernon, Missouri", "Mount Vernon, MO", seeds) == []
+
+    # Positive control: real facts the seeds actually contain must survive.
+    real = [
+        "Stony Dell Resort opened in 1932: a spring-fed pool, stone cabins and "
+        "a restaurant built in Ozark giraffe stone.",
+        "Stanley Ketchel, the Michigan Assassin, was shot in the back at a "
+        "ranch near Conway on October 15, 1910.",
+        "Past Times Arcade in Girard holds a Guinness record for its 600 "
+        "pinball machines.",
+    ]
+    kept = funfacts._grounded_filter(real, "Girard, Ohio", "Girard, OH", list(real))
+    assert len(kept) == len(real), kept
+    print("[PASS] padded praise dropped, real facts kept")
+
+
 def test_namesake_company_is_not_harvested():
     """'!funfact Conway, missouri' at 10:52 posted "this town's got quite the
     maritime library stacked up despite being nowhere near the ocean."
@@ -1409,6 +1470,8 @@ def main():
     test_search_key_beats_duckduckgo()
     test_namesake_articles_are_not_harvested()
     test_namesake_company_is_not_harvested()
+    test_spicy_dig_respects_the_region()
+    test_padded_praise_is_dropped()
     test_wiki_multi_title()
     test_full_article_extract()
     test_wrong_place_harvest()

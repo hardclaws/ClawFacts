@@ -117,6 +117,16 @@ def main() -> int:
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()
          and "does not end with a comma" in open(
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
+        ("the spicy dig checks the region (Baltimore != Mount Vernon, MO)",
+         open(funfacts.__file__, encoding="utf-8").read().count(
+             "_text_names_other_region(extract[:250], region)") >= 2),
+        ("padded praise dropped ('everyone loves', 'small-town charm')",
+         hasattr(funfacts, "_VAGUE")
+         and funfacts._VAGUE.search("those classic small-town traditions everyone loves")
+         and not funfacts._VAGUE.search("Past Times Arcade holds a Guinness record.")),
+        ("curated Mount Vernon, Missouri facts (Julia Butterfly Hill)",
+         bool(funfacts._spicy_db("Mount Vernon, MO", 200))
+         and funfacts._spicy_db("Mount Vernon, Massachusetts", 200) is None),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
