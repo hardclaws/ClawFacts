@@ -205,6 +205,8 @@ Quick-and-dirty local alternatives:
 | `!riddle`             | A riddle; the answer is posted ~20s later.                    |
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
+| `!transporting`       | What the truck is hauling right now.                          |
+| `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
 
@@ -355,6 +357,10 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 | `!wyr` | A would-you-rather |
 | `!help` | Lists all of the above, plus who may use them |
 | `!bot off` / `!bot on` / `!bot status` | **Moderators only** — switch every command off and on again |
+| `!transporting` | What the truck is hauling — anyone in chat can ask |
+| `!transporting update <cargo>` / `delete` | **Moderators only** — set or clear it |
+| `!reminder <when> <message>` | **Moderators only** — post into chat later |
+| `!reminder list` / `cancel <n>` / `cancel all` | **Moderators only** — see and clear them |
 
 `!smk` is also accepted as `!shagmarrykill` or `!marryshagkill`, and `f`/`m`
 work as shorthands for `female`/`male`. Its names come from a local pool of
@@ -369,6 +375,80 @@ is ignored rather than refused, so it does not become a spam vector. It is
 restricted to the broadcaster and moderators, and it deliberately keeps
 answering while the bot is off; otherwise switching it off would be a one-way
 trip. The state lives in memory, so a restart brings the commands back on.
+
+### Reminders
+
+A moderator can leave a note that posts into chat later. Two ways to say when:
+
+```
+!reminder 60mins Make sure you check the lights are working
+!reminder 01:30PDT Check your lights
+```
+
+```
+@amod reminder #1 set for 03:50 UTC today (in 1 hour) - Make sure you check the lights are working
+@amod reminder #2 set for 08:30 UTC today (at 08:30 PDT tomorrow) - Check your lights
+```
+
+and an hour later, unprompted:
+
+```
+Reminder | Make sure you check the lights are working  (set by @amod)
+```
+
+**Durations** — `60mins`, `60 mins`, `90s`, `1h30m`, `2d`, `1.5h`, `1 week`.
+A bare number means minutes, so `!reminder 5 do the thing` is five minutes.
+Between 10 seconds and 14 days, up to 20 pending at once.
+
+**Clock times** — `01:30PDT`, `1:30pm PDT`, `13:30`, `01:30 America/Los_Angeles`,
+`01:30 UTC-7`. An abbreviation is a *fixed* offset, so `PDT` means UTC−7
+whatever the season; an IANA name such as `America/Los_Angeles` follows DST.
+With no timezone at all it uses the machine the bot runs on. A time that has
+already passed today rolls to tomorrow, which is what "remind me at 1:30"
+means at 4pm.
+
+The confirmation always shows **both** the machine's own clock and the zone you
+asked for, so a misread timezone is obvious at a glance and can be cancelled.
+
+Managing them:
+
+```
+!reminder list          @amod reminders: #3 1 minute from now - short one | #1 1 hour from now - ...
+!reminder cancel 3      @amod reminder #3 cancelled.
+!reminder cancel all    @amod cancelled all 3 reminders.
+```
+
+`!reminders` is accepted as an alias for `!reminder`.
+
+**Reminders survive a restart.** They are written to `reminders.json` as they
+are created, so one set for tomorrow morning is not lost to an update or a
+crash overnight. One that came due while the bot was down still fires when it
+comes back up; one more than an hour overdue is dropped rather than posted out
+of the blue. While the bot is switched off with `!bot off` they are *held*, not
+dropped, and fire when it resumes.
+
+### The transporting board
+
+One line of state so viewers can ask what the truck is carrying:
+
+```
+!transporting update Produce        (moderator)
+@viewer2 we are transporting Produce.  (set by @amod, 4 minutes ago)
+
+!transporting delete                (moderator)
+@viewer2 nothing is logged as transporting right now - a moderator can set it
+with !transporting update <what we're hauling>
+```
+
+Reading it is open to everyone — it costs no API call and answers no fact
+engine — and it stays open even for viewers the fact commands are gated
+against. Only moderators can change or clear it, and a viewer who tries gets
+no reply at all. It is stored in `transporting.json`, so what the truck is
+hauling does not reset when the bot is updated.
+
+Both state files are gitignored, like `tokens.json` and `config.json`. Keep
+them when you update the bot's files if you want reminders and the cargo board
+to carry over.
 
 Facts are trimmed to `max_fact_chars` / `max_message_chars` on a **sentence
 boundary** where one fits, so a long fact loses its trailing sentence instead
@@ -804,6 +884,9 @@ appends fake joke comments.
 | `auth.py`            | Twitch login (device-code flow) + auto-refresh. |
 | `funfacts.py`        | Fact lookup + ranking, spice, rotation, caching.|
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
+| `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
+| `transporting.py`    | The `!transporting` cargo board.                |
+| `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
 | `config.example.json`| Sample configuration.                           |
@@ -814,4 +897,7 @@ appends fake joke comments.
 | `fixtures/`          | Recorded MediaWiki responses for the replay.    |
 | `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
+| `mock_reminders_test.py` | Offline reminder/cargo tests.               |
 | `tokens.json`        | Created on first login; holds the saved login.  |
+| `reminders.json`     | Pending reminders; written at runtime.          |
+| `transporting.json`  | The current cargo line; written at runtime.     |

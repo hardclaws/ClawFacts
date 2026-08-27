@@ -63,6 +63,16 @@ SCRIPT = [
     (30.0, privmsg("viewer1", "!bot status", "moderator/1")),
     (31.5, privmsg("viewer1", "!bot on", "moderator/1")),
     (33.0, privmsg("viewer1", "!funfacts Somewhere, ZZ", "moderator/1")),
+    # The cargo board: readable by anyone, writable by moderators only.
+    (34.5, privmsg("nobody", "!transporting", "")),
+    (36.0, privmsg("viewer1", "!transporting update Produce", "moderator/1")),
+    (37.5, privmsg("nobody", "!transporting", "")),
+    (39.0, privmsg("nobody", "!transporting update Stolen goods", "")),
+    # A reminder, its list, and the moment it fires. !reminders is an alias.
+    (40.5, privmsg("viewer1", "!reminder 10s Check the lights are working",
+                   "moderator/1")),
+    (42.0, privmsg("viewer1", "!reminders list", "moderator/1")),
+    (44.0, privmsg("nobody", "!reminder list", "")),
 ]
 
 
@@ -77,7 +87,7 @@ def server(bot_lines):
     buf = b""
     start = time.time()
     next_idx = 0
-    while time.time() - start < 38:
+    while time.time() - start < 58:
         try:
             data = conn.recv(4096)
         except socket.timeout:
@@ -144,13 +154,26 @@ def main():
         "use_tls": False,
     }
     bot = TwitchBot(cfg)
+    # Fresh state files. Reminders and the cargo board persist across restarts
+    # by design, so a second run would otherwise start with the first run's
+    # "Produce" still on the board and the test would not be repeatable.
+    import tempfile
+    import reminders as reminders_mod
+    import transporting as transporting_mod
+    state_dir = tempfile.mkdtemp(prefix="clawfacts-mock-")
+    bot.reminders = reminders_mod.ReminderSet(
+        os.path.join(state_dir, "reminders.json"))
+    bot.cargo = transporting_mod.Cargo(
+        os.path.join(state_dir, "transporting.json"))
+    assert not bot.cargo.is_set, "the test must start from an empty board"
+    assert len(bot.reminders) == 0, "the test must start with no reminders"
     bot_lines = []
     t = threading.Thread(target=server, args=(bot_lines,), daemon=True)
     t.start()
     time.sleep(0.4)
     runner = threading.Thread(target=bot.run, daemon=True)
     runner.start()
-    time.sleep(36)   # long enough for the riddle timer and the new commands
+    time.sleep(56)   # long enough for the riddle timer and a 10s reminder
     bot.running = False
     bot._close()
     runner.join(timeout=5)
@@ -169,6 +192,10 @@ def main():
     helps = [l for l in bot_lines if "PRIVMSG" in l and "commands:" in l]
     smk = [l for l in bot_lines if "PRIVMSG" in l and "ShagMarryKill" in l]
     switches = [l for l in bot_lines if "PRIVMSG" in l and "!bot" in l]
+    cargo = [l for l in bot_lines if "PRIVMSG" in l and "transporting" in l]
+    reminds = [l for l in bot_lines if "PRIVMSG" in l
+               and ("Reminder |" in l or "reminder #" in l
+                    or "reminders:" in l or "no reminders" in l)]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
@@ -201,6 +228,42 @@ def main():
         return 1
     print(f"[PASS] !bot off/on is moderator-only and silences every command "
           f"({len(switches)} switch line(s))")
+
+    # The cargo board is open to read and closed to write.
+    if not any("@nobody nothing is logged" in l for l in cargo):
+        print("FAIL: !transporting did not answer a badge-less viewer")
+        return 1
+    if not any("@nobody we are transporting Produce." in l for l in cargo):
+        print("FAIL: !transporting did not report the load")
+        return 1
+    if any("@nobody transporting updated" in l for l in bot_lines):
+        print("FAIL: a viewer was allowed to change the cargo board")
+        return 1
+    print(f"[PASS] !transporting is readable by all, writable by mods "
+          f"({len(cargo)} line(s))")
+
+    # A reminder is created, listed, and actually reaches chat.
+    if not any("reminder #1 set for" in l for l in reminds):
+        print("FAIL: !reminder did not confirm")
+        return 1
+    if not any("reminders: #1" in l for l in reminds):
+        print("FAIL: !reminders list did not show the pending reminder")
+        return 1
+    fired = [l for l in bot_lines if "Reminder | Check the lights are working" in l]
+    if not fired:
+        print("FAIL: the reminder never posted to chat")
+        return 1
+    if "(set by @viewer1)" not in fired[0]:
+        print(f"FAIL: the reminder did not say who set it: {fired[0]}")
+        return 1
+    if any(l for l in reminds if "@nobody reminders:" in l or "@nobody no reminders" in l):
+        print("FAIL: a viewer was answered for !reminder")
+        return 1
+    if any(len(l) > 500 for l in bot_lines):
+        print("FAIL: a line exceeded Twitch's 500-character limit")
+        return 1
+    print(f"[PASS] !reminder set / listed / fired, and viewers are not answered "
+          f"({len(reminds)} line(s))")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "

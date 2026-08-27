@@ -162,6 +162,27 @@ def main() -> int:
                   oauth_token="oauth:x")), "_diagnose_access")),
         ("moderation:read:moderators is requested at login",
          "moderation:read:moderators" in __import__("auth").SCOPES),
+        ("!reminder takes a duration (60mins, 1h30m)",
+         __import__("reminders").parse_delay("60mins")[0] == 3600.0
+         and __import__("reminders").parse_delay("1h30m")[0] == 5400.0),
+        ("!reminder takes a clock time with a timezone (01:30PDT)",
+         __import__("reminders").parse_clock("01:30PDT")[1] == "PDT"
+         and __import__("reminders").parse_clock(
+             "01:30 America/Los_Angeles")[1] == "America/Los_Angeles"),
+        ("reminders survive a restart",
+         hasattr(__import__("reminders").ReminderSet, "save")
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
+                  oauth_token="oauth:x")), "reminders")),
+        ("!transporting update/delete, readable by everyone",
+         hasattr(__import__("transporting").Cargo, "update")
+         and hasattr(__import__("transporting").Cargo, "delete")
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
+                  oauth_token="oauth:x")), "_say_transport")),
+        ("state files are written atomically",
+         __import__("storage").save_json(
+             __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

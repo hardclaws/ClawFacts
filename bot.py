@@ -40,6 +40,8 @@ import time
 import auth
 import access
 import extras
+import reminders as reminders_mod
+import transporting as transporting_mod
 from funfacts import get_funfact, trim_to_fit
 
 HOST = "irc.chat.twitch.tv"
@@ -53,6 +55,10 @@ SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
 # !help is documentation, not a game: it stays reachable for everyone so a
 # viewer can read what the bot does even if they may not run a command yet.
 HELP_COMMANDS = {"help", "commands"}
+# Moderator-owned state. Both stay reachable while the bot is switched off,
+# otherwise !bot off would strand a pending reminder or the cargo board.
+REMINDER_COMMANDS = {"reminder", "reminders"}
+TRANSPORT_COMMANDS = {"transporting", "transport"}
 
 DEFAULTS = {
     "nick": "",
@@ -228,6 +234,10 @@ class TwitchBot:
         self._broadcaster_id = ""
         self._last_probe = 0.0              # last follower-permission probe
         self.paused = False                 # !bot off (moderators only)
+        # Mod-owned state, both persisted next to the code so they survive a
+        # restart. A reminder set for tomorrow must not be lost to an update.
+        self.reminders = reminders_mod.ReminderSet()
+        self.cargo = transporting_mod.Cargo()
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
@@ -394,6 +404,10 @@ class TwitchBot:
             target=self._token_keeper, name="token-keeper", daemon=True
         )
         keeper.start()
+        ticker = threading.Thread(
+            target=self._reminder_keeper, name="reminder-keeper", daemon=True
+        )
+        ticker.start()
 
         backoff = 2
         while self.running:
@@ -502,6 +516,21 @@ class TwitchBot:
             self._bot_switch(nick, badges, argument.strip().lower())
             return
 
+        if command in REMINDER_COMMANDS:
+            self._reminder_command(nick, badges, argument)
+            return
+
+        if command in TRANSPORT_COMMANDS:
+            # update/delete are moderator-only and answered even while paused.
+            if self._transport_mutation(nick, badges, argument):
+                return
+            if self.paused:
+                return
+            # Reading the board costs nothing and answers no API call, so like
+            # !help it stays open to everyone, badges or not.
+            self._say_transport(nick)
+            return
+
         if self.paused:
             return
 
@@ -564,6 +593,138 @@ class TwitchBot:
             self._say(f"@{nick} usage: {pre}bot on | {pre}bot off | "
                       f"{pre}bot status")
         self._log(f"!bot {argument or 'status'} from {nick} -> paused={self.paused}")
+
+    # ---- reminders and the cargo board --------------------------------
+    def _is_mod(self, badges: str) -> bool:
+        return access.tier_from_badges(badges) in ("broadcaster", "moderator")
+
+    def _fit(self, head: str, body: str, tail: str = "") -> str:
+        """Keep head + body + tail inside Twitch's 500-character limit."""
+        budget = max(60, min(500, int(self.cfg.get("max_message_chars", 450)))
+                     - len(head) - len(tail))
+        return head + trim_to_fit(body, budget) + tail
+
+    def _reminder_command(self, nick: str, badges: str, argument: str) -> None:
+        """!reminder <when> <message> | list | cancel <n>|all  (mods only)."""
+        if not self._is_mod(badges):
+            return                      # silent: no spam vector for viewers
+        prefix = self.cfg.get("prefix", "!")
+        spec, _, message = (argument or "").strip().partition(" ")
+        word = spec.lower()
+
+        if word in ("", "help", "?"):
+            self._say(f"@{nick} usage: {prefix}reminder 60mins <message> or "
+                      f"{prefix}reminder 01:30PDT <message> | "
+                      f"{prefix}reminder list | {prefix}reminder cancel <n>|all")
+            return
+        if word in ("list", "ls", "pending"):
+            self._say_reminder_list(nick)
+            return
+        if word in ("cancel", "delete", "remove", "rm"):
+            count, why = self.reminders.cancel(message)
+            if why:
+                self._say(f"@{nick} {why}.")
+            elif count > 1:
+                self._say(f"@{nick} cancelled all {count} reminders.")
+            else:
+                self._say(f"@{nick} reminder #{message.strip().lstrip('#')} cancelled.")
+            return
+
+        item, why = self.reminders.add(spec, message, nick)
+        if item is None:
+            self._say(self._fit(f"@{nick} ", why or "could not set that reminder"))
+            return
+        self._say(self._fit(
+            f"@{nick} reminder #{item.id} set for {self._when_local(item.due)} "
+            f"({item.label}) - ", item.message))
+        self._log(f"reminder #{item.id} from {nick}: {item.label} - "
+                  f"{item.message[:60]!r}")
+
+    def _say_reminder_list(self, nick: str) -> None:
+        pending = self.reminders.pending()
+        if not pending:
+            self._say(f"@{nick} no reminders pending.")
+            return
+        shown, rest = pending[:6], len(pending) - 6
+        parts = [f"#{r.id} {r.when()} - " + (r.message[:40] +
+                 ("..." if len(r.message) > 40 else "")) for r in shown]
+        body = " | ".join(parts) + (f" | +{rest} more" if rest > 0 else "")
+        self._say(self._fit(f"@{nick} reminders: ", body))
+
+    def _fire_reminder(self, item) -> None:
+        tail = f'  (set by @{item.creator})' if item.creator else ""
+        self._say(self._fit("Reminder | ", item.message, tail))
+        self._log(f"reminder #{item.id} fired: {item.message[:60]!r}")
+
+    @staticmethod
+    def _when_local(due: float) -> str:
+        """'21:05 UTC today' - the machine's own clock, so a reminder set in
+        one timezone can be read by whoever is watching the console."""
+        due_lt = time.localtime(due)
+        zone = time.tzname[0] or "local"
+        clock = time.strftime("%H:%M", due_lt)
+        if due_lt[:3] == time.localtime()[:3]:
+            return f"{clock} {zone} today"
+        if due_lt[:3] == time.localtime(time.time() + 86400)[:3]:
+            return f"{clock} {zone} tomorrow"
+        return f"{clock} {zone} on " + time.strftime("%a %d %b", due_lt)
+
+    def _tick_reminders(self) -> int:
+        """One pass of the reminder clock. Returns how many it posted."""
+        if not self.running or self.paused:
+            # Held, not dropped: a moderator who paused the bot did not cancel
+            # its reminders, and firing one into a silenced channel is wrong.
+            return 0
+        posted = 0
+        for item in self.reminders.pop_due():
+            self._fire_reminder(item)
+            posted += 1
+        return posted
+
+    def _reminder_keeper(self) -> None:
+        while self.running:
+            time.sleep(1.0)
+            try:
+                self._tick_reminders()
+            except Exception as exc:      # a bad reminder must not kill the bot
+                self._log(f"reminder error: {exc!r}")
+
+    # ---- the cargo board ---------------------------------------------------
+    def _transport_mutation(self, nick: str, badges: str, argument: str) -> bool:
+        """Handle update/delete. True if this was a mutation (handled)."""
+        verb, _, cargo = (argument or "").strip().partition(" ")
+        verb = verb.lower()
+        if verb in ("update", "set", "u"):
+            if not self._is_mod(badges):
+                return True             # recognised, but not yours to change
+            ok, why = self.cargo.update(cargo)
+            if not ok:
+                self._say(f"@{nick} {why}.")
+                return True
+            self.cargo.set_by = nick
+            self.cargo.save()
+            self._say(self._fit(f"@{nick} transporting updated: ", self.cargo.text))
+            self._log(f"transporting updated by {nick}: {self.cargo.text[:60]!r}")
+            return True
+        if verb in ("delete", "clear", "remove", "d"):
+            if not self._is_mod(badges):
+                return True
+            ok, why = self.cargo.delete()
+            self._say(f"@{nick} {why}." if not ok else f"@{nick} transporting cleared.")
+            return True
+        return False
+
+    def _say_transport(self, nick: str) -> None:
+        if not self.cargo.is_set:
+            prefix = self.cfg.get("prefix", "!")
+            self._say(f"@{nick} nothing is logged as transporting right now - a "
+                      f"moderator can set it with {prefix}transporting update "
+                      f"<what we're hauling>")
+            return
+        age = self.cargo.age()
+        tail = f"  (set by @{self.cargo.set_by}" + (f", {age}" if age else "") + ")"
+        self._say(self._fit(f"@{nick} we are transporting ",
+                            self.cargo.text, "." + tail))
 
     def _build_helix(self, cfg: dict):
         """Helix client for follow checks. The broadcaster's id is the channel
@@ -639,15 +800,19 @@ class TwitchBot:
             f"{prefix}randomfact - a random fact",
             f"{prefix}riddle - a riddle; the answer follows shortly",
             f"{prefix}wyr - a would-you-rather",
+            f"{prefix}transporting - what the truck is hauling right now",
         ]
         self._say(f"@{nick} commands: " + " | ".join(lines))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
                   f"VIP and subscribers every 60s, followers of over a day "
                   f"every 5 minutes.")
-        if access.tier_from_badges(badges) in ("broadcaster", "moderator"):
+        if self._is_mod(badges):
             # Only worth advertising to the people allowed to use it.
-            self._say(f"@{nick} mods: {prefix}bot off / {prefix}bot on - switch "
-                      f"every command off and on again ({prefix}bot status).")
+            self._say(f"@{nick} mods: {prefix}reminder 60mins <message> or "
+                      f"{prefix}reminder 01:30PDT <message>, then "
+                      f"{prefix}reminder list / cancel <n>|all")
+            self._say(f"@{nick} mods: {prefix}transporting update <cargo> / "
+                      f"delete, and {prefix}bot off / on / status")
 
     def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:
         limit = int(self.cfg.get("max_message_chars", 450))
