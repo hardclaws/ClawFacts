@@ -119,6 +119,9 @@ class Helix:
         self._ids = {}       # login -> user id (ids never change)
         self._follows = {}   # user id -> (expires_at, followed_at or None)
         self.errors = 0
+        # None = not probed yet, True/False = whether this token is actually
+        # allowed to read the follower list. See self_test().
+        self.authorised = None
 
     @property
     def usable(self) -> bool:
@@ -166,12 +169,68 @@ class Helix:
             print(f"[access] helix followers lookup failed: {exc!r}", flush=True)
             return None
         rows = data.get("data") or []
-        value = (rows[0].get("followed_at") or "") if rows else ""
+        if rows:
+            value = rows[0].get("followed_at") or ""
+        elif self.authorised is False:
+            # Twitch returns the total count and an EMPTY data array when the
+            # token is not the broadcaster or a moderator, or is missing
+            # moderator:read:followers. Reading that as "does not follow" is
+            # what made every real follower get turned away. Report it as
+            # unknown instead - the honest answer, and it points at the fix.
+            value = None
+        else:
+            value = ""
+        if value is None:
+            return None
         # A confirmed follow can be cached for good; a non-follow is cached
         # only briefly so a new follower isn't locked out for hours.
         ttl = self.cache_seconds if value else min(900.0, self.cache_seconds)
         self._follows[user_id] = (time.time() + ttl, value)
         return value
+
+    def self_test(self):
+        """Probe once whether this token may read the follower list, and say
+        what is wrong if it may not. Without this the only symptom is every
+        follower being told they don't follow the channel."""
+        if not self.usable:
+            self.authorised = False
+            print("[access] follower check unavailable: missing client_id, "
+                  "oauth token or broadcaster_id.", flush=True)
+            return False
+        try:
+            data = _get(f"{HELIX}/helix/channels/followers",
+                        {"broadcaster_id": self.broadcaster_id, "first": 1},
+                        self.token, self.client_id, self.timeout)
+        except urllib.error.HTTPError as exc:
+            self.authorised = False
+            self.errors += 1
+            print(f"[access] follower check failed: HTTP {exc.code}.", flush=True)
+            if exc.code == 401:
+                print("[access]   The token cannot read this channel's followers. "
+                      "Either it is missing the moderator:read:followers scope "
+                      "(run 'python3 bot.py --login' to re-authorise) or the bot "
+                      "account is not the broadcaster or a moderator of it.",
+                      flush=True)
+            return False
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self.authorised = None   # transient - do not conclude anything
+            self.errors += 1
+            print(f"[access] follower check could not reach Helix: {exc!r}",
+                  flush=True)
+            return False
+        rows = data.get("data") or []
+        total = data.get("total")
+        if not rows:
+            # 200 OK with an empty list but a real total = no permission.
+            self.authorised = False
+            print(f"[access] follower check returned no rows (total={total}). "
+                  "Twitch only returns the list to the broadcaster or a "
+                  "moderator holding moderator:read:followers.", flush=True)
+            return False
+        self.authorised = True
+        print(f"[access] follower check OK - token may read this channel's "
+              f"followers (total={total}).", flush=True)
+        return True
 
 
 def _iso_to_epoch(stamp: str):

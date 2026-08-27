@@ -456,6 +456,7 @@ class TwitchBot:
             self._broadcaster_id = uid
             helix.broadcaster_id = uid
             self._log(f"access control: broadcaster_id={uid}")
+            helix.self_test()
         return self._broadcaster_id
 
     def _note_denial(self, nick: str, login: str, reason: str, wait: float) -> None:

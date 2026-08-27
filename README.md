@@ -352,8 +352,40 @@ GET /helix/channels/followers?broadcaster_id=<channel>&user_id=<viewer>
 
 which needs the `moderator:read:followers` scope and a user token belonging to
 the broadcaster or one of the channel's moderators — the device-login token
-`auth.py` already stores. **The scope was added, so run `python3 bot.py --login`
-once after updating**, or every follower check will come back 401.
+`auth.py` already stores.
+
+**Two things must both be true, or every follower gets turned away:**
+
+1. **The bot account must be the broadcaster or a moderator of the channel.**
+   If it is a separate account, promote it once in chat:
+   ```
+   /mod TruckingWithDocBot
+   ```
+   This is Twitch's rule, not the bot's: *"The ID in the broadcaster_id query
+   parameter must match the user ID in the access token or the user ID in the
+   access token must be a moderator for the specified broadcaster."*
+
+2. **Re-authorise once** so the token carries the new scope:
+   ```
+   python3 bot.py --login
+   ```
+
+The bot probes this on the first command and says which one is wrong:
+
+```
+[access] follower check OK - token may read this channel's followers (total=812).
+[access] follower check failed: HTTP 401.
+[access]   The token cannot read this channel's followers. Either it is missing
+           the moderator:read:followers scope (run 'python3 bot.py --login' to
+           re-authorise) or the bot account is not the broadcaster or a
+           moderator of it.
+```
+
+> Twitch answers an unauthorised request with **200 OK, the real follower
+> total, and an empty list** — the same shape as "this user does not follow".
+> Treating those as the same thing is what made every real follower get told
+> they don't follow the channel. The bot now reports *"could not verify your
+> follow status"* in that case rather than accusing the viewer.
 
 Default schedule (`tier_cooldowns` in `config.json`):
 

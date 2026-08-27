@@ -127,6 +127,10 @@ def main() -> int:
         ("curated Mount Vernon, Missouri facts (Julia Butterfly Hill)",
          bool(funfacts._spicy_db("Mount Vernon, MO", 200))
          and funfacts._spicy_db("Mount Vernon, Massachusetts", 200) is None),
+        ("an unauthorised token reports 'unknown', not 'not following'",
+         hasattr(__import__("access").Helix("c", "t", "1"), "self_test")
+         and "self.authorised is False" in open(
+             pathlib.Path(__file__).parent / "access.py", encoding="utf-8").read()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
