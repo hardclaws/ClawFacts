@@ -25,14 +25,24 @@ bot_mod.get_funfact = lambda location, options=None: {
 
 HOST, PORT = "127.0.0.1", 6667
 
+def privmsg(login, text, badges=""):
+    """A PRIVMSG the way Twitch really sends it - with the tags capability on,
+    every line carries badges. Access control reads them from there."""
+    info = "subscriber/12" if "subscriber" in badges else ""
+    tags = f"@badge-info={info};badges={badges};display-name={login};id=x"
+    return f"{tags} :{login}!{login}@{login}.tmi.twitch.tv PRIVMSG #test :{text}"
+
+
 SCRIPT = [
-    (2.0, ":viewer1!viewer1@viewer1.tmi.twitch.tv PRIVMSG #test :!funfact Milford, PA"),
-    (4.0, ":viewer2!viewer2@viewer2.tmi.twitch.tv PRIVMSG #test :!funfact"),
+    (2.0, privmsg("viewer1", "!funfact Milford, PA", "moderator/1,subscriber/24")),
+    (4.0, privmsg("viewer2", "!funfact", "subscriber/06")),
     (5.0, "PING :tmi.twitch.tv"),
-    (6.0, ":viewer2!viewer2@viewer2.tmi.twitch.tv PRIVMSG #test :!help"),
-    (9.0, ":viewer3!viewer3@viewer3.tmi.twitch.tv PRIVMSG #test :!funfact Breezewood, PA"),
-    (10.5, ":viewer4!viewer4@viewer4.tmi.twitch.tv PRIVMSG #test :!joke"),
-    (12.0, ":viewer4!viewer4@viewer4.tmi.twitch.tv PRIVMSG #test :!randomfact"),
+    (6.0, privmsg("viewer2", "!help", "subscriber/06")),
+    (9.0, privmsg("viewer3", "!funfact Breezewood, PA", "vip/1")),
+    (10.5, privmsg("viewer4", "!joke", "subscriber/01")),
+    (12.0, privmsg("viewer5", "!randomfact", "vip/1")),
+    # No badges at all, and no way to verify the follow: must be turned away.
+    (14.0, privmsg("stranger", "!funfact Girard, OH", "")),
 ]
 
 
@@ -47,7 +57,7 @@ def server(bot_lines):
     buf = b""
     start = time.time()
     next_idx = 0
-    while time.time() - start < 16:
+    while time.time() - start < 22:
         try:
             data = conn.recv(4096)
         except socket.timeout:
@@ -88,7 +98,7 @@ def main():
     time.sleep(0.4)
     runner = threading.Thread(target=bot.run, daemon=True)
     runner.start()
-    time.sleep(14)
+    time.sleep(20)   # long enough for the last scripted message (14s) to be answered
     bot.running = False
     bot._close()
     runner.join(timeout=5)
@@ -102,8 +112,18 @@ def main():
     jokes = [l for l in bot_lines if "PRIVMSG" in l and "Joke |" in l]
     rf = [l for l in bot_lines if "PRIVMSG" in l and "RandomFact |" in l]
     pongs = [l for l in bot_lines if l.startswith("PONG")]
+    # The badge-less viewer must be refused, and must not get a fact.
+    turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
+    stranger_fact = [l for l in facts if "stranger" in l]
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
-          f"randomfacts: {len(rf)}, pongs: {len(pongs)}")
+          f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "
+          f"badge-less refused: {len(turned_away)}")
+    if not turned_away:
+        print("FAIL: a viewer with no badges was not turned away")
+        return 1
+    if stranger_fact:
+        print("FAIL: the badge-less viewer received a fact")
+        return 1
     if facts and usage and jokes and rf and pongs:
         print("END-TO-END TEST PASSED ✔")
         return 0

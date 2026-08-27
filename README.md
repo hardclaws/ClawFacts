@@ -340,6 +340,51 @@ mentions a hanging in Girard, drugs, a mule or a record, and a county-wide
 (Girard is named for Stephen Girard, the Philadelphia philanthropist). Telling
 the Gardner hanging *as* a Trumbull County story is still allowed.
 
+### Who can use !funfact, and how often
+
+Chat abuse is easy to stop for mods, VIPs and subs — Twitch sends their badges
+on every message, so those checks are free and instant. **Follow status is not
+in IRC at all.** The only way to get it is the Helix API:
+
+```
+GET /helix/channels/followers?broadcaster_id=<channel>&user_id=<viewer>
+```
+
+which needs the `moderator:read:followers` scope and a user token belonging to
+the broadcaster or one of the channel's moderators — the device-login token
+`auth.py` already stores. **The scope was added, so run `python3 bot.py --login`
+once after updating**, or every follower check will come back 401.
+
+Default schedule (`tier_cooldowns` in `config.json`):
+
+| Who | Cooldown | How it's known |
+|---|---|---|
+| Broadcaster | 30s | `broadcaster` badge |
+| Moderator | 30s | `moderator` badge (also `staff`/`admin`/`global_mod`) |
+| VIP | 60s | `vip` badge |
+| Subscriber | 60s | `subscriber` badge (`founder` counts) |
+| Follower, following > 1 day | 5 min | Helix API, cached |
+| Follower, less than 1 day | blocked | Helix API |
+| Not following | blocked | Helix API |
+
+Notes:
+
+- Cooldowns are **per user**, so one person waiting never blocks the next. The
+  old `cooldown_seconds` stays as a *per-channel* floor — that is what protects
+  Wikipedia's per-IP rate limit, and per-user limits alone would not stop twenty
+  different viewers each firing once.
+- Mods, VIPs and subs never trigger an API call. Follower lookups are cached:
+  a confirmed follow for 6 hours, a non-follow for 15 minutes.
+- `min_follow_age_seconds` (default 86400) is the 1-day rule.
+- If the follow check cannot run — no token, missing scope, API down —
+  `follower_check_failure` decides. The default `"deny"` keeps the gate honest;
+  `"allow"` falls back to badges only.
+- The gate covers `!joke` / `!randomfact` / `!riddle` too. Set
+  `"gate_fun_commands": false` to leave those open to everyone.
+- Rejections are explained in chat, but at most once every 2 minutes per user —
+  otherwise refusing people becomes its own spam vector.
+- `"access_control": false` turns the whole thing off.
+
 ### Updating the bot's files without losing your login
 
 `auth.py` saves your Twitch login to **`tokens.json`** (chmod 600) in the bot's

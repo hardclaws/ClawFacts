@@ -20,5 +20,16 @@
   "google_api_key": "",
   "google_cx": "",
   "serper_api_key": "",
-  "_llm_options": "The three llm_* fields above are set for OpenRouter (recommended for adult-aligned facts). Other providers: Groq -> key 'gsk_...', base 'https://api.groq.com/openai/v1', model 'openai/gpt-oss-120b'. Local Ollama -> key '' (empty), base 'http://localhost:11434/v1', model 'llama3.1:8b'. Other OpenRouter models: 'sao10k/l3.3-euryale-70b' (edgiest), 'cognitivecomputations/dolphin-mistral-24b-venice-edition' (uncensored), 'mistralai/mistral-nemo' (cheapest)."
+  "_llm_options": "The three llm_* fields above are set for OpenRouter (recommended for adult-aligned facts). Other providers: Groq -> key 'gsk_...', base 'https://api.groq.com/openai/v1', model 'openai/gpt-oss-120b'. Local Ollama -> key '' (empty), base 'http://localhost:11434/v1', model 'llama3.1:8b'. Other OpenRouter models: 'sao10k/l3.3-euryale-70b' (edgiest), 'cognitivecomputations/dolphin-mistral-24b-venice-edition' (uncensored), 'mistralai/mistral-nemo' (cheapest).",
+  "access_control": true,
+  "tier_cooldowns": {
+    "broadcaster": 30,
+    "moderator": 30,
+    "vip": 60,
+    "subscriber": 60,
+    "follower": 300
+  },
+  "min_follow_age_seconds": 86400,
+  "follower_check_failure": "deny",
+  "gate_fun_commands": true
 }

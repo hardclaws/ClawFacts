@@ -38,6 +38,7 @@ import threading
 import time
 
 import auth
+import access
 import extras
 from funfacts import get_funfact
 
@@ -61,6 +62,19 @@ DEFAULTS = {
     "fact_prefix": "FunFact",
     "fun_commands": True,      # enable !joke !randomfact !riddle !wouldyourather
     "respond_only_to": [],
+    # Who may use !funfact, and how often (see access.py). Badges come free
+    # from chat; follow status needs the Helix API and the
+    # moderator:read:followers scope, so a fresh --login is needed once.
+    "access_control": True,
+    "tier_cooldowns": {"broadcaster": 30, "moderator": 30, "vip": 60,
+                       "subscriber": 60, "follower": 300},
+    "min_follow_age_seconds": 86400,   # followers must be 1 day old
+    # The !joke/!randomfact/!riddle extras cost no API calls. Set false to
+    # leave them open to everyone while !funfact stays gated.
+    "gate_fun_commands": True,
+    # If the follow check can't run (no token, API down, scope missing):
+    # "deny" keeps the follower gate honest, "allow" falls back to badges only.
+    "follower_check_failure": "deny",
     # Optional LLM writer (used in spicy mode when an LLM is configured).
     # Auto-detects GROQ_API_KEY / OPENROUTER_API_KEY / OLLAMA_MODEL env vars,
     # so if you already run another AI app (e.g. Dayforge) it just works.
@@ -165,8 +179,13 @@ class TwitchBot:
         self._say_lock = threading.Lock()   # paces chat messages
         self._last_say = 0.0
         self._last_ping = 0.0               # keep-alive pacing
-        self._jobs = queue.Queue()          # (nick, command, argument)
+        self._jobs = queue.Queue()          # (nick, login, badges, cmd, arg)
         self._last_used = {}                # channel -> timestamp
+        # Role-based rate limiting. broadcaster_id is resolved lazily on the
+        # first command so a failed Helix call can never block startup.
+        self._access = access.AccessControl(cfg, self._build_helix(cfg))
+        self._broadcaster_id = ""
+        self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -336,12 +355,16 @@ class TwitchBot:
             nick = match.group(1) if match else "?"
             nick = tags.get("display-name") or nick
             message = trailing[1:] if trailing.startswith(":") else trailing
-            self._on_message(nick, target, message)
+            login_match = re.match(r":([^!]+)!", src)
+            login = (login_match.group(1) if login_match else nick).lower()
+            self._on_message(nick, target, message, login,
+                             tags.get("badges", ""))
         elif command == "NOTICE":
             self._log("NOTICE " + line)
 
     # ---- chat ---------------------------------------------------------
-    def _on_message(self, nick: str, target: str, message: str) -> None:
+    def _on_message(self, nick: str, target: str, message: str,
+                    login: str = "", badges: str = "") -> None:
         prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
@@ -379,12 +402,56 @@ class TwitchBot:
 
         argument = argument.strip()[:80]
         self._log(f"{command} request from {nick}: {argument!r}")
-        self._jobs.put((nick, command, argument))
+        self._jobs.put((nick, login or nick.lower(), badges, command, argument))
+
+    def _build_helix(self, cfg: dict):
+        """Helix client for follow checks. The broadcaster's id is the channel
+        we are joined to, not necessarily the account the bot logged in as."""
+        token = (cfg.get("oauth_token") or "").replace("oauth:", "").strip()
+        return access.Helix(cfg.get("client_id", ""), token)
+
+    def _resolve_broadcaster(self, channel: str) -> str:
+        if self._broadcaster_id:
+            return self._broadcaster_id
+        helix = self._access.helix
+        if not helix or not (helix.client_id and helix.token):
+            return ""
+        uid = helix.user_id(channel.lstrip("#"))
+        if uid:
+            self._broadcaster_id = uid
+            helix.broadcaster_id = uid
+            self._log(f"access control: broadcaster_id={uid}")
+        return self._broadcaster_id
+
+    def _note_denial(self, nick: str, login: str, reason: str, wait: float) -> None:
+        """Tell a rejected user why, but never more than once every 2 minutes
+        each - otherwise refusing them becomes its own spam vector."""
+        now = time.time()
+        if now - self._last_denial_note.get(login, 0.0) < 120.0:
+            return
+        self._last_denial_note[login] = now
+        if wait:
+            self._say(f"@{nick} that's on cooldown - {int(wait)}s to go.")
+        elif "follow" in reason:
+            self._say(f"@{nick} {reason} to use that command.")
+        else:
+            self._say(f"@{nick} {reason}.")
 
     def _worker(self) -> None:
         while True:
-            nick, command, argument = self._jobs.get()
+            nick, login, badges, command, argument = self._jobs.get()
             try:
+                gated = (command == "funfact"
+                         or self.cfg.get("gate_fun_commands", True))
+                self._resolve_broadcaster(self.cfg.get("channel", ""))
+                verdict = (self._access.check(login, badges) if gated
+                           else access.Decision(True, "ungated", 0.0, "not gated"))
+                if not verdict.allowed:
+                    self._log(f"{command} denied for {nick}: {verdict.reason} "
+                              f"(tier={verdict.tier})")
+                    self._note_denial(nick, login, verdict.reason, verdict.wait)
+                    continue
+                self._access.commit(login)
                 if command == "funfact":
                     result = get_funfact(argument, self._opts)
                     self._reply(nick, argument, result)
@@ -392,7 +459,8 @@ class TwitchBot:
                     self._reply_extra(nick, command)
             except Exception as exc:
                 self._log(f"{command} failed: {exc!r}")
-            self._jobs.task_done()
+            finally:
+                self._jobs.task_done()
 
     def _reply_extra(self, nick: str, command: str) -> None:
         limit = int(self.cfg.get("max_message_chars", 450))

@@ -100,6 +100,13 @@ def main() -> int:
         ("tokens.json and config.json are git-ignored",
          "tokens.json" in (pathlib.Path(funfacts.__file__).parent
                            / ".gitignore").read_text()),
+        ("role-based rate limiting (access.py tiers)",
+         __import__("access").tier_from_badges("subscriber/24,moderator/1") == "moderator"
+         and __import__("access").DEFAULT_TIER_COOLDOWNS["moderator"] == 30.0
+         and __import__("access").DEFAULT_TIER_COOLDOWNS["follower"] == 300.0
+         and __import__("access").DEFAULT_MIN_FOLLOW_AGE == 86400.0),
+        ("follower check has the Helix scope it needs",
+         "moderator:read:followers" in __import__("auth").SCOPES),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
