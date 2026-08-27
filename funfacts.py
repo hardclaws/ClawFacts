@@ -753,19 +753,45 @@ _LIFESPAN = re.compile(
 )
 
 
-def _is_person_article(extract: str) -> bool:
-    """True if an article's opening describes a person, not a place.
+# Not a person either: an organisation, a work, a ship. "Conway, missouri" at
+# 10:52 posted "this town's got quite the maritime library stacked up" — two
+# sentences lifted from Conway Publishing (pageid 29203197), a British imprint
+# of Bloomsbury, thousands of miles from the Ozarks.
+_NOT_A_PLACE = re.compile(
+    r"\b(?:is|was|were|are)\s+(?:an?\s+)?(?:imprint|subsidiary|division|brand|"
+    r"label|company|corporation|firm|conglomerate|publisher|publishing house|"
+    r"newspaper|magazine|journal|periodical|broadcaster|network|charity|"
+    r"organisation|organization|nonprofit|non-profit|band|record label|"
+    r"ship|schooner|frigate|warship|vessel|aircraft|film|movie|"
+    r"television (?:series|show)|song|album|book|novel|video game|award|"
+    r"prize|competition|festival|brand name|trademark)\b|"
+    r"\bfounded in (?:1[6-9]|20)\d\d as an?\b",
+    re.IGNORECASE,
+)
+
+
+def _is_non_place_article(extract: str) -> bool:
+    """True if an article's opening describes a person, company or work rather
+    than a place.
 
     Applied to every harvested title. Related-article harvesting is what lets a
-    tiny town borrow facts from a bigger article that shares its name, but the
-    same search also returns namesakes, and a biography's sentences are about
-    the person ("Barnes was born in Mississippi") with nothing tying them to
-    the town the viewer asked about.
+    tiny town borrow facts from a bigger article that shares its name — that is
+    how Lakemont, PA gets Leap-The-Dips from "Lakemont Park". But the same
+    search returns namesakes, and their sentences carry nothing tying them to
+    the town: "Barnes was born in Mississippi" (Jerome Barnes), "It is best
+    known for its publications dealing with nautical subjects" (Conway
+    Publishing). Requiring the place name instead is not an option: the
+    Leap-The-Dips sentence never says "Lakemont" either.
     """
     lead = " ".join((extract or "").split())[:300]
     if not lead:
         return False
-    return bool(_LIFESPAN.search(lead) or _BIOGRAPHICAL.search(lead))
+    return bool(_LIFESPAN.search(lead) or _BIOGRAPHICAL.search(lead)
+                or _NOT_A_PLACE.search(lead))
+
+
+# Kept so the earlier name still resolves in checks and older tests.
+_is_person_article = _is_non_place_article
 
 
 def _is_disambiguation(extract: str) -> bool:
@@ -846,7 +872,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             if _is_road_or_meta_title(title):
                 continue
             rel = _title_relevance(title, core, region)
-            if rel >= 70 and not _is_person_article(it["extract"]):
+            if rel >= 70 and not _is_non_place_article(it["extract"]):
                 items.append((rel, title, it["extract"]))
 
     gather(full)
@@ -895,7 +921,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             extract = extracts.get(title, "")
             if not extract or _is_disambiguation(extract):
                 continue
-            if title != place and _is_person_article(extract):
+            if title != place and _is_non_place_article(extract):
                 continue
             # A bare redirect title may point at another state's place — check
             # the article's opening statement names the requested region.

@@ -87,6 +87,19 @@ def main() -> int:
              "Representatives from the 28th district.")
          and not funfacts._is_person_article(
              "Jerome is an unincorporated community in Phelps County, Missouri.")),
+        ("namesake companies rejected (Conway Publishing != Conway, MO)",
+         hasattr(funfacts, "_is_non_place_article")
+         and funfacts._is_non_place_article(
+             "Conway Publishing, formerly Conway Maritime Press, is an imprint "
+             "of Bloomsbury Publishing.")
+         and not funfacts._is_non_place_article(
+             "Lakemont Park opened in 1894 as a trolley park.")),
+        ("curated Conway, Missouri facts (Stanley Ketchel, 1910)",
+         bool(funfacts._spicy_db("Conway, Missouri", 200))
+         and funfacts._spicy_db("Conway, Arkansas", 200) is None),
+        ("tokens.json and config.json are git-ignored",
+         "tokens.json" in (pathlib.Path(funfacts.__file__).parent
+                           / ".gitignore").read_text()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

@@ -749,6 +749,45 @@ def test_meta_line_filter():
         llm.rewrite_fact = orig
 
 
+def test_namesake_company_is_not_harvested():
+    """'!funfact Conway, missouri' at 10:52 posted "this town's got quite the
+    maritime library stacked up despite being nowhere near the ocean."
+
+    Both supporting seeds came from Conway Publishing (pageid 29203197), a
+    British imprint of Bloomsbury:
+      "It is best known for its publications dealing with nautical subjects."
+      "Over its history, it has built an extensive catalogue of books
+       specialising in maritime heritage, ship design and construction..."
+    Neither sentence names Conway, and requiring the place name is not the fix:
+    the Lakemont Park / Leap-The-Dips sentence never says "Lakemont" either, and
+    that harvest is the good case. The discriminator is whether the article is
+    about a place at all."""
+    fixture = json.loads((pathlib.Path(__file__).resolve().parent
+                          / "fixtures" / "wiki_conway_mo.json").read_text())
+    orig = (funfacts._wiki_search_extracts, funfacts._wiki_extract)
+    funfacts._wiki_search_extracts = (
+        lambda q, exchars=4000, limit=6: fixture["queries"].get(q.strip(), []))
+    funfacts._wiki_extract = lambda t, exchars=0: ""
+    try:
+        facts = (funfacts._wikipedia("Conway, missouri", spice=True, limit=200)
+                 or {}).get("facts") or []
+    finally:
+        funfacts._wiki_search_extracts, funfacts._wiki_extract = orig
+
+    joined = " ".join(facts).lower()
+    for bad in ("maritime", "nautical", "ship design", "bloomsbury", "publisher"):
+        assert bad not in joined, "publisher fact leaked: %r in %r" % (bad, facts)
+
+    pub = fixture["queries"]["conway"][1]["extract"]
+    assert "Conway Publishing" in pub
+    assert funfacts._is_non_place_article(pub), "the imprint must be rejected"
+    # ...while a genuine attraction article sharing the town's name stays.
+    assert not funfacts._is_non_place_article(
+        "Lakemont Park opened in 1894 as a trolley park. Among its notable "
+        "attractions is Leap-The-Dips, the world's oldest surviving roller coaster.")
+    print("[PASS] a namesake company can't lend a town its facts")
+
+
 def test_namesake_articles_are_not_harvested():
     """'!funfact Jerome, Missouri' at 10:40 posted four seeds and three of them
     were about other Jeromes: Saint Jerome of Stridon ("He is best known for his
@@ -1369,6 +1408,7 @@ def main():
     test_serper_source()
     test_search_key_beats_duckduckgo()
     test_namesake_articles_are_not_harvested()
+    test_namesake_company_is_not_harvested()
     test_wiki_multi_title()
     test_full_article_extract()
     test_wrong_place_harvest()

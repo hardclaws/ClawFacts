@@ -340,6 +340,27 @@ mentions a hanging in Girard, drugs, a mule or a record, and a county-wide
 (Girard is named for Stephen Girard, the Philadelphia philanthropist). Telling
 the Gardner hanging *as* a Trumbull County story is still allowed.
 
+### Updating the bot's files without losing your login
+
+`auth.py` saves your Twitch login to **`tokens.json`** (chmod 600) in the bot's
+own folder, and silently reuses or refreshes it on every start — you should only
+ever run the device login once.
+
+`tokens.json` and `config.json` are **not in git** (they hold your OAuth token
+and API keys) and they are listed in `.gitignore`. So if you update by
+downloading the repo or a zip and replacing the whole folder, you delete your
+saved login and the bot asks you to authorise again. That is the usual reason a
+restart demands a fresh login — it is not the token expiring.
+
+To update safely, copy the new `.py` files, `spicy_facts.json`, `README.md` and
+`fixtures/` over the old ones and **leave `tokens.json` and `config.json`
+alone**. If you do lose the login, `python3 bot.py --login` re-runs the device
+flow once.
+
+One more thing that looks identical: `refresh_if_possible()` refuses saved
+tokens whose `client_id` differs from the one in `config.json`. Replacing
+`config.json` with `config.example.json` therefore also forces a re-login.
+
 ### Source order — read this if a search key never seems to be used
 
 `_try_sources()` is a ladder that stops at the **first** source that returns

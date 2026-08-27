@@ -1,0 +1,7 @@
+# Secrets - never commit these. Keep them when you update the bot's files.
+tokens.json
+config.json
+
+# Python
+__pycache__/
+*.pyc
