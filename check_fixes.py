@@ -213,6 +213,32 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c")),
              "_names_keeper")),
+        ("!ftl quotes a lyric instead of writing one",
+         hasattr(__import__("lyrics"), "get_round")
+         and hasattr(__import__("lyrics"), "pick_pair")
+         and hasattr(__import__("lyrics"), "fetch_lyrics")
+         and "ftl" in __import__("bot").FTL_ALIASES
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c")),
+             "_reply_ftl")
+         # No lyric text lives in the source. Every song row is four fields of
+         # metadata - artist, title, genre, year - and the line itself arrives
+         # over the network, so a wrong line here is impossible by construction.
+         and all(len(row) == 4 and isinstance(row[3], int)
+                 for row in __import__("lyrics").SONGS)
+         and "_get" in __import__("lyrics").fetch_lyrics.__code__.co_names),
+        ("!ftl filters by genre, decade and artist",
+         len(__import__("lyrics").SONGS) > 200
+         and len(__import__("lyrics").candidates(
+             __import__("lyrics").parse_filter("80s rock"))) > 0
+         and len(__import__("lyrics").candidates(
+             __import__("lyrics").parse_filter("country"))) > 0
+         and len(__import__("lyrics").candidates(
+             __import__("lyrics").parse_filter("queen"))) > 0),
+        ("!ftl never asks a question with a wrong answer",
+         __import__("lyrics").pick_pair(
+             ["Only one usable line in this whole song"]) is None
+         and __import__("lyrics").pick_pair(["Ooh", "Yeah"]) is None),
         ("the games survive a dead API instead of giving up",
          all(len(getattr(__import__("extras"), n)) >= 20 for n in
              ("JOKES", "FACTS", "RIDDLES", "WOULD_YOU_RATHER"))
@@ -227,8 +253,8 @@ def main() -> int:
              ["Aubrey Plaza is an American actress, comedian and writer."])
          == []),
         ("a quiet channel gets something to react to",
-         set(__import__("bot").IDLE_COMMANDS)
-         == {"smk", "riddle", "joke", "randomfact", "wyr"}
+         {"smk", "riddle", "joke", "randomfact", "wyr"}
+         <= set(__import__("bot").IDLE_COMMANDS)
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_idle_chat_tick")

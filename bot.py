@@ -44,6 +44,7 @@ import extras
 import reminders as reminders_mod
 import haul as haul_mod
 import names as names_mod
+import lyrics as lyrics_mod
 import whois
 from funfacts import get_funfact, trim_to_fit
 
@@ -53,8 +54,12 @@ PORT = 6697  # TLS
 # Extra entertainment commands (enabled when config "fun_commands" is true).
 # !funfacts is the same command as !funfact - the plural is the natural typo.
 FUNFACT_ALIASES = {"funfact", "funfacts"}
-EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr", "smk"}
+EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr",
+                   "smk", "ftl"}
 SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
+# Finish the lyric. "ftl" matches the !smk / !wyr style; the longer aliases
+# are there because nobody guesses a three-letter abbreviation.
+FTL_ALIASES = {"ftl", "finishthelyric", "finishlyric", "lyrics", "nextline"}
 # !help is documentation, not a game: it stays reachable for everyone so a
 # viewer can read what the bot does even if they may not run a command yet.
 HELP_COMMANDS = {"help", "commands"}
@@ -64,9 +69,9 @@ WHOIS_COMMANDS = {"whois", "who"}
 # Deliberately separate: !whois is Wikipedia, !whotwitch is Twitch. One
 # command that guesses which you meant answers about the wrong person.
 WHOTWITCH_COMMANDS = {"whotwitch", "whotw", "twitchwho"}
-# What gets posted into a quiet channel to get it going again. All five are
+# What gets posted into a quiet channel to get it going again. All six are
 # local or keyless, so this never spends the fact engine's budget.
-IDLE_COMMANDS = ("smk", "riddle", "joke", "randomfact", "wyr")
+IDLE_COMMANDS = ("smk", "riddle", "joke", "randomfact", "wyr", "ftl")
 # Moderator-owned state. Both stay reachable while the bot is switched off,
 # otherwise !bot off would strand a pending reminder or the cargo board.
 REMINDER_COMMANDS = {"reminder", "reminders"}
@@ -96,6 +101,9 @@ DEFAULTS = {
                        "subscriber": 60, "follower": 300},
     "min_follow_age_seconds": 86400,   # followers must be 1 day old
     "riddle_answer_delay": 20,         # seconds before !riddle shows its answer
+    # !ftl needs longer than a riddle: chat has to recall a lyric, not work
+    # out a pun. The next line is posted this many seconds after the prompt.
+    "ftl_answer_delay": 30,
     # How much of the Wikipedia lead !whois posts. Trimmed on a sentence
     # boundary, so a lower number loses whole sentences, never half of one.
     "whois_max_chars": 400,
@@ -105,6 +113,9 @@ DEFAULTS = {
     "idle_chat_enabled": True,
     "idle_chat_minutes": 10,
     "idle_chat_commands": list(IDLE_COMMANDS),
+    # !ftl quotes one line of a song fetched live from LRCLIB (free, keyless).
+    # Off means the command is refused outright, not just quieter.
+    "ftl_enabled": True,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -580,6 +591,8 @@ class TwitchBot:
             pass
         elif command in SMK_ALIASES:
             command = "smk"
+        elif command in FTL_ALIASES:
+            command = "ftl"
         elif extras_enabled and command in EXTRAS_COMMANDS:
             pass
         else:
@@ -978,6 +991,7 @@ class TwitchBot:
             f"{prefix}funfact <place> - a real fun fact about a town "
             f"({prefix}funfacts works too)",
             f"{prefix}smk female|male|any - shag, marry or kill three names",
+            f"{prefix}ftl <genre|decade> - finish the lyric",
             f"{prefix}joke - a joke",
             f"{prefix}randomfact - a random fact",
             f"{prefix}riddle - a riddle; the answer follows shortly",
@@ -997,6 +1011,47 @@ class TwitchBot:
                       f"{prefix}reminder list / cancel <n>|all")
             self._say(f"@{nick} mods: {prefix}haul update <cargo> / "
                       f"delete, and {prefix}bot off / on / status")
+
+    def _reply_ftl(self, nick: str, argument: str, limit: int) -> None:
+        """Post one line of a song; the next line follows after a delay.
+
+        The lyric is quoted from LRCLIB, never written here - see lyrics.py for
+        why that distinction is the whole design.
+        """
+        if not self.cfg.get("ftl_enabled", True):
+            self._say(f"{self._mention(nick)}the lyric game is switched off.")
+            return
+        try:
+            round_ = lyrics_mod.get_round(argument)
+        except lyrics_mod.LyricsError as exc:
+            # Could not reach the library. That is not "no songs match", and
+            # saying so would be a claim about songs we never got to ask about.
+            self._log(f"ftl failed: {exc}")
+            self._say(f"{self._mention(nick)}couldn't reach the lyrics "
+                      f"library just now - try again in a moment.")
+            return
+        if not round_:
+            self._say(self._fit(
+                f"{self._mention(nick)}",
+                f"no songs match {argument.strip()!r} - try a genre "
+                f"(country, rock, hip-hop), a decade (80s, 90s) or an artist."
+                if argument.strip() else
+                "couldn't build a round right now - try again."))
+            return
+        label = round_["label"]
+        credit = f"{round_['artist']} - {round_['title']}"
+        self._say(_CONTROL.sub(
+            "", f'FinishTheLyric [{label}] | "{round_["prompt"]}" - '
+                f"{credit}. Finish it!")[:limit])
+        delay = float(self.cfg.get("ftl_answer_delay", 30))
+        t = threading.Timer(
+            delay, self._say,
+            args=(_CONTROL.sub(
+                "", f'Answer | "{round_["answer"]}" - {credit}')[:limit],),
+        )
+        t.daemon = True
+        t.start()
+        self._log(f"ftl [{label}] -> {credit}")
 
     def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:
         limit = int(self.cfg.get("max_message_chars", 450))
@@ -1026,6 +1081,9 @@ class TwitchBot:
                     "", f"ShagMarryKill [{label}] | "
                         f"{extras.format_smk(picks)} - shag one, marry one, "
                         f"kill one.")[:limit])
+                return
+            elif command == "ftl":
+                self._reply_ftl(nick, argument, limit)
                 return
             elif command == "riddle":
                 pair = extras.get_riddle()

@@ -205,6 +205,7 @@ Quick-and-dirty local alternatives:
 | `!riddle`             | A riddle; the answer is posted ~20s later.                    |
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
+| `!ftl 80s rock`       | Finish the lyric — genre, decade, artist, or nothing.         |
 | `!haul`               | What the truck is hauling right now.                          |
 | `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
 | `!whotwitch hardclaws`| Who that Twitch channel is.                                   |
@@ -551,6 +552,72 @@ The top-up is a nicety, never a dependency. Set `"names_topup_enabled": false`
 and the seed pool carries the game on its own. A Wikipedia outage, a corrupt
 `names.json` or a dead category all fall back to the seed without the command
 noticing.
+
+### !ftl — finish the lyric
+
+```
+!ftl 80s rock
+FinishTheLyric [80s rock] | "Just a small town girl, livin' in a lonely world" - Journey - Don't Stop Believin'. Finish it!
+
+(30 seconds later)
+Answer | "She took the midnight train goin' anywhere" - Journey - Don't Stop Believin'
+```
+
+Chat finishes the line; the next line is revealed after `ftl_answer_delay`
+seconds (default 30), the same way `!riddle` reveals its answer.
+
+**The argument is a filter, and you can combine them or leave it off:**
+
+| Argument        | What you get                          |
+| --------------- | ------------------------------------- |
+| `!ftl`          | Anything                              |
+| `!ftl 80s`      | Anything from the 1980s               |
+| `!ftl rock`     | Any rock song                         |
+| `!ftl 80s rock` | Both at once                          |
+| `!ftl queen`    | Anything by (or titled) that          |
+
+Decades: `60s` `70s` `80s` `90s` `00s` `10s` (also `1980s`, `eighties`).
+Genres: `rock` `country` `pop` `hip-hop` `r&b` `soul` `metal` `punk` `grunge`
+`indie` `disco` `folk` `blues` `reggae` `electronic` (`rap` and `classic rock`
+are accepted too). 283 songs across those, weighted towards country and
+classic rock because that is the room this bot lives in.
+
+**Where the lyrics come from is the whole design.** Every line is fetched at
+runtime from [LRCLIB](https://lrclib.net) — free, keyless, no signup. Nothing
+in `lyrics.py` is a lyric; the song list holds artist, title, genre and year,
+which is metadata.
+
+That is deliberate, not stylistic. A pool of lyrics written out by hand is a
+pool of lyrics that are *almost* right, posted into chat under a real artist's
+name — and "almost right" is indistinguishable from a lie to the person
+reading it. So the bot never writes a lyric, it only quotes one. The same
+reason `!whois` quotes Wikipedia rather than summarising it.
+
+Three consequences worth knowing:
+
+- **Genre and decade come from our song list, not LRCLIB**, which has no such
+  field. If an entry is wrong or the track is missing, LRCLIB 404s and the bot
+  quietly tries another song — a bad row costs one attempt, not the round.
+- **`duration` is deliberately not sent.** LRCLIB only matches a track when the
+  duration is within ±2 seconds, and we have no reliable durations, so sending
+  one would mostly produce 404s.
+- **Lyrics are cached in memory only.** Nothing copyrighted is written to disk,
+  and there is no `lyrics.json` to worry about.
+
+Only **one line** is posted as the prompt and **one** as the answer, never a
+verse or chorus. Lines that are too short to finish (`Ooh`), all-parenthetical,
+over 200 characters, or mostly non-Latin script are skipped, and the answer is
+always the line that *actually* follows — skipping ahead to find a nicer
+answer would make the game ask a question with a wrong answer.
+
+A 404 is not the same as an outage, and they are reported differently: a track
+LRCLIB does not have is skipped, while LRCLIB being unreachable says "couldn't
+reach the lyrics library" rather than claiming the genre has no songs. A 429 is
+reported too, since LRCLIB's terms require the `Retry-After` header be
+honoured.
+
+Set `"ftl_enabled": false` to turn it off. It is in `idle_chat_commands` by
+default, so a quiet channel can get a lyric round along with the others.
 
 ### The other games never run dry either
 
@@ -1066,6 +1133,7 @@ appends fake joke comments.
 | `haul.py`            | The `!haul` board.                              |
 | `whois.py`           | `!whois` (Wikipedia) and `!whotwitch` (Helix).  |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
+| `lyrics.py`          | `!ftl` song list + LRCLIB lookup.               |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
@@ -1080,6 +1148,7 @@ appends fake joke comments.
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
 | `mock_whois_test.py` | Offline `!whois` / `!whotwitch` tests.          |
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
+| `mock_lyrics_test.py`| Offline `!ftl` tests against a fake LRCLIB.     |
 | `mock_idle_test.py`  | Offline idle-chat tests.                        |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
