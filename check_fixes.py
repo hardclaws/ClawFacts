@@ -213,6 +213,10 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c")),
              "_names_keeper")),
+        ("the games survive a dead API instead of giving up",
+         all(len(getattr(__import__("extras"), n)) >= 20 for n in
+             ("JOKES", "FACTS", "RIDDLES", "WOULD_YOU_RATHER"))
+         and "_fell_back" in __import__("extras").__dict__),
         ("!smk avoids names it has used recently",
          __import__("names").RECENT_WINDOW >= 200
          and "SEED_WEIGHT" in __import__("names").__dict__),

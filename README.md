@@ -552,8 +552,31 @@ and the seed pool carries the game on its own. A Wikipedia outage, a corrupt
 `names.json` or a dead category all fall back to the seed without the command
 noticing.
 
-The other games (`!joke`, `!randomfact`, `!riddle`, `!wyr`) already fetch live
-from their own APIs, so they have no fixed pool to run dry.
+### The other games never run dry either
+
+`!joke`, `!randomfact`, `!riddle` and `!wyr` fetch live from their own
+keyless APIs, so they are not limited by a list — but those endpoints are
+run by strangers and any of them can vanish overnight. When one does, the bot
+used to answer `couldn't fetch that right now 😕` **every single time the
+command was typed**, for as long as the endpoint stayed down.
+
+Each one now falls back to a local pool — 30 jokes, 30 facts, 25 riddles, 25
+would-you-rathers — drawn without repeating until the pool has been all the
+way round. A dead API costs variety, not the game. The fallback is logged
+**once per pool**, not once per call, so a dead endpoint does not bury the log
+that is supposed to be telling you something is wrong.
+
+So every game has a live source and a floor:
+
+| Command        | Live source                     | Floor                    |
+| -------------- | ------------------------------- | ------------------------ |
+| `!smk`         | 16 Wikipedia categories         | 389 seed names           |
+| `!joke`        | official-joke-api               | 30 jokes                 |
+| `!randomfact`  | uselessfacts.jsph.pl            | 30 facts                 |
+| `!riddle`      | riddles-api.vercel.app          | 25 riddles               |
+| `!wyr`         | api.truthordarebot.xyz          | 25 would-you-rathers     |
+| `!whois`       | Wikipedia                       | — (a miss is the answer) |
+| `!whotwitch`   | Twitch Helix                    | — (a miss is the answer) |
 
 ### Waking up a quiet channel
 
