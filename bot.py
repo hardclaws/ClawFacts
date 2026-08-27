@@ -40,13 +40,17 @@ import time
 import auth
 import access
 import extras
-from funfacts import get_funfact
+from funfacts import get_funfact, trim_to_fit
 
 HOST = "irc.chat.twitch.tv"
 PORT = 6697  # TLS
 
 # Extra entertainment commands (enabled when config "fun_commands" is true).
-EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr"}
+EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr", "smk"}
+SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
+# !help is documentation, not a game: it stays reachable for everyone so a
+# viewer can read what the bot does even if they may not run a command yet.
+HELP_COMMANDS = {"help", "commands"}
 
 DEFAULTS = {
     "nick": "",
@@ -410,8 +414,10 @@ class TwitchBot:
         command = command.lower()
 
         extras_enabled = bool(self.cfg.get("fun_commands", True))
-        if command == "funfact":
+        if command == "funfact" or command in HELP_COMMANDS:
             pass
+        elif command in SMK_ALIASES:
+            command = "smk"
         elif extras_enabled and command in EXTRAS_COMMANDS:
             pass
         else:
@@ -419,6 +425,10 @@ class TwitchBot:
 
         allowed = self.cfg.get("respond_only_to") or []
         if allowed and nick.lower() not in {a.lower() for a in allowed}:
+            return
+
+        if command in HELP_COMMANDS:
+            self._say_help(nick)
             return
 
         if command == "funfact" and not argument.strip():
@@ -492,13 +502,28 @@ class TwitchBot:
                     result = get_funfact(argument, self._opts)
                     self._reply(nick, argument, result)
                 else:
-                    self._reply_extra(nick, command)
+                    self._reply_extra(nick, command, argument)
             except Exception as exc:
                 self._log(f"{command} failed: {exc!r}")
             finally:
                 self._jobs.task_done()
 
-    def _reply_extra(self, nick: str, command: str) -> None:
+    def _say_help(self, nick: str) -> None:
+        prefix = self.cfg.get("prefix", "!")
+        lines = [
+            f"{prefix}funfact <place> - a real fun fact about a town",
+            f"{prefix}smk female|male|any - shag, marry or kill three names",
+            f"{prefix}joke - a joke",
+            f"{prefix}randomfact - a random fact",
+            f"{prefix}riddle - a riddle; the answer follows shortly",
+            f"{prefix}wyr - a would-you-rather",
+        ]
+        self._say(f"@{nick} commands: " + " | ".join(lines))
+        self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
+                  f"VIP and subscribers every 60s, followers of over a day "
+                  f"every 5 minutes.")
+
+    def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:
         limit = int(self.cfg.get("max_message_chars", 450))
         text = None
         try:
@@ -511,6 +536,17 @@ class TwitchBot:
             elif command in ("wouldyourather", "wyr"):
                 text = extras.get_wyr()
                 label = "WouldYouRather"
+            elif command == "smk":
+                picked = extras.get_smk(argument)
+                if not picked:
+                    self._say(f"@{nick} couldn't build a round right now \U0001F615")
+                    return
+                names, label = picked
+                a, bb, c = names
+                self._say(_CONTROL.sub(
+                    "", f"ShagMarryKill [{label}] | {a}, {bb}, {c} - "
+                        f"shag one, marry one, kill one. {nick}, you're up.")[:limit])
+                return
             elif command == "riddle":
                 pair = extras.get_riddle()
                 if pair:
@@ -549,10 +585,12 @@ class TwitchBot:
             return
         place = result.get("place") or argument
         fact = _CONTROL.sub("", " ".join(result["fact"].split()))
-        msg = f"{self.cfg.get('fact_prefix', 'FunFact')} | {place}: {fact}"
+        prefix = f"{self.cfg.get('fact_prefix', 'FunFact')} | {place}: "
         limit = int(self.cfg.get("max_message_chars", 450))
-        if len(msg) > limit:
-            msg = msg[: limit - 1].rsplit(" ", 1)[0] + "…"
+        # Fit the fact to what is left of the message budget, ending on a
+        # sentence boundary rather than chopping one in half.
+        fact = trim_to_fit(fact, max(40, limit - len(prefix)))
+        msg = prefix + fact
         self._say(msg)
         self._log(f"replied for {argument!r}")
 

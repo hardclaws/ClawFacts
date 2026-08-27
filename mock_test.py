@@ -48,6 +48,11 @@ SCRIPT = [
     (14.0, privmsg("stranger", "!funfact Girard, OH", "")),
     # !riddle must post the question and then reveal the answer on the timer.
     (16.0, privmsg("viewer6", "!riddle", "subscriber/03")),
+    # !help is answered inline and is open to everyone, badges or not.
+    (18.0, privmsg("nobody", "!help", "")),
+    (19.5, privmsg("viewer7", "!smk female", "vip/1")),
+    (21.0, privmsg("viewer8", "!smk male", "moderator/1")),
+    (22.5, privmsg("viewer9", "!smk", "subscriber/01")),
 ]
 
 
@@ -62,7 +67,7 @@ def server(bot_lines):
     buf = b""
     start = time.time()
     next_idx = 0
-    while time.time() - start < 26:
+    while time.time() - start < 30:
         try:
             data = conn.recv(4096)
         except socket.timeout:
@@ -135,7 +140,7 @@ def main():
     time.sleep(0.4)
     runner = threading.Thread(target=bot.run, daemon=True)
     runner.start()
-    time.sleep(24)   # long enough for the riddle answer timer to fire
+    time.sleep(28)   # long enough for the riddle timer and the new commands
     bot.running = False
     bot._close()
     runner.join(timeout=5)
@@ -151,6 +156,8 @@ def main():
     pongs = [l for l in bot_lines if l.startswith("PONG")]
     riddles = [l for l in bot_lines if "PRIVMSG" in l and "Riddle |" in l]
     answers = [l for l in bot_lines if "PRIVMSG" in l and "Answer |" in l]
+    helps = [l for l in bot_lines if "PRIVMSG" in l and "commands:" in l]
+    smk = [l for l in bot_lines if "PRIVMSG" in l and "ShagMarryKill" in l]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
@@ -167,6 +174,24 @@ def main():
     if bot_lines.index(answers[0]) <= bot_lines.index(riddles[0]):
         print("FAIL: the riddle answer was posted before the question")
         return 1
+    # !help must answer a viewer with no badges at all.
+    if not any("@nobody" in l for l in helps):
+        print("FAIL: !help did not answer the badge-less viewer")
+        return 1
+    if not any("!funfact <place>" in l and "!smk" in l for l in helps):
+        print("FAIL: !help did not list the commands")
+        return 1
+    for want in ("[female]", "[male]", "[any]"):
+        if not any(want in l for l in smk):
+            print(f"FAIL: no !smk round for {want}")
+            return 1
+    for line in smk:
+        body = line.split("ShagMarryKill", 1)[1]
+        if body.count(",") < 2 or "shag one, marry one, kill one" not in body:
+            print(f"FAIL: malformed !smk line: {line}")
+            return 1
+    print(f"[PASS] !help and !smk female/male/any -> "
+          f"{len(helps)} help line(s), {len(smk)} round(s)")
     if not turned_away:
         print("FAIL: a viewer with no badges was not turned away")
         return 1

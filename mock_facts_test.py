@@ -19,6 +19,55 @@ def test_trim():
     print(f"[PASS] trim -> {len(t)} chars")
 
 
+def test_trim_keeps_whole_sentences():
+    """Sarcoxie, MO posted "...contributing buildings that…" — chopped mid
+    sentence, because the only clause break inside the first 200 characters
+    landed at 89 chars, under the keep-if-long-enough threshold, so it fell
+    through to a word chop. A complete 145-character sentence was right there."""
+    fact = ("Sarcoxie's Public Square Historic District, a national historic district in "
+            "Jasper County, is listed on the National Register of Historic Places. The "
+            "district contains contributing buildings that date from the late nineteenth "
+            "and early twentieth centuries, including the original courthouse.")
+    out = funfacts._trim(fact, 200)
+    assert len(out) <= 200, len(out)
+    assert not out.endswith("…"), "still chopping a sentence in half: %r" % out
+    assert out.endswith("Historic Places."), out
+    # A single long sentence with no break still has to be cut somewhere.
+    assert funfacts._trim("word " * 150, 200).endswith("…")
+    # ...and text already inside the limit is untouched.
+    assert funfacts._trim("Short and complete.", 200) == "Short and complete."
+    # An abbreviation is not a sentence end: splitting here dropped the
+    # punchline off the Frein fact.
+    frein = ("Eric Matthew Frein was identified as the sole suspect of the ambush and was "
+             "sought by federal and state authorities for the ambush, until his apprehension "
+             "at 6 p.m. on Thursday, October 30, ending a 48-day manhunt.")
+    assert funfacts._sentence_parts(frein) == [frein], funfacts._sentence_parts(frein)
+    assert "48-day manhunt" in funfacts._trim(frein, 200)
+    print(f"[PASS] trim keeps whole sentences -> {len(out)} chars, no ellipsis")
+
+
+def test_smk_game():
+    """!smk female|male|any — three distinct names from the right pool."""
+    import extras
+    for gender, pool in (("female", extras._SMK_FEMALE),
+                         ("male", extras._SMK_MALE)):
+        picks, label = extras.get_smk(gender)
+        assert label == gender
+        assert len(picks) == 3 and len(set(picks)) == 3, picks
+        assert all(n in pool for n in picks), picks
+    picks, label = extras.get_smk("any")
+    assert label == "any" and len(set(picks)) == 3
+    both = set(extras._SMK_FEMALE) | set(extras._SMK_MALE)
+    assert all(n in both for n in picks)
+    # Unknown or missing argument falls back to a mixed round, never crashes.
+    for arg in ("", "bogus", None):
+        assert extras.get_smk(arg)[1] == "any"
+    # Shorthands work too.
+    assert extras.get_smk("f")[1] == "female"
+    assert extras.get_smk("M")[1] == "male"
+    print("[PASS] !smk draws three distinct names per gender")
+
+
 def test_rotation():
     import random
     funfacts._cache.clear()
@@ -1425,6 +1474,8 @@ def test_location_line_never_outranks_history():
 
 def main():
     test_trim()
+    test_trim_keeps_whole_sentences()
+    test_smk_game()
     test_rotation()
     test_busy_unavailable()
     test_spicy_db()

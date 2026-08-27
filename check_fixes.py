@@ -131,6 +131,18 @@ def main() -> int:
          hasattr(__import__("access").Helix("c", "t", "1"), "self_test")
          and "self.authorised is False" in open(
              pathlib.Path(__file__).parent / "access.py", encoding="utf-8").read()),
+        ("facts are trimmed on sentence boundaries, not mid-sentence",
+         not funfacts._trim(
+             "A first sentence that is complete. A second one that runs on and "
+             "on until it is far past any sensible limit for a chat message.",
+             60).endswith("\u2026")),
+        ("!smk female|male|any game",
+         hasattr(__import__("extras"), "get_smk")
+         and __import__("extras").get_smk("female")[1] == "female"
+         and __import__("extras").get_smk("any")[1] == "any"),
+        ("!help lists the commands",
+         "_say_help" in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

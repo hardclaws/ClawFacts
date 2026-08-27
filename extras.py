@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import random
 import urllib.request
 
 USER_AGENT = "TwitchFunFactBot/1.0 (hobby Twitch chat bot)"
@@ -72,3 +73,44 @@ def get_wyr() -> str | None:
         return None
     question = _clean(d.get("question"))
     return question or None
+
+# ---- shag / marry / kill ---------------------------------------------------
+# A local pool rather than an API: no third-party dependency, no waiting on a
+# network call mid-command, and every name is a public figure so nobody in chat
+# gets named by accident.
+_SMK_FEMALE = [
+    "Rihanna", "Beyoncé", "Dolly Parton", "Florence Pugh", "Margot Robbie",
+    "Sandra Bullock", "Zendaya", "Viola Davis", "Charlize Theron", "Aubrey Plaza",
+    "Betty White", "Lucille Ball", "Jamie Lee Curtis", "Olivia Colman",
+    "Hayley Atwell", "Kate McKinnon", "Tina Fey", "Sofia Vergara",
+    "Emma Thompson", "Sigourney Weaver", "Rachel McAdams", "Awkwafina",
+]
+_SMK_MALE = [
+    "Idris Elba", "Keanu Reeves", "Danny DeVito", "Pedro Pascal", "Steve Buscemi",
+    "Matthew McConaughey", "Bryan Cranston", "Oscar Isaac", "Jeff Goldblum",
+    "Paul Rudd", "Harrison Ford", "Morgan Freeman", "Tom Hanks", "Jason Momoa",
+    "Dev Patel", "Giancarlo Esposito", "Willem Dafoe", "Chris Pratt",
+    "Daniel Kaluuya", "Rami Malek", "Viggo Mortensen", "Seth Rogen",
+]
+
+
+def get_smk(gender: str = "any"):
+    """Three names for shag / marry / kill.
+
+    `gender` is "female", "male" or "any" (mixed). Returns None if the pool is
+    too small to draw three distinct names.
+    """
+    g = (gender or "any").strip().lower()
+    if g in ("f", "female", "women", "woman", "her"):
+        pool = list(_SMK_FEMALE)
+        label = "female"
+    elif g in ("m", "male", "men", "man", "him"):
+        pool = list(_SMK_MALE)
+        label = "male"
+    else:
+        pool = list(_SMK_FEMALE) + list(_SMK_MALE)
+        label = "any"
+    if len(pool) < 3:
+        return None
+    picks = random.sample(pool, 3)
+    return picks, label

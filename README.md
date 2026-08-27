@@ -340,6 +340,35 @@ mentions a hanging in Girard, drugs, a mule or a record, and a county-wide
 (Girard is named for Stephen Girard, the Philadelphia philanthropist). Telling
 the Gardner hanging *as* a Trumbull County story is still allowed.
 
+### Commands
+
+| Command | What it does |
+|---|---|
+| `!funfact <place>` | A real fun fact about a town |
+| `!smk female\|male\|any` | Shag, marry or kill — three names from that pool |
+| `!joke` | A joke |
+| `!randomfact` | A random fact |
+| `!riddle` | A riddle; the answer follows after `riddle_answer_delay` seconds |
+| `!wyr` | A would-you-rather |
+| `!help` | Lists all of the above, plus who may use them |
+
+`!smk` is also accepted as `!shagmarrykill` or `!marryshagkill`, and `f`/`m`
+work as shorthands for `female`/`male`. Its names come from a local pool of
+public figures — no API call, and nobody in chat gets named by accident.
+
+`!help` is answered before the rate limiter, so a viewer can read what the bot
+does even if they aren't allowed to run a command yet. Everything else is
+gated.
+
+Facts are trimmed to `max_fact_chars` / `max_message_chars` on a **sentence
+boundary** where one fits, so a long fact loses its trailing sentence instead
+of ending mid-phrase:
+
+```
+before: ...contributing buildings that…
+after:  ...is listed on the National Register of Historic Places.
+```
+
 ### Who can use !funfact, and how often
 
 Chat abuse is easy to stop for mods, VIPs and subs — Twitch sends their badges

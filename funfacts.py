@@ -397,12 +397,50 @@ def _clip(text: str, cap: int) -> str:
     return text[:cap].rsplit(" ", 1)[0]
 
 
-def _trim(text: str, limit: int) -> str:
-    """Fit text to at most `limit` chars, ending at a clause boundary when
-    possible so we never chop mid-phrase ('ending a…')."""
+# End-of-sentence, except after an abbreviation: "at 6 p.m. on Thursday" is one
+# sentence, and splitting there cost the Frein fact its punchline.
+_ABBREV_END = re.compile(
+    r"(?:\b[AaPp]\.?[Mm]\.?|\b[Mm]rs?|\b[Mm]s|\b[Dd]r|\b[Ss]t|\b[Nn]o|"
+    r"\b[Vv]s|\betc|\b[JjSs]r|\b[Ii]nc|\b[Aa]ve|\b[Rr]d|\b[Uu]\.?[Ss]\.?"
+    r"|\b[Ee]\.?[Gg]|\b[Ii]\.?[Ee]|\b[Mm]t|\b[Ff]t|\b[Gg]ov)\.$")
+
+
+def _sentence_parts(text: str) -> list:
+    """Split into sentences, ignoring enders that belong to an abbreviation."""
+    parts, start = [], 0
+    for m in re.finditer(r"[.!?]\s+", text):
+        head = text[start:m.end() - 1].rstrip()
+        if _ABBREV_END.search(head):
+            continue
+        parts.append(text[start:m.end()].strip())
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def trim_to_fit(text: str, limit: int) -> str:
+    """Fit text to `limit` chars, keeping whole sentences whenever one fits.
+
+    Public so bot.py and the fact path share one implementation rather than two
+    that can drift.
+    """
     text = " ".join(text.split())
     if len(text) <= limit:
         return text
+    parts = _sentence_parts(text)
+    if len(parts) > 1:
+        kept, n = [], 0
+        for part in parts:
+            add = len(part) + (1 if kept else 0)
+            if n + add > limit:
+                break
+            kept.append(part)
+            n += add
+        if kept:
+            out = " ".join(kept)
+            return out if out.endswith((".", "!", "?")) else out + "."
     for sep in ("; ", " — ", ", "):
         head = text[:limit]
         if sep not in head:
@@ -410,8 +448,19 @@ def _trim(text: str, limit: int) -> str:
         cut = head.rsplit(sep, 1)[0].rstrip(" ,;:-—")
         if len(cut) >= int(limit * 0.55):
             return cut + "…"
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return cut.rstrip(" ,;:-—") + "…"
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—") + "…"
+
+
+def _trim(text: str, limit: int) -> str:
+    """Fit text to at most `limit` chars, never mid-sentence if it can help it.
+
+    Preference order: whole sentences, then clause boundaries, then a word
+    boundary. Sarcoxie, MO posted "...contributing buildings that…" because the
+    only clause break in the first 200 chars landed at 89 characters, under the
+    keep-if-long-enough threshold, so it fell through to a word chop - even
+    though a complete 146-character sentence was sitting right there.
+    """
+    return trim_to_fit(text, limit)
 
 
 def _fit_fact(fact: str, limit: int, opts: dict) -> str:
