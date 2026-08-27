@@ -379,11 +379,16 @@ Notes:
 - If the follow check cannot run — no token, missing scope, API down —
   `follower_check_failure` decides. The default `"deny"` keeps the gate honest;
   `"allow"` falls back to badges only.
-- The gate covers `!joke` / `!randomfact` / `!riddle` too. Set
-  `"gate_fun_commands": false` to leave those open to everyone.
+- **The gate covers every command**, not just `!funfact`. `!joke`,
+  `!randomfact`, `!riddle` and `!wouldyourather` all draw on the same per-user
+  budget, so the free commands cannot be used to flood the channel either. A
+  sub who fires `!joke` waits the same 60s before `!funfact`.
 - Rejections are explained in chat, but at most once every 2 minutes per user —
   otherwise refusing people becomes its own spam vector.
 - `"access_control": false` turns the whole thing off.
+
+`!riddle` reveals its answer after `riddle_answer_delay` seconds — **20** by
+default (it was a hardcoded 45).
 
 ### Updating the bot's files without losing your login
 

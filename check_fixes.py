@@ -107,6 +107,11 @@ def main() -> int:
          and __import__("access").DEFAULT_MIN_FOLLOW_AGE == 86400.0),
         ("follower check has the Helix scope it needs",
          "moderator:read:followers" in __import__("auth").SCOPES),
+        ("!riddle answer revealed in 20s (was 45s)",
+         'self.cfg.get("riddle_answer_delay", 20)' in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()
+         and "45.0, self._say" not in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

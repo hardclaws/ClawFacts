@@ -18,6 +18,7 @@ from bot import DEFAULTS, TwitchBot  # noqa: E402
 # Patch the network-backed functions so the offline test is deterministic.
 extras.get_joke = lambda: "Why did the truck stop? Because it needed a break."
 extras.get_random_fact = lambda: "Honey never spoils."
+extras.get_riddle = lambda: ("What has keys but no locks?", "A piano.")
 bot_mod.get_funfact = lambda location, options=None: {
     "place": f"{location.title()}",
     "fact": f"A completely offline fact about {location}.",
@@ -43,6 +44,8 @@ SCRIPT = [
     (12.0, privmsg("viewer5", "!randomfact", "vip/1")),
     # No badges at all, and no way to verify the follow: must be turned away.
     (14.0, privmsg("stranger", "!funfact Girard, OH", "")),
+    # !riddle must post the question and then reveal the answer on the timer.
+    (16.0, privmsg("viewer6", "!riddle", "subscriber/03")),
 ]
 
 
@@ -57,7 +60,7 @@ def server(bot_lines):
     buf = b""
     start = time.time()
     next_idx = 0
-    while time.time() - start < 22:
+    while time.time() - start < 26:
         try:
             data = conn.recv(4096)
         except socket.timeout:
@@ -87,6 +90,7 @@ def main():
         "oauth_token": "oauth:testtoken",
         "channel": "#test",
         "cooldown_seconds": 1,
+        "riddle_answer_delay": 3,   # short, so the test need not wait 20s
         "host": HOST,
         "port": PORT,
         "use_tls": False,
@@ -98,7 +102,7 @@ def main():
     time.sleep(0.4)
     runner = threading.Thread(target=bot.run, daemon=True)
     runner.start()
-    time.sleep(20)   # long enough for the last scripted message (14s) to be answered
+    time.sleep(24)   # long enough for the riddle answer timer to fire
     bot.running = False
     bot._close()
     runner.join(timeout=5)
@@ -112,12 +116,24 @@ def main():
     jokes = [l for l in bot_lines if "PRIVMSG" in l and "Joke |" in l]
     rf = [l for l in bot_lines if "PRIVMSG" in l and "RandomFact |" in l]
     pongs = [l for l in bot_lines if l.startswith("PONG")]
+    riddles = [l for l in bot_lines if "PRIVMSG" in l and "Riddle |" in l]
+    answers = [l for l in bot_lines if "PRIVMSG" in l and "Answer |" in l]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "
-          f"badge-less refused: {len(turned_away)}")
+          f"badge-less refused: {len(turned_away)}, "
+          f"riddles: {len(riddles)}, answers: {len(answers)}")
+    if bot_mod.DEFAULTS.get("riddle_answer_delay") != 20:
+        print("FAIL: the shipped riddle delay is not 20s")
+        return 1
+    if not (riddles and answers):
+        print("FAIL: !riddle did not post both the question and the answer")
+        return 1
+    if bot_lines.index(answers[0]) <= bot_lines.index(riddles[0]):
+        print("FAIL: the riddle answer was posted before the question")
+        return 1
     if not turned_away:
         print("FAIL: a viewer with no badges was not turned away")
         return 1

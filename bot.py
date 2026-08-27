@@ -69,9 +69,7 @@ DEFAULTS = {
     "tier_cooldowns": {"broadcaster": 30, "moderator": 30, "vip": 60,
                        "subscriber": 60, "follower": 300},
     "min_follow_age_seconds": 86400,   # followers must be 1 day old
-    # The !joke/!randomfact/!riddle extras cost no API calls. Set false to
-    # leave them open to everyone while !funfact stays gated.
-    "gate_fun_commands": True,
+    "riddle_answer_delay": 20,         # seconds before !riddle shows its answer
     # If the follow check can't run (no token, API down, scope missing):
     # "deny" keeps the follower gate honest, "allow" falls back to badges only.
     "follower_check_failure": "deny",
@@ -441,11 +439,11 @@ class TwitchBot:
         while True:
             nick, login, badges, command, argument = self._jobs.get()
             try:
-                gated = (command == "funfact"
-                         or self.cfg.get("gate_fun_commands", True))
+                # Every command shares the one per-user schedule: !joke and
+                # !funfact draw on the same budget, so the cheap commands
+                # cannot be used to flood either.
                 self._resolve_broadcaster(self.cfg.get("channel", ""))
-                verdict = (self._access.check(login, badges) if gated
-                           else access.Decision(True, "ungated", 0.0, "not gated"))
+                verdict = self._access.check(login, badges)
                 if not verdict.allowed:
                     self._log(f"{command} denied for {nick}: {verdict.reason} "
                               f"(tier={verdict.tier})")
@@ -481,7 +479,8 @@ class TwitchBot:
                     riddle, answer = pair
                     self._say(_CONTROL.sub("", f"Riddle | {riddle}")[:limit])
                     t = threading.Timer(
-                        45.0, self._say,
+                        float(self.cfg.get("riddle_answer_delay", 20)),
+                        self._say,
                         args=(_CONTROL.sub("", f"Answer | {answer}")[:limit],),
                     )
                     t.daemon = True
