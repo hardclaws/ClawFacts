@@ -895,6 +895,9 @@ def _google_search(query: str, spice: bool, limit: int, options: dict):
     key = (options.get("google_api_key") or "").strip()
     cx = (options.get("google_cx") or "").strip()
     if not key or not cx:
+        if DEBUG:
+            print("[funfacts] google source not configured "
+                  "(needs BOTH google_api_key and google_cx)", flush=True)
         return None
 
     # Ask the web what is *interesting* about the place. Spicy mode used to
@@ -938,6 +941,9 @@ def _serper_search(query: str, spice: bool, limit: int, options: dict):
     """
     key = (options.get("serper_api_key") or "").strip()
     if not key:
+        if DEBUG:
+            print("[funfacts] serper source not configured (no serper_api_key)",
+                  flush=True)
         return None
 
     # Same as _google_search: ask for interesting, not for crime.
@@ -1597,12 +1603,22 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
 
 
 def _try_sources(location: str, spicy: bool, limit: int, options: dict = None):
-    """Wikipedia → DuckDuckGo → Google (if configured). Returns result or None."""
+    """Wikipedia → configured web search → DuckDuckGo. First usable pool wins.
+
+    Order matters and is not arbitrary. Wikipedia is first because it is free
+    and usually sufficient, so a paid key is only spent on towns it cannot
+    serve. A configured search key is then tried *before* DuckDuckGo: Serper and
+    Google return real ranked web results, while DDG's Instant Answer is a
+    single Wikipedia-style blurb. It used to run last, which meant one dull
+    DuckDuckGo sentence ended the ladder and the key was never consulted — for
+    "Jerome, Missouri" DDG returned "It is located on the Gasconade River near
+    Interstate 44" and the bot posted that instead of searching.
+    """
     options = options or {}
     for name, fn in (("wikipedia", lambda q: _wikipedia(q, spicy, limit)),
-                     ("duckduckgo", lambda q: _duckduckgo(q, spicy, limit)),
+                     ("serper", lambda q: _serper_search(q, spicy, limit, options)),
                      ("google", lambda q: _google_search(q, spicy, limit, options)),
-                     ("serper", lambda q: _serper_search(q, spicy, limit, options))):
+                     ("duckduckgo", lambda q: _duckduckgo(q, spicy, limit))):
         try:
             result = fn(location)
         except urllib.error.URLError as exc:

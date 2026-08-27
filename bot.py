@@ -474,6 +474,23 @@ def warn_config(cfg: dict) -> None:
 
     if llm_ok:
         _log_llm_provider(cfg)
+    _log_search_sources(cfg)
+
+
+def _log_search_sources(cfg: dict) -> None:
+    """Print which fact sources are live, so a key that never gets used (or was
+    never loaded) is obvious at startup instead of in a chat log at 10:13."""
+    live = ["wikipedia"]
+    if (cfg.get("serper_api_key") or "").strip():
+        live.append("serper")
+    if ((cfg.get("google_api_key") or "").strip()
+            and (cfg.get("google_cx") or "").strip()):
+        live.append("google")
+    print(f"[info] fact sources: {' -> '.join(live)} -> duckduckgo (fallback)")
+    if not any(s in live for s in ("serper", "google")):
+        print("       no web-search key set - towns with a thin Wikipedia stub")
+        print('       will fall back to DuckDuckGo. Set "serper_api_key" in')
+        print("       config.json (or SERPER_API_KEY) for Google-quality results.")
 
 
 def _log_llm_provider(cfg: dict) -> None:

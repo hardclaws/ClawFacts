@@ -746,6 +746,43 @@ def test_meta_line_filter():
         llm.rewrite_fact = orig
 
 
+def test_search_key_beats_duckduckgo():
+    """A configured Serper key must be consulted before DuckDuckGo. It used to
+    sit last in the ladder, which returns on the first source that yields
+    anything at all - so one dull DDG blurb ended the search and the key was
+    never used. That is what happened for Jerome, Missouri."""
+    order = []
+    orig = (funfacts._wikipedia, funfacts._duckduckgo,
+            funfacts._google_search, funfacts._serper_search)
+    funfacts._wikipedia = lambda *a, **k: None
+    funfacts._duckduckgo = lambda *a, **k: (
+        order.append("duckduckgo"),
+        {"place": "Jerome, Missouri",
+         "facts": ["It is located on the Gasconade River near Interstate 44."]})[1]
+    funfacts._google_search = lambda *a, **k: (order.append("google"), None)[1]
+    funfacts._serper_search = lambda *a, **k: (
+        order.append("serper"),
+        {"place": "Jerome, Missouri",
+         "facts": ["Stony Dell Resort opened in 1932."]})[1]
+    try:
+        with_key = funfacts._try_sources(
+            "Jerome, Missouri", True, 200, {"serper_api_key": "k"})
+        # Serper answers, so the ladder stops there and DDG is never spent on.
+        assert "serper" in order, order
+        assert "duckduckgo" not in order or order.index("serper") < order.index("duckduckgo"), order
+        assert with_key["facts"] == ["Stony Dell Resort opened in 1932."], with_key
+
+        # Without a key the ladder still degrades gracefully to DuckDuckGo.
+        order.clear()
+        funfacts._serper_search = lambda *a, **k: (order.append("serper"), None)[1]
+        no_key = funfacts._try_sources("Jerome, Missouri", True, 200, {})
+        assert "duckduckgo" in order and no_key, (order, no_key)
+    finally:
+        (funfacts._wikipedia, funfacts._duckduckgo,
+         funfacts._google_search, funfacts._serper_search) = orig
+    print("[PASS] a configured Serper key is consulted before DuckDuckGo")
+
+
 def test_serper_source():
     # No key -> None without any network call.
     assert funfacts._serper_search("Xyzzy, ZZ", False, 200, {}) is None
@@ -1289,6 +1326,7 @@ def main():
     test_llm_preamble_dropped()
     test_llm_duplicate_lines_deduped()
     test_serper_source()
+    test_search_key_beats_duckduckgo()
     test_wiki_multi_title()
     test_full_article_extract()
     test_wrong_place_harvest()

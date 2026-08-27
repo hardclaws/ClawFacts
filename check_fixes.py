@@ -7,6 +7,7 @@ Run this after copying files out of a zip / applying a patch. If a line says
 False (or `_EXTRACT_PAGE_CAP` is not 4), the copy you are running is older than
 the fix it names — no need to guess from chat behaviour.
 """
+import pathlib
 import sys
 
 import funfacts
@@ -68,6 +69,17 @@ def main() -> int:
          hasattr(funfacts, "_LOCATION_ONLY")),
         ("curated Jerome, Missouri facts (Stony Dell, Trail of Tears)",
          bool(funfacts._spicy_db("Jerome, Missouri", 200))),
+        ("a configured search key is consulted before DuckDuckGo",
+         open(funfacts.__file__, encoding="utf-8").read().index(
+             '"serper", lambda q: _serper_search')
+         < open(funfacts.__file__, encoding="utf-8").read().index(
+             '"duckduckgo", lambda q: _duckduckgo')),
+        ("missing search key is reported in the log, not silent",
+         "serper source not configured" in open(
+             funfacts.__file__, encoding="utf-8").read()),
+        ("startup reports which fact sources are live",
+         "fact sources:" in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

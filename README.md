@@ -120,7 +120,8 @@ Edit `config.json`:
 | `llm_api_key`      | Groq/OpenRouter/OpenAI-compatible API key (leave empty for local Ollama). |
 | `llm_base_url`     | LLM API base URL (default `https://api.groq.com/openai/v1`; Ollama = `http://localhost:11434/v1`). |
 | `llm_model`        | LLM model (default `openai/gpt-oss-120b`; Ollama e.g. `llama3.1:8b`). |
-| `google_api_key`   | Optional Google Custom Search API key.                         |
+| `serper_api_key` | **Recommended.** Serper web-search key (free tier 2,500 queries). |
+| `google_api_key`   | Legacy Google Custom Search key (closed to new customers).     |
 | `google_cx`        | Optional Google search-engine ID (from programmablesearchengine.google.com). |
 | `max_message_chars`| Hard cap for a chat message (Twitch caps ~500; default 450).   |
 | `fact_prefix`      | Text before the fact, e.g. `FunFact` or `FUN FACT`.            |
@@ -339,46 +340,77 @@ mentions a hanging in Girard, drugs, a mule or a record, and a county-wide
 (Girard is named for Stephen Girard, the Philadelphia philanthropist). Telling
 the Gardner hanging *as* a Trumbull County story is still allowed.
 
-### Optional Google search (surfaces racier local news Wikipedia skips)
+### Source order — read this if a search key never seems to be used
 
-If you want the bot to also search Google (the sanctioned way — Google blocks
-scraping `google.com`, but offers a free API), set up **Programmable Search**:
+`_try_sources()` is a ladder that stops at the **first** source that returns
+anything usable:
 
-1. Create a search engine: <https://programmablesearchengine.google.com/>
-   → name it anything → tick **"Search the entire web"** → Create → copy the
-   **Search engine ID** (that's `google_cx`).
-2. Get an API key: <https://console.cloud.google.com/apis/credentials> →
-   create an API key, and enable the **Custom Search JSON API**.
-3. Put both in `config.json`:
-
-```json
-"google_api_key": "AIza...",
-"google_cx": "abc123..."
+```
+wikipedia  ->  serper  ->  google  ->  duckduckgo
 ```
 
-The bot then queries Google with `safe=off`, which lets through the adult-rated
-local news and scandal stories that Wikipedia omits, and mines those snippets
-for facts. **Free tier = 100 queries/day**; beyond that Google charges.
+Wikipedia is first because it is free and usually sufficient, so a paid key is
+only spent on towns it cannot serve. DuckDuckGo is last because its Instant
+Answer is a single Wikipedia-style blurb.
 
-> Note: Google returns short search snippets, not prose — so its facts are
-> usually weaker than Wikipedia's. Its real value is (a) the `safe=off` adult
-> content and (b) coverage of places with no Wikipedia article.
+> It used to run `wikipedia -> duckduckgo -> google -> serper`. That was a bug:
+> one dull DuckDuckGo sentence ended the ladder, so a configured key was never
+> consulted. For `!funfact Jerome, Missouri` DDG returned "It is located on the
+> Gasconade River near Interstate 44" and the bot posted that instead of
+> searching. A configured key is now tried before DuckDuckGo.
 
-### Optional Serper search (easiest fix for "wikipedia rate-limited")
+Startup prints the active ladder so you can see it immediately:
 
-Wikipedia throttles anonymous API use **per IP** — on cellular/hotspot or a
-shared home connection the limit is often already half-used before the bot
-asks. The bot is frugal (batched requests, ~4/sec pacing), but the real cure
-is a **second, independent search source**. [Serper](https://serper.dev) is the
-simplest: sign up (free, no card), copy the one API key, and add:
+```
+[info] fact sources: wikipedia -> serper -> duckduckgo (fallback)
+```
+
+### Serper search (recommended — this is the one to set up)
+
+Wikipedia throttles anonymous API use **per IP**, and plenty of towns have a
+stub article with nothing worth posting (Jerome, Missouri is 116 words). The
+cure is a **second, independent search source**. [Serper](https://serper.dev) is
+the simplest: sign up (free, no card), copy the one API key, and add:
 
 ```json
 "serper_api_key": "abc123..."
 ```
 
 (or set the `SERPER_API_KEY` environment variable.) Free tier is **2,500
-queries**; beyond that it's ~$0.50 per 1,000. When Wikipedia is down, the bot
-then answers from Serper's Google-quality results instead of giving up.
+queries**; beyond that it's ~$0.50 per 1,000. The bot asks for *interesting*
+facts — `{town} history facts famous landmark record` — and mines the ranked
+snippets, which reach local-history sites (route-66 associations, state
+historical societies) that no encyclopedia covers.
+
+Under `--debug` a missing key says so instead of failing silently:
+
+```
+[funfacts] serper source not configured (no serper_api_key)
+```
+
+### Optional Google search (legacy — closed to new customers)
+
+Google's **Custom Search JSON API** needs *two* values: an API key
+(`google_api_key`) *and* a Programmable Search engine ID (`google_cx`). Missing
+either one disables the source entirely:
+
+```
+[funfacts] google source not configured (needs BOTH google_api_key and google_cx)
+```
+
+```json
+"google_api_key": "AIza...",
+"google_cx": "abc123..."
+```
+
+**Google has closed this API to new customers** and is sunsetting it
+(1 January 2027); the free tier was 100 queries/day. Unless you already have a
+`google_cx`, use Serper — it is one key, no engine to configure, and it is what
+this bot is tested against.
+
+> Both search sources return short snippets, not prose — so their facts are
+> usually weaker than Wikipedia's. Their real value is coverage of places with
+> no usable Wikipedia article.
 
 > The bot also needs a real *model*: `openrouter/free` is OpenRouter's
 > auto-router — it picks a random free model per call (often a reasoning model
