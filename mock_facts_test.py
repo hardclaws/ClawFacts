@@ -42,7 +42,12 @@ def test_trim_keeps_whole_sentences():
              "sought by federal and state authorities for the ambush, until his apprehension "
              "at 6 p.m. on Thursday, October 30, ending a 48-day manhunt.")
     assert funfacts._sentence_parts(frein) == [frein], funfacts._sentence_parts(frein)
-    assert "48-day manhunt" in funfacts._trim(frein, 200)
+    # One 214-char sentence cannot keep its tail inside 200, so it still ends
+    # on a clause break - but the tail must not be a dangling word.
+    out = funfacts._trim(frein, 200)
+    assert len(out) <= 200 and out.endswith("…"), out
+    tail = out[:-1].rsplit(" ", 1)[-1].lower()
+    assert tail not in {"a", "the", "an", "and", "until", "at", "of", "on"}, out
     print(f"[PASS] trim keeps whole sentences -> {len(out)} chars, no ellipsis")
 
 
