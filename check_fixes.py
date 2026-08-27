@@ -129,7 +129,7 @@ def main() -> int:
          and funfacts._spicy_db("Mount Vernon, Massachusetts", 200) is None),
         ("an unauthorised token reports 'unknown', not 'not following'",
          hasattr(__import__("access").Helix("c", "t", "1"), "self_test")
-         and "self.authorised is False" in open(
+         and "elif self.authorised is not True:" in open(
              pathlib.Path(__file__).parent / "access.py", encoding="utf-8").read()),
         ("facts are trimmed on sentence boundaries, not mid-sentence",
          not funfacts._trim(
@@ -143,6 +143,25 @@ def main() -> int:
         ("!help lists the commands",
          "_say_help" in open(
              pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()),
+        ("!funfacts works as !funfact",
+         "funfacts" in __import__("bot").FUNFACT_ALIASES
+         and "funfact" in __import__("bot").FUNFACT_ALIASES),
+        ("!bot on|off moderator kill switch",
+         "_bot_switch" in open(
+             pathlib.Path(__file__).parent / "bot.py", encoding="utf-8").read()
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
+                  oauth_token="oauth:x")), "paused")),
+        ("a refreshed token reaches the follower-check client",
+         hasattr(__import__("access").Helix("c", "t", "1"), "set_token")),
+        ("the startup log names why follow checks fail",
+         hasattr(__import__("access").Helix("c", "t", "1"), "describe_token")
+         and hasattr(__import__("access").Helix("c", "t", "1"), "moderator_of")
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
+                  oauth_token="oauth:x")), "_diagnose_access")),
+        ("moderation:read:moderators is requested at login",
+         "moderation:read:moderators" in __import__("auth").SCOPES),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

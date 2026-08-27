@@ -20,6 +20,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import auth
+
 HELIX = "https://api.twitch.tv"
 
 # Seconds a tier must wait between its own !funfact uses. Overridable in
@@ -127,6 +129,64 @@ class Helix:
     def usable(self) -> bool:
         return bool(self.client_id and self.token and self.broadcaster_id)
 
+    def set_token(self, token: str) -> None:
+        """Adopt a freshly refreshed token.
+
+        Refreshing an access token invalidates the previous one, so a client
+        left holding the old string gets a 401 on every call afterwards -
+        which access control reports to chat as 'could not verify your follow
+        status'. Nothing ever recovered from that, because the token is only
+        handed over once, at construction.
+        """
+        new = (token or "").replace("oauth:", "").strip()
+        if not new or new == self.token:
+            return
+        self.token = new
+        self.authorised = None      # force a fresh permission probe
+        self._follows.clear()
+
+    def describe_token(self):
+        """The account and scopes behind this token, per Twitch itself.
+
+        The follower gate has several failure modes that all end in the same
+        chat message, so read the token back from Twitch and say which one it
+        is instead of guessing. None if Twitch will not validate it.
+        """
+        if not self.token:
+            return None
+        try:
+            return auth.validate_token(self.token)
+        except Exception as exc:
+            self.errors += 1
+            print(f"[access] could not validate the oauth token: {exc!r}",
+                  flush=True)
+            return None
+
+    def moderator_of(self, broadcaster_id: str, user_id: str,
+                     has_scope: bool = False):
+        """True if this token's user moderates the channel, False if provably
+        not, None if the question could not be answered.
+
+        Twitch returns 401 both for a token missing
+        moderation:read:moderators and for a requester who is neither
+        broadcaster nor moderator, so 401 only settles anything once the
+        caller has confirmed the scope is present.
+        """
+        if not (broadcaster_id and user_id):
+            return None
+        try:
+            data = _get(f"{HELIX}/helix/moderation/moderators",
+                        {"broadcaster_id": broadcaster_id, "user_id": user_id},
+                        self.token, self.client_id, self.timeout)
+        except urllib.error.HTTPError as exc:
+            self.errors += 1
+            return False if (exc.code == 401 and has_scope) else None
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self.errors += 1
+            print(f"[access] moderator lookup failed: {exc!r}", flush=True)
+            return None
+        return bool(data.get("data"))
+
     def user_id(self, login: str):
         login = (login or "").strip().lower()
         if not login:
@@ -171,12 +231,13 @@ class Helix:
         rows = data.get("data") or []
         if rows:
             value = rows[0].get("followed_at") or ""
-        elif self.authorised is False:
+        elif self.authorised is not True:
             # Twitch returns the total count and an EMPTY data array when the
             # token is not the broadcaster or a moderator, or is missing
             # moderator:read:followers. Reading that as "does not follow" is
-            # what made every real follower get turned away. Report it as
-            # unknown instead - the honest answer, and it points at the fix.
+            # what made every real follower get turned away. An empty list is
+            # only evidence of a non-follow once the permission probe has
+            # actually succeeded, so an unfinished probe also means unknown.
             value = None
         else:
             value = ""

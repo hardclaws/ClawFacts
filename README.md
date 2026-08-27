@@ -198,12 +198,15 @@ Quick-and-dirty local alternatives:
 
 | Command               | Result                                                        |
 | --------------------- | ------------------------------------------------------------- |
-| `!funfact Milford, PA`| Posts a fun fact about the location.                          |
+| `!funfact Milford, PA`| Posts a fun fact about the location. `!funfacts` also works.  |
 | `!funfact` (no arg)   | Posts usage instructions.                                     |
 | `!joke`               | A random joke (free API).                                     |
 | `!randomfact`         | A random useless fact (free API).                             |
-| `!riddle`             | A riddle; the answer is posted ~45s later.                    |
+| `!riddle`             | A riddle; the answer is posted ~20s later.                    |
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
+| `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
+| `!help`               | Lists the commands and who may use them.                      |
+| `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
 
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
@@ -344,13 +347,14 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 
 | Command | What it does |
 |---|---|
-| `!funfact <place>` | A real fun fact about a town |
+| `!funfact <place>` | A real fun fact about a town. `!funfacts` is the same command |
 | `!smk female\|male\|any` | Shag, marry or kill — three names from that pool |
 | `!joke` | A joke |
 | `!randomfact` | A random fact |
 | `!riddle` | A riddle; the answer follows after `riddle_answer_delay` seconds |
 | `!wyr` | A would-you-rather |
 | `!help` | Lists all of the above, plus who may use them |
+| `!bot off` / `!bot on` / `!bot status` | **Moderators only** — switch every command off and on again |
 
 `!smk` is also accepted as `!shagmarrykill` or `!marryshagkill`, and `f`/`m`
 work as shorthands for `female`/`male`. Its names come from a local pool of
@@ -359,6 +363,12 @@ public figures — no API call, and nobody in chat gets named by accident.
 `!help` is answered before the rate limiter, so a viewer can read what the bot
 does even if they aren't allowed to run a command yet. Everything else is
 gated.
+
+`!bot off` silences the bot completely — every command, including `!funfact`,
+is ignored rather than refused, so it does not become a spam vector. It is
+restricted to the broadcaster and moderators, and it deliberately keeps
+answering while the bot is off; otherwise switching it off would be a one-way
+trip. The state lives in memory, so a restart brings the commands back on.
 
 Facts are trimmed to `max_fact_chars` / `max_message_chars` on a **sentence
 boundary** where one fits, so a long fact loses its trailing sentence instead
@@ -399,16 +409,41 @@ the broadcaster or one of the channel's moderators — the device-login token
    python3 bot.py --login
    ```
 
-The bot probes this on the first command and says which one is wrong:
+The token also asks for `moderation:read:moderators` so the bot can settle the
+second half of that on its own instead of guessing. Both arrive with the same
+single `--login`.
+
+#### The bot says why, at startup
+
+Four different faults all produce the same chat message — *"could not verify
+your follow status"* — and only two of them are yours to fix. So the bot reads
+its own token and the channel's moderator list back from Twitch on the way up
+and prints the cause rather than leaving you to guess:
 
 ```
-[access] follower check OK - token may read this channel's followers (total=812).
-[access] follower check failed: HTTP 401.
-[access]   The token cannot read this channel's followers. Either it is missing
-           the moderator:read:followers scope (run 'python3 bot.py --login' to
-           re-authorise) or the bot account is not the broadcaster or a
-           moderator of it.
+[access] token account='truckingwithdocbot' scopes=chat:read,chat:edit
+[access] PROBLEM: the token is missing the moderator:read:followers scope -
+         run 'python3 bot.py --login' to re-authorise.
+[access] PROBLEM: truckingwithdocbot is not a moderator of #hardclaws -
+         run /mod truckingwithdocbot in that channel.
+[access] until the above is fixed, followers will be told 'could not verify
+         your follow status'.
 ```
+
+With both in place it says so plainly:
+
+```
+[access] token account='truckingwithdocbot' scopes=chat:read,chat:edit,moderator:read:followers,moderation:read:moderators
+[access] follower check OK - token may read this channel's followers (total=812).
+[access] follow checks are working.
+```
+
+Read the `scopes=` line first. If `moderator:read:followers` is not in it, no
+amount of `/mod` will help — the token simply cannot ask the question, and the
+only fix is `python3 bot.py --login`.
+
+The probe also re-runs every five minutes while it is failing, so granting the
+bot `/mod` mid-stream takes effect without a restart.
 
 > Twitch answers an unauthorised request with **200 OK, the real follower
 > total, and an empty list** — the same shape as "this user does not follow".

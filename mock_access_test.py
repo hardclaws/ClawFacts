@@ -12,7 +12,8 @@ import time
 
 import access
 
-STATE = {"calls": [], "unauthorised": False}
+STATE = {"calls": [], "unauthorised": False, "not_a_mod": False,
+         "no_moderator_scope": False}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -46,6 +47,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = {"error": "Unauthorized", "status": 401}
                 self._send(401, body)
                 return
+        elif "/helix/moderation/moderators" in self.path:
+            if STATE["not_a_mod"] or STATE["no_moderator_scope"]:
+                # Twitch sends the same 401 for a missing scope and for a
+                # requester who is neither broadcaster nor moderator.
+                self._send(401, {"error": "Unauthorized", "status": 401})
+                return
+            if "user_id=999me" in self.path \
+                    or "user_id=999truckingwithdocbot" in self.path:
+                body = {"total": 1,
+                        "data": [{"user_id": "999me", "user_login": "me"}]}
+            else:
+                body = {"total": 0, "data": []}
+        elif "/oauth2/validate" in self.path:
+            body = {"client_id": "cid", "login": "truckingwithdocbot",
+                    "scope": ["chat:read", "chat:edit",
+                              "moderation:read:moderators"],
+                    "user_id": "999me", "expires_in": 1234}
         else:
             body = {"data": []}
         self._send(200, body)
@@ -112,7 +130,13 @@ def test_tier_cooldowns(port):
 
 
 def test_follower_gate(port):
-    ac = access.AccessControl({"min_follow_age_seconds": 86400}, make_helix())
+    h = make_helix()
+    # The bot always probes before it gates anyone (_resolve_broadcaster ->
+    # self_test), and the gate must be read against that result: an empty
+    # follower list only means "not following" once the token is confirmed
+    # allowed to see the list at all.
+    assert h.self_test() is True
+    ac = access.AccessControl({"min_follow_age_seconds": 86400}, h)
     t = 2_000_000.0
 
     stranger = ac.check("stranger", "", now=t)
@@ -209,6 +233,137 @@ def test_authorised_empty_data_means_not_following(port):
     print("[PASS] with permission, an empty list means genuinely not following")
 
 
+def test_unprobed_token_is_unknown_not_not_following(port):
+    """A probe that never completed must not be read as permission. An empty
+    follower list is only evidence of a non-follow once self_test() succeeded;
+    before that it is Twitch saying 'you may not see this'."""
+    h = make_helix()
+    assert h.authorised is None, "a fresh client has not probed yet"
+    STATE["unauthorised"] = True
+    try:
+        assert h.followed_at("999oldtimer") is None
+        ac = access.AccessControl({}, h)
+        d = ac.check("oldtimer", "", now=1.0)
+        assert not d.allowed and d.tier == "unknown", d
+    finally:
+        STATE["unauthorised"] = False
+    print("[PASS] an unprobed token reports 'unknown', never 'not following'")
+
+
+def test_set_token_recovers_after_a_refresh(port):
+    """Refreshing an access token invalidates the previous one. The Helix
+    client was handed its copy once at construction, so after a refresh it kept
+    sending the dead token and every follow check 401'd with no recovery."""
+    h = make_helix()
+    assert h.self_test() is True and h.authorised is True
+    h.followed_at("999oldtimer")          # warm the cache
+    assert h._follows, "expected a cached follow"
+
+    h.set_token("oauth:NEWTOKEN")
+    assert h.token == "NEWTOKEN", h.token
+    assert h.authorised is None, "a new token must be re-probed"
+    assert not h._follows, "cached follows belong to the old token"
+
+    h.set_token("NEWTOKEN")               # no-op, must not disturb the probe
+    assert h.authorised is None
+    assert h.self_test() is True
+    ac = access.AccessControl({}, h)
+    assert ac.check("oldtimer", "", now=1.0).allowed
+    print("[PASS] a refreshed token reaches the Helix client and is re-probed")
+
+
+def test_moderator_check(port):
+    """The other half of the 401: is the bot actually a moderator? A 401 only
+    settles that once the caller knows the scope is present."""
+    h = make_helix()
+    bid = h.user_id("hardclaws")
+    me = h.user_id("me")
+
+    STATE["no_moderator_scope"] = True
+    assert h.moderator_of(bid, me, has_scope=False) is None, \
+        "a 401 without the scope proves nothing"
+    STATE["no_moderator_scope"] = False
+
+    STATE["not_a_mod"] = True
+    assert h.moderator_of(bid, me, has_scope=True) is False, \
+        "a 401 with the scope present means not a moderator"
+    STATE["not_a_mod"] = False
+
+    assert h.moderator_of(bid, me) is True
+    assert h.moderator_of(bid, "999someone_else") is False
+    assert h.moderator_of("", me) is None
+    print("[PASS] moderator status: yes, provably no, and honestly unknown")
+
+
+def test_describe_token(port):
+    """The startup diagnosis reads the token back from Twitch so the log names
+    the cause instead of guessing."""
+    import auth
+    auth.VALIDATE_ENDPOINT = f"http://127.0.0.1:{port}/oauth2/validate"
+    info = make_helix().describe_token()
+    assert info["login"] == "truckingwithdocbot", info
+    assert "moderator:read:followers" not in info["scope"], \
+        "the fixture stands in for a token logged in before the scope existed"
+    print("[PASS] describe_token reports the account and its actual scopes")
+
+
+def test_startup_diagnosis(port):
+    """The whole point: four causes share one chat message, so the log must
+    name the cause. This drives bot._diagnose_access against the fake Helix
+    with a token that is missing the scope and a bot that is not a moderator."""
+    import bot as bot_mod
+    import auth
+
+    auth.VALIDATE_ENDPOINT = f"http://127.0.0.1:{port}/oauth2/validate"
+    cfg = dict(bot_mod.DEFAULTS)
+    cfg.update({"nick": "truckingwithdocbot", "channel": "#hardclaws",
+                "client_id": "cid", "oauth_token": "oauth:T"})
+    b = bot_mod.TwitchBot(cfg)
+    b._access.helix = make_helix()
+    logged = []
+    b._log = logged.append
+    STATE["not_a_mod"] = True
+    try:
+        b._diagnose_access()
+    finally:
+        STATE["not_a_mod"] = False
+    text = "\n".join(logged)
+    assert "PROBLEM" in text and "moderator:read:followers" in text, text
+    assert "is not a moderator" in text, text
+    assert "/mod truckingwithdocbot" in text, text
+    assert "could not verify your follow status" in text, text
+    print("---- what the bot now prints at startup when it is misconfigured ----")
+    for line in logged:
+        print("   ", line)
+    print("[PASS] the startup diagnosis names both causes and the fix")
+
+
+def test_startup_diagnosis_clean(port):
+    """And the opposite case must say so plainly rather than staying silent."""
+    import bot as bot_mod
+    import auth
+
+    auth.VALIDATE_ENDPOINT = f"http://127.0.0.1:{port}/oauth2/validate"
+    auth.SCOPES = "chat:read chat:edit moderator:read:followers"
+    cfg = dict(bot_mod.DEFAULTS)
+    cfg.update({"nick": "truckingwithdocbot", "channel": "#hardclaws",
+                "client_id": "cid", "oauth_token": "oauth:T"})
+    b = bot_mod.TwitchBot(cfg)
+    h = make_helix()
+    b._access.helix = h
+    logged = []
+    b._log = logged.append
+    h.describe_token = lambda: {"login": "truckingwithdocbot",
+                                "scope": ["chat:read", "chat:edit",
+                                          "moderator:read:followers",
+                                          "moderation:read:moderators"]}
+    b._diagnose_access()
+    text = "\n".join(logged)
+    assert "PROBLEM" not in text, text
+    assert "follow checks are working" in text, text
+    print("[PASS] a correctly configured bot says so")
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
@@ -221,6 +376,10 @@ def main():
                test_check_failure_is_configurable,
                test_unauthorised_token_does_not_accuse_followers,
                test_authorised_empty_data_means_not_following,
+               test_unprobed_token_is_unknown_not_not_following,
+               test_set_token_recovers_after_a_refresh,
+               test_moderator_check, test_describe_token,
+               test_startup_diagnosis, test_startup_diagnosis_clean,
                test_disabled):
         fn(port)
     server.shutdown()

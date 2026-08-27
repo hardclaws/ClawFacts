@@ -53,6 +53,16 @@ SCRIPT = [
     (19.5, privmsg("viewer7", "!smk female", "vip/1")),
     (21.0, privmsg("viewer8", "!smk male", "moderator/1")),
     (22.5, privmsg("viewer9", "!smk", "subscriber/01")),
+    # !funfacts is the same command as !funfact.
+    (24.0, privmsg("viewer2", "!funfacts Aliasville, ZZ", "subscriber/06")),
+    # A viewer must not be able to switch the bot off - and gets no reply.
+    (25.5, privmsg("viewer3", "!bot off", "vip/1")),
+    (27.0, privmsg("viewer1", "!bot off", "moderator/1,subscriber/24")),
+    # Everything is silent while it is off, moderators included.
+    (28.5, privmsg("viewer1", "!funfacts Nowhere, ZZ", "moderator/1")),
+    (30.0, privmsg("viewer1", "!bot status", "moderator/1")),
+    (31.5, privmsg("viewer1", "!bot on", "moderator/1")),
+    (33.0, privmsg("viewer1", "!funfacts Somewhere, ZZ", "moderator/1")),
 ]
 
 
@@ -67,7 +77,7 @@ def server(bot_lines):
     buf = b""
     start = time.time()
     next_idx = 0
-    while time.time() - start < 30:
+    while time.time() - start < 38:
         try:
             data = conn.recv(4096)
         except socket.timeout:
@@ -140,7 +150,7 @@ def main():
     time.sleep(0.4)
     runner = threading.Thread(target=bot.run, daemon=True)
     runner.start()
-    time.sleep(28)   # long enough for the riddle timer and the new commands
+    time.sleep(36)   # long enough for the riddle timer and the new commands
     bot.running = False
     bot._close()
     runner.join(timeout=5)
@@ -158,9 +168,40 @@ def main():
     answers = [l for l in bot_lines if "PRIVMSG" in l and "Answer |" in l]
     helps = [l for l in bot_lines if "PRIVMSG" in l and "commands:" in l]
     smk = [l for l in bot_lines if "PRIVMSG" in l and "ShagMarryKill" in l]
+    switches = [l for l in bot_lines if "PRIVMSG" in l and "!bot" in l]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
+    # !funfacts must reach the fact engine exactly like !funfact.
+    alias_fact = [l for l in facts if "Aliasville" in l]
+    if not alias_fact:
+        print("FAIL: !funfacts did not produce a fact")
+        return 1
+    print("[PASS] !funfacts is handled as !funfact")
+
+    # The moderator kill switch: refused for viewers, silent while off, and it
+    # must still answer !bot on - otherwise switching off is a one-way trip.
+    if any("@viewer3" in l and "!bot" in l for l in bot_lines):
+        print("FAIL: a viewer was answered for !bot")
+        return 1
+    if not any("commands are now OFF" in l for l in bot_lines):
+        print("FAIL: !bot off did not confirm to the moderator")
+        return 1
+    if any("Nowhere" in l for l in bot_lines):
+        print("FAIL: a command was answered while the bot was switched off")
+        return 1
+    if not any("commands are OFF" in l and "status" not in l for l in switches):
+        print("FAIL: !bot status did not report OFF")
+        return 1
+    if not any("commands are back ON" in l for l in bot_lines):
+        print("FAIL: !bot on did not resume")
+        return 1
+    if not any("Somewhere" in l for l in facts):
+        print("FAIL: commands did not resume after !bot on")
+        return 1
+    print(f"[PASS] !bot off/on is moderator-only and silences every command "
+          f"({len(switches)} switch line(s))")
+
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "
           f"badge-less refused: {len(turned_away)}, "

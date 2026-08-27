@@ -36,7 +36,8 @@ ACTIVATE_URL = "https://www.twitch.tv/activate"
 # follows the channel (access.py). It is not in the IRC tags, so there is no
 # other way to enforce "followers only". Adding a scope means the stored
 # token no longer has it - run `python3 bot.py --login` once after updating.
-SCOPES = "chat:read chat:edit moderator:read:followers"
+SCOPES = ("chat:read chat:edit moderator:read:followers "
+          "moderation:read:moderators")
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
 TOKENS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tokens.json")

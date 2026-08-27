@@ -46,6 +46,8 @@ HOST = "irc.chat.twitch.tv"
 PORT = 6697  # TLS
 
 # Extra entertainment commands (enabled when config "fun_commands" is true).
+# !funfacts is the same command as !funfact - the plural is the natural typo.
+FUNFACT_ALIASES = {"funfact", "funfacts"}
 EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr", "smk"}
 SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
 # !help is documentation, not a game: it stays reachable for everyone so a
@@ -224,6 +226,8 @@ class TwitchBot:
         # first command so a failed Helix call can never block startup.
         self._access = access.AccessControl(cfg, self._build_helix(cfg))
         self._broadcaster_id = ""
+        self._last_probe = 0.0              # last follower-permission probe
+        self.paused = False                 # !bot off (moderators only)
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
@@ -250,6 +254,12 @@ class TwitchBot:
             new = auth.refresh_if_possible(self.cfg)
             if new and new != self.cfg.get("oauth_token"):
                 self.cfg["oauth_token"] = new
+                # IRC picks the new token up from cfg on the next PASS, but the
+                # Helix client was handed its copy once, at construction. Left
+                # alone it keeps sending the superseded - now invalid - token
+                # and every follow check 401s from then on.
+                if self._access.helix is not None:
+                    self._access.helix.set_token(new)
                 self._log("oauth token refreshed")
         except Exception as exc:
             self._log(f"token refresh error: {exc!r}")
@@ -303,8 +313,79 @@ class TwitchBot:
             self._send(f"PRIVMSG {self.channel} :{text}")
             self._last_say = time.time()
 
+    # ---- startup diagnostics -------------------------------------------
+    def _diagnose_access(self) -> None:
+        """Print exactly why follow checks will or will not work.
+
+        Four different things produce the identical chat message 'could not
+        verify your follow status', and only two of them are fixable by the
+        person running the bot. Reading the token and the moderator list back
+        from Twitch at startup turns that guess into a stated cause.
+        """
+        if not self.cfg.get("access_control", True):
+            self._log("[access] access control is OFF in config - anyone may "
+                      "use the commands.")
+            return
+        helix = self._access.helix
+        if helix is None or not (helix.client_id and helix.token):
+            self._log("[access] follow checks unavailable: no client_id or "
+                      "oauth token. Only badged users (mod/VIP/subscriber) can "
+                      "use the commands; everyone else is refused.")
+            return
+        self._resolve_broadcaster(self.cfg.get("channel", ""))
+        if not helix.broadcaster_id:
+            self._log("[access] could not look up the channel's id, so follow "
+                      "checks are unavailable.")
+            return
+
+        info = helix.describe_token()
+        scopes, login = [], ""
+        if info:
+            scopes = list(info.get("scope") or info.get("scopes") or [])
+            login = str(info.get("login") or "")
+            self._log(f"[access] token account={login!r} "
+                      f"scopes={','.join(scopes) or '(none)'}")
+        else:
+            self._log("[access] Twitch would not validate the oauth token - it "
+                      "is probably expired. Run 'python3 bot.py --login'.")
+
+        problems = []
+        if info and "moderator:read:followers" not in scopes:
+            problems.append("the token is missing the moderator:read:followers "
+                            "scope - run 'python3 bot.py --login' to re-authorise")
+        if login and login.lower() != self.nick.lower():
+            problems.append(f"the token belongs to {login!r} but the bot "
+                            f"connects as {self.nick!r} - /mod the token's "
+                            f"account, not this one")
+
+        me = helix.user_id(self.nick)
+        is_mod = helix.moderator_of(helix.broadcaster_id, me,
+                                    has_scope="moderation:read:moderators" in scopes)
+        if is_mod is False:
+            problems.append(f"{self.nick} is not a moderator of "
+                            f"{self.cfg.get('channel', '')} - run "
+                            f"/mod {self.nick} in that channel")
+        elif is_mod is None:
+            self._log("[access] could not confirm moderator status (needs the "
+                      "moderation:read:moderators scope).")
+
+        # The probe is the ground truth: it is the exact call the gate makes.
+        if helix.authorised is True and not problems:
+            self._log("[access] follow checks are working.")
+            return
+        for line in problems:
+            self._log(f"[access] PROBLEM: {line}.")
+        if helix.authorised is not True and is_mod is None and not problems:
+            self._log("[access] PROBLEM: the follower probe failed and the "
+                      "cause is not settled - the token needs "
+                      "moderator:read:followers AND the bot must be the "
+                      "broadcaster or a /mod of the channel.")
+        self._log("[access] until the above is fixed, followers will be told "
+                  "'could not verify your follow status'.")
+
     # ---- main loop ----------------------------------------------------
     def run(self) -> None:
+        self._diagnose_access()
         worker = threading.Thread(
             target=self._worker, name="fact-worker", daemon=True
         )
@@ -412,6 +493,17 @@ class TwitchBot:
             return
         command, _, argument = body.partition(" ")
         command = command.lower()
+        if command in FUNFACT_ALIASES:
+            command = "funfact"
+
+        # The moderator switch has to keep working while the bot is switched
+        # off, otherwise switching it off is a one-way trip.
+        if command == "bot":
+            self._bot_switch(nick, badges, argument.strip().lower())
+            return
+
+        if self.paused:
+            return
 
         extras_enabled = bool(self.cfg.get("fun_commands", True))
         if command == "funfact" or command in HELP_COMMANDS:
@@ -428,7 +520,7 @@ class TwitchBot:
             return
 
         if command in HELP_COMMANDS:
-            self._say_help(nick)
+            self._say_help(nick, badges)
             return
 
         if command == "funfact" and not argument.strip():
@@ -449,6 +541,30 @@ class TwitchBot:
         self._log(f"{command} request from {nick}: {argument!r}")
         self._jobs.put((nick, login or nick.lower(), badges, command, argument))
 
+    def _bot_switch(self, nick: str, badges: str, argument: str) -> None:
+        """!bot on | !bot off | !bot status - a moderator kill switch."""
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            # Staying silent for everyone else keeps the switch itself from
+            # becoming a spam vector for viewers who find it by accident.
+            return
+        if argument in ("off", "disable", "pause", "stop"):
+            self.paused = True
+            self._say(f"@{nick} commands are now OFF - I'll stay quiet until a "
+                      f"moderator runs {self.cfg.get('prefix', '!')}bot on.")
+        elif argument in ("on", "enable", "resume", "start", "unpause"):
+            self.paused = False
+            self._say(f"@{nick} commands are back ON.")
+        elif argument in ("", "status"):
+            state = "OFF" if self.paused else "ON"
+            pre = self.cfg.get("prefix", "!")
+            self._say(f"@{nick} commands are {state}. {pre}bot off to pause, "
+                      f"{pre}bot on to resume.")
+        else:
+            pre = self.cfg.get("prefix", "!")
+            self._say(f"@{nick} usage: {pre}bot on | {pre}bot off | "
+                      f"{pre}bot status")
+        self._log(f"!bot {argument or 'status'} from {nick} -> paused={self.paused}")
+
     def _build_helix(self, cfg: dict):
         """Helix client for follow checks. The broadcaster's id is the channel
         we are joined to, not necessarily the account the bot logged in as."""
@@ -456,16 +572,21 @@ class TwitchBot:
         return access.Helix(cfg.get("client_id", ""), token)
 
     def _resolve_broadcaster(self, channel: str) -> str:
-        if self._broadcaster_id:
-            return self._broadcaster_id
         helix = self._access.helix
         if not helix or not (helix.client_id and helix.token):
             return ""
-        uid = helix.user_id(channel.lstrip("#"))
-        if uid:
+        if not self._broadcaster_id:
+            uid = helix.user_id(channel.lstrip("#"))
+            if not uid:
+                return ""
             self._broadcaster_id = uid
             helix.broadcaster_id = uid
             self._log(f"access control: broadcaster_id={uid}")
+        # Re-probe while the probe is failing. Granting the bot /mod mid-stream,
+        # or re-logging in, must take effect without a restart - otherwise the
+        # only feedback is a chat message that never changes.
+        if helix.authorised is not True and time.time() - self._last_probe >= 300.0:
+            self._last_probe = time.time()
             helix.self_test()
         return self._broadcaster_id
 
@@ -508,10 +629,11 @@ class TwitchBot:
             finally:
                 self._jobs.task_done()
 
-    def _say_help(self, nick: str) -> None:
+    def _say_help(self, nick: str, badges: str = "") -> None:
         prefix = self.cfg.get("prefix", "!")
         lines = [
-            f"{prefix}funfact <place> - a real fun fact about a town",
+            f"{prefix}funfact <place> - a real fun fact about a town "
+            f"({prefix}funfacts works too)",
             f"{prefix}smk female|male|any - shag, marry or kill three names",
             f"{prefix}joke - a joke",
             f"{prefix}randomfact - a random fact",
@@ -522,6 +644,10 @@ class TwitchBot:
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
                   f"VIP and subscribers every 60s, followers of over a day "
                   f"every 5 minutes.")
+        if access.tier_from_badges(badges) in ("broadcaster", "moderator"):
+            # Only worth advertising to the people allowed to use it.
+            self._say(f"@{nick} mods: {prefix}bot off / {prefix}bot on - switch "
+                      f"every command off and on again ({prefix}bot status).")
 
     def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:
         limit = int(self.cfg.get("max_message_chars", 450))
