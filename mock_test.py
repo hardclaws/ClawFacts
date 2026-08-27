@@ -25,6 +25,14 @@ bot_mod.get_funfact = lambda location, options=None: {
     "place": f"{location.title()}",
     "fact": f"A completely offline fact about {location}.",
 }
+# !whois would reach en.wikipedia.org; answer it locally and deterministically.
+bot_mod.whois.lookup = lambda q, max_chars=400, **kw: (
+    {"found": True, "title": "Aubrey Plaza", "description": "American actress",
+     "text": "Aubrey Christina Plaza (born June 26, 1984) is an American "
+             "actress, comedian, producer, and writer. She gained recognition "
+             "for playing April Ludgate on Parks and Recreation."}
+    if "plaza" in (q or "").lower()
+    else {"found": False, "reason": f"I couldn't find anyone called {q}"})
 
 HOST, PORT = "127.0.0.1", 6667
 
@@ -73,6 +81,9 @@ SCRIPT = [
                    "moderator/1")),
     (42.0, privmsg("viewer1", "!reminders list", "moderator/1")),
     (44.0, privmsg("nobody", "!reminder list", "")),
+    (46.0, privmsg("viewer10", "!whois Aubrey Plaza", "subscriber/01")),
+    (47.5, privmsg("viewer11", "!whois Zzxqv Notaperson", "subscriber/01")),
+    (49.0, privmsg("nobody", "!whois", "")),
 ]
 
 
@@ -87,7 +98,7 @@ def server(bot_lines):
     buf = b""
     start = time.time()
     next_idx = 0
-    while time.time() - start < 58:
+    while time.time() - start < 66:
         try:
             data = conn.recv(4096)
         except socket.timeout:
@@ -173,7 +184,7 @@ def main():
     time.sleep(0.4)
     runner = threading.Thread(target=bot.run, daemon=True)
     runner.start()
-    time.sleep(56)   # long enough for the riddle timer and a 10s reminder
+    time.sleep(64)   # long enough for the riddle timer, a 10s reminder, !whois
     bot.running = False
     bot._close()
     runner.join(timeout=5)
@@ -197,6 +208,7 @@ def main():
     reminds = [l for l in bot_lines if "PRIVMSG" in l
                and ("Reminder |" in l or "reminder #" in l
                     or "reminders:" in l or "no reminders" in l)]
+    whois_lines = [l for l in bot_lines if "PRIVMSG" in l and "WhoIs |" in l]
     # The badge-less viewer must be refused, and must not get a fact.
     turned_away = [l for l in bot_lines if "PRIVMSG" in l and "@stranger" in l]
     stranger_fact = [l for l in facts if "stranger" in l]
@@ -265,6 +277,27 @@ def main():
         return 1
     print(f"[PASS] !reminder set / listed / fired, and viewers are not answered "
           f"({len(reminds)} line(s))")
+
+    # !whois answers with the article text, and says so when there is none.
+    if not any(l.startswith("PRIVMSG #test :WhoIs | Aubrey Plaza "
+                            "(American actress): Aubrey Christina")
+               for l in whois_lines):
+        print(f"FAIL: !whois did not post the article text: {whois_lines}")
+        return 1
+    if any("deadpan" in l.lower() for l in bot_lines):
+        print("FAIL: an editorial quip reached chat")
+        return 1
+    if not any("couldn't find anyone called Zzxqv" in l for l in bot_lines):
+        print("FAIL: !whois did not report a name it could not find")
+        return 1
+    if not any("usage: !whois <name>" in l for l in bot_lines):
+        print("FAIL: !whois with no argument did not show usage")
+        return 1
+    if any(len(l) > 500 for l in whois_lines):
+        print("FAIL: !whois exceeded Twitch's 500-character limit")
+        return 1
+    print(f"[PASS] !whois answered, refused a bad name, and showed usage "
+          f"({len(whois_lines)} blurb(s))")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "

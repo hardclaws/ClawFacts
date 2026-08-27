@@ -1631,6 +1631,78 @@ def _uniqueness_ok(line: str, line_claims: set, seed_facts: list,
 # that, and no amount of grounding can check a compliment. Such a line is
 # dropped whole - a dropped line costs nothing, the plain real facts post
 # instead.
+# Words a rewrite may use freely: grammar and scaffolding, not content.
+_FREE_WORDS = frozenset("""
+a an the and or but of to in on at for with from by as is are was were be been
+being it its this that these those there here also which who whom whose she he
+her his they them their you your we our not no nor so than then thus very just
+only most more about into over under after before during between both each
+every all any some such same other others another one two three four five six
+seven eight nine ten first second third new old known known-for city town
+happened happens happen happening occurred occurs occur occurred took takes
+take taken place placed located lies sits sits stands stood made makes make
+became becomes become began begun started starts start includes include
+including included called calls called named said says seen given gave held
+holds held found finds opened opens opened closed built ran runs went goes
+came comes brought used uses using followed follows follow among within
+throughout along around across near upon down away back again always never
+often sometimes usually later earlier early soon still already once today now
+currently originally previously finally eventually mainly mostly largely
+according several many few various own part parts whole total entire
+""".split())
+
+_CONTENT_WORD = re.compile(r"[a-z]{4,}")
+_STEM = 5
+# A clause whose vocabulary is mostly new is editorialising bolted onto the
+# end, not a re-wording of the source.
+_CLAUSE_SPLIT = re.compile(r"[,;:\u2014]|\s-\s|\s\u2013\s")
+
+
+def _content_stems(text: str) -> set:
+    """The first few letters of every content word in `text`."""
+    out = set()
+    for word in _CONTENT_WORD.findall((text or "").lower()):
+        if word in _FREE_WORDS:
+            continue
+        out.add(word[:_STEM])
+    return out
+
+
+def _invented_words(line: str, stems: set) -> set:
+    """Content words in `line` that the source material never used.
+
+    A rewrite may reorder and re-word; it may not editorialise. The rewrite
+    that produced "Aubrey Plaza: actress, comedian, producer, writer - and
+    deadpan delivered with extra deadpan" invented no name, no date, no place
+    and no claim, so it cleared every other check; what it invented was
+    *character*, and that shows up as words the source does not contain.
+    """
+    return {w for w in _CONTENT_WORD.findall((line or "").lower())
+            if w not in _FREE_WORDS and w[:_STEM] not in stems}
+
+
+def _too_invented(line: str, stems: set) -> bool:
+    """True when a clause of `line` is made mostly of words the source lacks.
+
+    Counting invented words across the whole line is too crude: a faithful
+    paraphrase legitimately swaps in synonyms and abbreviations ("bank founder
+    from Philly" for "...founder of the Girard Bank ... in Philadelphia") and
+    racks up several. What distinguishes that from invention is *where* the
+    new words sit. A rewrite scatters them; editorialising appends a clause
+    built almost entirely out of them - "and deadpan delivered with extra
+    deadpan".
+    """
+    for clause in _CLAUSE_SPLIT.split(line or ""):
+        words = [w for w in _CONTENT_WORD.findall(clause.lower())
+                 if w not in _FREE_WORDS]
+        if len(words) < 2:
+            continue
+        fresh = sum(1 for w in words if w[:_STEM] not in stems)
+        if fresh * 2 > len(words):
+            return True
+    return False
+
+
 _VAGUE = re.compile(
     r"\b(?:everyone|everybody) loves\b|\bkeeps? (?:its|their) past alive\b|"
     r"\bsmall[- ]town (?:charm|traditions?|values|feel|vibe)\b|"
@@ -1666,6 +1738,7 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
     corpus = " ".join([place, location] + list(seed_facts)).lower()
     years = set(_YEAR.findall(corpus))
     tokens = set(re.findall(r"[a-z]+", corpus))
+    source_stems = _content_stems(corpus)
     corpus_claims = _claims(corpus)
     place_words = _place_words(place, location)
 
@@ -1686,6 +1759,10 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
                     return False
         # 1a. praise is not a fact — drop the whole line rather than post it.
         if _VAGUE.search(line):
+            return False
+        # 1a-2. neither is editorialising. A rewrite may re-word a little, but
+        #       not bring in a run of content words the seeds never used.
+        if _too_invented(line, source_stems):
             return False
         # 1b. a residence claim needs a seed that places someone in the town.
         if _RESIDENCE.search(line) and not _RESIDENCE.search(corpus):

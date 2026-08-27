@@ -206,6 +206,7 @@ Quick-and-dirty local alternatives:
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
 | `!haul`               | What the truck is hauling right now.                          |
+| `!whois Aubrey Plaza` | Who that person is, from Wikipedia.                           |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -358,6 +359,7 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 | `!help` | Lists all of the above, plus who may use them |
 | `!bot off` / `!bot on` / `!bot status` | **Moderators only** — switch every command off and on again |
 | `!haul` | What the truck is hauling — anyone in chat can ask |
+| `!whois <name>` | Who that person is, in Wikipedia's own words |
 | `!haul update <cargo>` / `delete` | **Moderators only** — set or clear it |
 | `!reminder <when> <message>` | **Moderators only** — post into chat later |
 | `!reminder list` / `cancel <n>` / `cancel all` | **Moderators only** — see and clear them |
@@ -460,6 +462,60 @@ left over from the older name is carried over automatically.
 Both state files are gitignored, like `tokens.json` and `config.json`. Keep
 them when you update the bot's files if you want reminders and the haul board
 to carry over.
+
+### !whois
+
+Someone in chat sees a name and wants to know who it is:
+
+```
+!whois Aubrey Plaza
+WhoIs | Aubrey Plaza (American actress): Aubrey Christina Plaza (born June 26,
+1984) is an American actress, comedian, producer, and writer. She gained
+recognition for playing April Ludgate on the NBC sitcom Parks and Recreation.
+```
+
+**Nothing here is written by a model.** The text is the lead of the person's
+Wikipedia article, and the only thing done to it is cutting it to
+`whois_max_chars` (default 400) on a sentence boundary. Citation markers like
+`[1]` are stripped. That is deliberate: a blurb about a real person has to be
+something you can check.
+
+It costs two API calls at most — the article itself, and Wikipedia's search
+when the name as typed is not a page title. Results are cached for six hours
+because Wikipedia rate-limits by IP.
+
+Three refusals are distinguished, because they need different answers:
+
+```
+@viewer11 I couldn't find anyone called Zzxqv Notaperson
+@viewer12 several people are called John Smith - be more specific
+@viewer13 I couldn't reach Wikipedia just now - try again in a moment.
+```
+
+A disambiguation page is not an answer — "John Smith" is forty people — so it
+says so rather than posting whichever one Wikipedia happened to list. And
+Wikipedia being unreachable raises rather than reporting "no such person",
+which would be a lie about someone who exists.
+
+`!who` is an alias. It goes through the same per-user rate limit as `!funfact`,
+since it makes a network call.
+
+### Rewrites cannot add character
+
+The LLM rewrite path is only allowed to re-word the facts the sources
+returned. It used to be checked for invented names, dates, claims and praise
+clichés — all of which this line cleared:
+
+```
+Aubrey Plaza: actress, comedian, producer, writer - and deadpan delivered with extra deadpan.
+```
+
+Nothing there is a name, a date, a place, an event or a claim. What it invented
+was an opinion. Rewrites are now also checked for clauses built mostly out of
+words the source never used, which drops that while still allowing a genuine
+paraphrase — synonyms and abbreviations like "Philly" for Philadelphia
+survive, because they scatter through the sentence rather than piling into a
+trailing clause.
 
 Facts are trimmed to `max_fact_chars` / `max_message_chars` on a **sentence
 boundary** where one fits, so a long fact loses its trailing sentence instead
@@ -897,6 +953,7 @@ appends fake joke comments.
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
 | `haul.py`            | The `!haul` board.                              |
+| `whois.py`           | `!whois` lookups against Wikipedia.             |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
@@ -909,6 +966,7 @@ appends fake joke comments.
 | `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
+| `mock_whois_test.py` | Offline `!whois` tests against a fake Wikipedia. |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |

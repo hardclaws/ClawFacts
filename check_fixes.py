@@ -183,6 +183,18 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_say_haul")),
+        ("!whois posts Wikipedia's own words",
+         hasattr(__import__("whois"), "lookup")
+         and "whois" in __import__("bot").WHOIS_COMMANDS
+         and hasattr(__import__("bot").TwitchBot(
+             dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
+                  oauth_token="oauth:x")), "_reply_whois")),
+        ("an LLM rewrite cannot add character the source never had",
+         __import__("funfacts")._grounded_filter(
+             ["Aubrey Plaza: actress - and deadpan delivered with extra "
+              "deadpan."], "Aubrey Plaza", "Aubrey Plaza",
+             ["Aubrey Plaza is an American actress, comedian and writer."])
+         == []),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

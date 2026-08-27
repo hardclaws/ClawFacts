@@ -303,6 +303,45 @@ def test_definition_filter():
     print(f"[PASS] definition filter -> kept {f[0]!r}")
 
 
+def test_editorialising_is_not_a_rewrite():
+    """A rewrite may re-word; it may not add character the source lacks.
+
+    Live output was "Aubrey Plaza: actress, comedian, producer, writer - and
+    deadpan delivered with extra deadpan." That invents no name, date, place,
+    event or claim, so it cleared every existing check and reached chat. What
+    it invented was an opinion, bolted on as a trailing clause.
+    """
+    seed = ["Aubrey Plaza (born June 26, 1984) is an American actress, "
+            "comedian, producer, and writer."]
+    quip = ("Aubrey Plaza: actress, comedian, producer, writer - and deadpan "
+            "delivered with extra deadpan.")
+    assert funfacts._grounded_filter([quip], "Aubrey Plaza", "Aubrey Plaza",
+                                     seed) == [], "the quip reached chat"
+    # A faithful re-wording of the same seed must survive.
+    faithful = ("Aubrey Plaza is an American actress, comedian, producer "
+                "and writer.")
+    assert funfacts._grounded_filter([faithful], "Aubrey Plaza",
+                                     "Aubrey Plaza", seed), "over-filtering"
+    # So must a paraphrase that swaps in synonyms and an abbreviation - the
+    # earlier word-count rule wrongly dropped both of these.
+    girard = ["It is believed that Girard takes its name from Stephen Girard, "
+              "a French American philanthropist who was the founder of the "
+              "Girard Bank and Girard College in Philadelphia."]
+    paraphrase = ("Some claim Girard owes its name to Stephen Girard, that "
+                  "French American bank founder from Philly. Could be.")
+    assert funfacts._grounded_filter([paraphrase], "Girard, Ohio",
+                                     "girard, OH", girard), "abbreviation lost"
+    assert funfacts._grounded_filter(
+        ["The first public execution happened in 1888."], "X", "X",
+        ["The town's first public execution drew a crowd in 1888."]), "synonym lost"
+    # And praise appended as a clause is still dropped.
+    praise = ("Girard is a village in Trumbull County with a thriving arts "
+              "scene everyone loves.")
+    assert funfacts._grounded_filter([praise], "Girard, Ohio", "girard, OH",
+                                     girard) == []
+    print("[PASS] an LLM rewrite cannot add character the source never had")
+
+
 def test_explicit_filter():
     import llm
     orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
@@ -1515,6 +1554,7 @@ def main():
     test_namesake_person_stubs()
     test_location_line_never_outranks_history()
     test_attraction_ranking()
+    test_editorialising_is_not_a_rewrite()
     test_explicit_filter()
     test_tasteless_filter()
     test_grounded_filter()

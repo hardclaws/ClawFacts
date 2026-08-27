@@ -42,6 +42,7 @@ import access
 import extras
 import reminders as reminders_mod
 import haul as haul_mod
+import whois
 from funfacts import get_funfact, trim_to_fit
 
 HOST = "irc.chat.twitch.tv"
@@ -55,6 +56,9 @@ SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
 # !help is documentation, not a game: it stays reachable for everyone so a
 # viewer can read what the bot does even if they may not run a command yet.
 HELP_COMMANDS = {"help", "commands"}
+# !whois <name> posts the lead of that person's Wikipedia article. It is a
+# network call, so it goes through the same queue and rate limit as !funfact.
+WHOIS_COMMANDS = {"whois", "who"}
 # Moderator-owned state. Both stay reachable while the bot is switched off,
 # otherwise !bot off would strand a pending reminder or the cargo board.
 REMINDER_COMMANDS = {"reminder", "reminders"}
@@ -84,6 +88,9 @@ DEFAULTS = {
                        "subscriber": 60, "follower": 300},
     "min_follow_age_seconds": 86400,   # followers must be 1 day old
     "riddle_answer_delay": 20,         # seconds before !riddle shows its answer
+    # How much of the Wikipedia lead !whois posts. Trimmed on a sentence
+    # boundary, so a lower number loses whole sentences, never half of one.
+    "whois_max_chars": 400,
     # If the follow check can't run (no token, API down, scope missing):
     # "deny" keeps the follower gate honest, "allow" falls back to badges only.
     "follower_check_failure": "deny",
@@ -537,7 +544,8 @@ class TwitchBot:
             return
 
         extras_enabled = bool(self.cfg.get("fun_commands", True))
-        if command == "funfact" or command in HELP_COMMANDS:
+        if command == "funfact" or command in HELP_COMMANDS \
+                or command in WHOIS_COMMANDS:
             pass
         elif command in SMK_ALIASES:
             command = "smk"
@@ -558,6 +566,13 @@ class TwitchBot:
             self._say(
                 f"@{nick} usage: {prefix}funfact <place>  "
                 f"(e.g. {prefix}funfact Milford, PA)"
+            )
+            return
+
+        if command in WHOIS_COMMANDS and not argument.strip():
+            self._say(
+                f"@{nick} usage: {prefix}whois <name>  "
+                f"(e.g. {prefix}whois Aubrey Plaza)"
             )
             return
 
@@ -670,6 +685,28 @@ class TwitchBot:
         if due_lt[:3] == time.localtime(time.time() + 86400)[:3]:
             return f"{clock} {zone} tomorrow"
         return f"{clock} {zone} on " + time.strftime("%a %d %b", due_lt)
+
+    def _reply_whois(self, nick: str, query: str) -> None:
+        """Post Wikipedia's own words about a person - not a model's take."""
+        try:
+            result = whois.lookup(
+                query, int(self.cfg.get("whois_max_chars",
+                                        whois.DEFAULT_MAX_CHARS)))
+        except whois.WhoisError as exc:
+            self._log(f"whois {query!r} failed: {exc}")
+            self._say(f"@{nick} I couldn't reach Wikipedia just now - "
+                      f"try again in a moment.")
+            return
+        if not result.get("found"):
+            self._say(self._fit(f"@{nick} ", result.get("reason")
+                                or "I couldn't find that."))
+            return
+        head = f"WhoIs | {result.get('title') or query}"
+        description = (result.get("description") or "").strip()
+        if description:
+            head += f" ({description})"
+        self._say(self._fit(head + ": ", result.get("text") or ""))
+        self._log(f"whois {query!r} -> {result.get('title')}")
 
     def _tick_reminders(self) -> int:
         """One pass of the reminder clock. Returns how many it posted."""
@@ -785,6 +822,8 @@ class TwitchBot:
                 if command == "funfact":
                     result = get_funfact(argument, self._opts)
                     self._reply(nick, argument, result)
+                elif command in WHOIS_COMMANDS:
+                    self._reply_whois(nick, argument)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -803,6 +842,7 @@ class TwitchBot:
             f"{prefix}riddle - a riddle; the answer follows shortly",
             f"{prefix}wyr - a would-you-rather",
             f"{prefix}haul - what the truck is hauling right now",
+            f"{prefix}whois <name> - who that person is",
         ]
         self._say(f"@{nick} commands: " + " | ".join(lines))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
