@@ -41,7 +41,7 @@ import auth
 import access
 import extras
 import reminders as reminders_mod
-import transporting as transporting_mod
+import haul as haul_mod
 from funfacts import get_funfact, trim_to_fit
 
 HOST = "irc.chat.twitch.tv"
@@ -58,7 +58,9 @@ HELP_COMMANDS = {"help", "commands"}
 # Moderator-owned state. Both stay reachable while the bot is switched off,
 # otherwise !bot off would strand a pending reminder or the cargo board.
 REMINDER_COMMANDS = {"reminder", "reminders"}
-TRANSPORT_COMMANDS = {"transporting", "transport"}
+# !haul is the command. "transporting"/"transport" stay accepted so anyone
+# mid-habit is not broken by the rename; drop them from the set to retire them.
+HAUL_COMMANDS = {"haul", "hauls", "transporting", "transport"}
 
 DEFAULTS = {
     "nick": "",
@@ -237,7 +239,7 @@ class TwitchBot:
         # Mod-owned state, both persisted next to the code so they survive a
         # restart. A reminder set for tomorrow must not be lost to an update.
         self.reminders = reminders_mod.ReminderSet()
-        self.cargo = transporting_mod.Cargo()
+        self.cargo = haul_mod.Cargo()
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
@@ -520,15 +522,15 @@ class TwitchBot:
             self._reminder_command(nick, badges, argument)
             return
 
-        if command in TRANSPORT_COMMANDS:
+        if command in HAUL_COMMANDS:
             # update/delete are moderator-only and answered even while paused.
-            if self._transport_mutation(nick, badges, argument):
+            if self._haul_mutation(nick, badges, argument):
                 return
             if self.paused:
                 return
             # Reading the board costs nothing and answers no API call, so like
             # !help it stays open to everyone, badges or not.
-            self._say_transport(nick)
+            self._say_haul(nick)
             return
 
         if self.paused:
@@ -690,7 +692,7 @@ class TwitchBot:
                 self._log(f"reminder error: {exc!r}")
 
     # ---- the cargo board ---------------------------------------------------
-    def _transport_mutation(self, nick: str, badges: str, argument: str) -> bool:
+    def _haul_mutation(self, nick: str, badges: str, argument: str) -> bool:
         """Handle update/delete. True if this was a mutation (handled)."""
         verb, _, cargo = (argument or "").strip().partition(" ")
         verb = verb.lower()
@@ -703,22 +705,22 @@ class TwitchBot:
                 return True
             self.cargo.set_by = nick
             self.cargo.save()
-            self._say(self._fit(f"@{nick} transporting updated: ", self.cargo.text))
-            self._log(f"transporting updated by {nick}: {self.cargo.text[:60]!r}")
+            self._say(self._fit(f"@{nick} haul updated: ", self.cargo.text))
+            self._log(f"haul updated by {nick}: {self.cargo.text[:60]!r}")
             return True
         if verb in ("delete", "clear", "remove", "d"):
             if not self._is_mod(badges):
                 return True
             ok, why = self.cargo.delete()
-            self._say(f"@{nick} {why}." if not ok else f"@{nick} transporting cleared.")
+            self._say(f"@{nick} {why}." if not ok else f"@{nick} haul cleared.")
             return True
         return False
 
-    def _say_transport(self, nick: str) -> None:
+    def _say_haul(self, nick: str) -> None:
         if not self.cargo.is_set:
             prefix = self.cfg.get("prefix", "!")
-            self._say(f"@{nick} nothing is logged as transporting right now - a "
-                      f"moderator can set it with {prefix}transporting update "
+            self._say(f"@{nick} nothing is logged as the haul right now - a "
+                      f"moderator can set it with {prefix}haul update "
                       f"<what we're hauling>")
             return
         age = self.cargo.age()
@@ -800,7 +802,7 @@ class TwitchBot:
             f"{prefix}randomfact - a random fact",
             f"{prefix}riddle - a riddle; the answer follows shortly",
             f"{prefix}wyr - a would-you-rather",
-            f"{prefix}transporting - what the truck is hauling right now",
+            f"{prefix}haul - what the truck is hauling right now",
         ]
         self._say(f"@{nick} commands: " + " | ".join(lines))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
@@ -811,7 +813,7 @@ class TwitchBot:
             self._say(f"@{nick} mods: {prefix}reminder 60mins <message> or "
                       f"{prefix}reminder 01:30PDT <message>, then "
                       f"{prefix}reminder list / cancel <n>|all")
-            self._say(f"@{nick} mods: {prefix}transporting update <cargo> / "
+            self._say(f"@{nick} mods: {prefix}haul update <cargo> / "
                       f"delete, and {prefix}bot off / on / status")
 
     def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:

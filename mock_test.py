@@ -64,10 +64,10 @@ SCRIPT = [
     (31.5, privmsg("viewer1", "!bot on", "moderator/1")),
     (33.0, privmsg("viewer1", "!funfacts Somewhere, ZZ", "moderator/1")),
     # The cargo board: readable by anyone, writable by moderators only.
-    (34.5, privmsg("nobody", "!transporting", "")),
-    (36.0, privmsg("viewer1", "!transporting update Produce", "moderator/1")),
-    (37.5, privmsg("nobody", "!transporting", "")),
-    (39.0, privmsg("nobody", "!transporting update Stolen goods", "")),
+    (34.5, privmsg("nobody", "!haul", "")),
+    (36.0, privmsg("viewer1", "!haul update Produce", "moderator/1")),
+    (37.5, privmsg("nobody", "!haul", "")),
+    (39.0, privmsg("nobody", "!haul update Stolen goods", "")),
     # A reminder, its list, and the moment it fires. !reminders is an alias.
     (40.5, privmsg("viewer1", "!reminder 10s Check the lights are working",
                    "moderator/1")),
@@ -159,12 +159,12 @@ def main():
     # "Produce" still on the board and the test would not be repeatable.
     import tempfile
     import reminders as reminders_mod
-    import transporting as transporting_mod
+    import haul as haul_mod
     state_dir = tempfile.mkdtemp(prefix="clawfacts-mock-")
     bot.reminders = reminders_mod.ReminderSet(
         os.path.join(state_dir, "reminders.json"))
-    bot.cargo = transporting_mod.Cargo(
-        os.path.join(state_dir, "transporting.json"))
+    bot.cargo = haul_mod.Cargo(
+        os.path.join(state_dir, "haul.json"))
     assert not bot.cargo.is_set, "the test must start from an empty board"
     assert len(bot.reminders) == 0, "the test must start with no reminders"
     bot_lines = []
@@ -192,7 +192,8 @@ def main():
     helps = [l for l in bot_lines if "PRIVMSG" in l and "commands:" in l]
     smk = [l for l in bot_lines if "PRIVMSG" in l and "ShagMarryKill" in l]
     switches = [l for l in bot_lines if "PRIVMSG" in l and "!bot" in l]
-    cargo = [l for l in bot_lines if "PRIVMSG" in l and "transporting" in l]
+    cargo = [l for l in bot_lines if "PRIVMSG" in l
+             and ("transporting" in l or "haul" in l)]
     reminds = [l for l in bot_lines if "PRIVMSG" in l
                and ("Reminder |" in l or "reminder #" in l
                     or "reminders:" in l or "no reminders" in l)]
@@ -231,15 +232,15 @@ def main():
 
     # The cargo board is open to read and closed to write.
     if not any("@nobody nothing is logged" in l for l in cargo):
-        print("FAIL: !transporting did not answer a badge-less viewer")
+        print("FAIL: !haul did not answer a badge-less viewer")
         return 1
     if not any("@nobody we are transporting Produce." in l for l in cargo):
-        print("FAIL: !transporting did not report the load")
+        print("FAIL: !haul did not report the load")
         return 1
-    if any("@nobody transporting updated" in l for l in bot_lines):
-        print("FAIL: a viewer was allowed to change the cargo board")
+    if any("@nobody haul updated" in l for l in bot_lines):
+        print("FAIL: a viewer was allowed to change the haul board")
         return 1
-    print(f"[PASS] !transporting is readable by all, writable by mods "
+    print(f"[PASS] !haul is readable by all, writable by mods "
           f"({len(cargo)} line(s))")
 
     # A reminder is created, listed, and actually reaches chat.

@@ -174,12 +174,13 @@ def main() -> int:
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "reminders")),
-        ("!transporting update/delete, readable by everyone",
-         hasattr(__import__("transporting").Cargo, "update")
-         and hasattr(__import__("transporting").Cargo, "delete")
+        ("!haul update/delete, readable by everyone",
+         hasattr(__import__("haul").Cargo, "update")
+         and hasattr(__import__("haul").Cargo, "delete")
+         and "haul" in __import__("bot").HAUL_COMMANDS
          and hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
-                  oauth_token="oauth:x")), "_say_transport")),
+                  oauth_token="oauth:x")), "_say_haul")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

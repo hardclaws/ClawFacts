@@ -3,6 +3,7 @@ tokens.json
 config.json
 # The bot's own state, written at runtime
 reminders.json
+haul.json
 transporting.json
 
 # Python

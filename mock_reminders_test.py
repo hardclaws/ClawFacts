@@ -1,4 +1,4 @@
-"""Tests for reminders.py, transporting.py and their bot.py wiring.
+"""Tests for reminders.py, haul.py and their bot.py wiring.
 
 Run:  python3 mock_reminders_test.py
 No network, no Twitch, no real clock dependence - every test passes its own
@@ -14,7 +14,7 @@ import time
 import bot as bot_mod
 import reminders
 import storage
-import transporting
+import haul
 
 
 def _tmp(name):
@@ -203,10 +203,10 @@ def test_corrupt_state_does_not_stop_the_bot():
 # ---- the cargo board ----------------------------------------------------
 def test_cargo():
     path = _tmp("t.json")
-    c = transporting.Cargo(path)
+    c = haul.Cargo(path)
     assert not c.is_set
-    assert c.delete() == (False, "nothing is logged as transporting right now")
-    assert c.update("") == (False, "update to what? !transporting update Produce")
+    assert c.delete() == (False, "nothing is logged as the haul right now")
+    assert c.update("") == (False, "update to what? !haul update Produce")
     assert c.update("x" * 400)[0] is False
 
     ok, why = c.update("Produce")
@@ -216,7 +216,7 @@ def test_cargo():
     # Persists, and comes back with who set it.
     c.set_by = "amod"
     c.save()
-    again = transporting.Cargo(path)
+    again = haul.Cargo(path)
     assert again.phrase() == "Produce" and again.set_by == "amod"
 
     c.set_at = time.time() - 4 * 60
@@ -225,8 +225,8 @@ def test_cargo():
     assert c.age() == "just now", c.age()
 
     assert c.delete()[0] is True and not c.is_set
-    assert transporting.Cargo(path).phrase() == ""
-    print("[PASS] !transporting update/delete, persistence, and the age line")
+    assert haul.Cargo(path).phrase() == ""
+    print("[PASS] !haul update/delete, persistence, and the age line")
 
 
 def test_storage_is_atomic_and_lossless():
@@ -247,7 +247,7 @@ def _bot():
     b = bot_mod.TwitchBot(dict(bot_mod.DEFAULTS, nick="bot", channel="#test",
                                prefix="!"))
     b.reminders = reminders.ReminderSet(_tmp("r.json"))
-    b.cargo = transporting.Cargo(_tmp("t.json"))
+    b.cargo = haul.Cargo(_tmp("t.json"))
     said = []
     b._say = said.append
     return b, said
@@ -301,38 +301,69 @@ def test_reminders_are_held_while_the_bot_is_off():
     print("[PASS] reminders are held, not dropped, while the bot is switched off")
 
 
-def test_transporting_is_readable_by_everyone():
+def test_haul_is_readable_by_everyone():
     b, said = _bot()
-    b._say_transport("viewer1")
+    b._say_haul("viewer1")
     assert "nothing is logged" in said[0], said[0]
 
     # A viewer's attempt to change it is recognised and refused, silently.
-    assert b._transport_mutation("rando", "", "update Stolen goods") is True
+    assert b._haul_mutation("rando", "", "update Stolen goods") is True
     assert not b.cargo.is_set
     assert len(said) == 1, "a viewer must not be answered"
 
-    assert b._transport_mutation("amod", "moderator/1", "update Produce") is True
-    b._say_transport("viewer2")
+    assert b._haul_mutation("amod", "moderator/1", "update Produce") is True
+    b._say_haul("viewer2")
     assert said[-1] == "@viewer2 we are transporting Produce.  " \
                        "(set by @amod, just now)", said[-1]
 
-    b._transport_mutation("amod", "broadcaster/1", "delete")
-    b._say_transport("viewer2")
+    b._haul_mutation("amod", "broadcaster/1", "delete")
+    b._say_haul("viewer2")
     assert "nothing is logged" in said[-1]
-    print("[PASS] !transporting is open to read and moderator-only to change")
+    print("[PASS] !haul is open to read and moderator-only to change")
 
 
 def test_long_cargo_stays_inside_the_chat_limit():
     b, said = _bot()
-    b._transport_mutation("amod", "moderator/1", "update " + "word " * 60)
-    b._say_transport("viewer1")
+    b._haul_mutation("amod", "moderator/1", "update " + "word " * 60)
+    b._say_haul("viewer1")
     assert all(len(line) <= 500 for line in said), [len(x) for x in said]
     assert not said[-1].endswith("...") or len(said[-1]) <= 500
     print("[PASS] long entries are trimmed to the chat limit")
 
 
+def test_legacy_state_file_is_carried_over():
+    """The board shipped for one revision as transporting.json. Renaming the
+    command must not silently blank what the truck is hauling."""
+    here = os.path.dirname(os.path.abspath(haul.__file__))
+    legacy = os.path.join(here, "transporting.json")
+    current = haul.HAUL_PATH
+    backed_up = {}
+    for path in (legacy, current):
+        if os.path.exists(path):
+            backed_up[path] = open(path, encoding="utf-8").read()
+            os.remove(path)
+    try:
+        with open(legacy, "w", encoding="utf-8") as fh:
+            fh.write('{"text": "Produce", "set_by": "amod", "set_at": 1.0}')
+        carried = haul.Cargo()
+        assert carried.text == "Produce" and carried.is_set, carried.text
+
+        # Once haul.json exists it wins, legacy file or not.
+        carried.update("Livestock")
+        carried.save()
+        assert haul.Cargo().text == "Livestock"
+    finally:
+        for path in (legacy, current):
+            if os.path.exists(path):
+                os.remove(path)
+        for path, text in backed_up.items():
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+    print("[PASS] a transporting.json left by the old name is carried over")
+
+
 def main():
-    print("==== reminder and transporting tests ====")
+    print("==== reminder and haul tests ====")
     for fn in (test_parse_delay, test_parse_clock, test_clock_rolls_to_tomorrow,
                test_add_list_cancel, test_pop_due_only_takes_what_is_ready,
                test_pending_cap, test_survives_a_restart,
@@ -341,8 +372,9 @@ def main():
                test_reminders_are_moderator_only,
                test_reminder_reaches_chat_on_time,
                test_reminders_are_held_while_the_bot_is_off,
-               test_transporting_is_readable_by_everyone,
-               test_long_cargo_stays_inside_the_chat_limit):
+               test_haul_is_readable_by_everyone,
+               test_long_cargo_stays_inside_the_chat_limit,
+               test_legacy_state_file_is_carried_over):
         fn()
     print("ALL PASSED \u2714")
     return 0

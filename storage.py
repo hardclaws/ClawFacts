@@ -1,6 +1,6 @@
 """Atomic JSON persistence for the bot's own small state files.
 
-Shared by reminders.py and transporting.py. Written to a temp file and renamed
+Shared by reminders.py and haul.py. Written to a temp file and renamed
 into place, because a half-written JSON file is not a minor annoyance here: a
 corrupt config.json once put the bot into an infinite restart loop. If this
 cannot be written, the feature degrades to in-memory and says so.

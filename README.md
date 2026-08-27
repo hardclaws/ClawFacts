@@ -205,7 +205,7 @@ Quick-and-dirty local alternatives:
 | `!riddle`             | A riddle; the answer is posted ~20s later.                    |
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
-| `!transporting`       | What the truck is hauling right now.                          |
+| `!haul`               | What the truck is hauling right now.                          |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -357,8 +357,8 @@ the Gardner hanging *as* a Trumbull County story is still allowed.
 | `!wyr` | A would-you-rather |
 | `!help` | Lists all of the above, plus who may use them |
 | `!bot off` / `!bot on` / `!bot status` | **Moderators only** — switch every command off and on again |
-| `!transporting` | What the truck is hauling — anyone in chat can ask |
-| `!transporting update <cargo>` / `delete` | **Moderators only** — set or clear it |
+| `!haul` | What the truck is hauling — anyone in chat can ask |
+| `!haul update <cargo>` / `delete` | **Moderators only** — set or clear it |
 | `!reminder <when> <message>` | **Moderators only** — post into chat later |
 | `!reminder list` / `cancel <n>` / `cancel all` | **Moderators only** — see and clear them |
 
@@ -427,27 +427,29 @@ comes back up; one more than an hour overdue is dropped rather than posted out
 of the blue. While the bot is switched off with `!bot off` they are *held*, not
 dropped, and fire when it resumes.
 
-### The transporting board
+### The haul board
 
 One line of state so viewers can ask what the truck is carrying:
 
 ```
-!transporting update Produce        (moderator)
+!haul update Produce        (moderator)
 @viewer2 we are transporting Produce.  (set by @amod, 4 minutes ago)
 
-!transporting delete                (moderator)
-@viewer2 nothing is logged as transporting right now - a moderator can set it
-with !transporting update <what we're hauling>
+!haul delete                (moderator)
+@viewer2 nothing is logged as the haul right now - a moderator can set it
+with !haul update <what we're hauling>
 ```
 
 Reading it is open to everyone — it costs no API call and answers no fact
 engine — and it stays open even for viewers the fact commands are gated
 against. Only moderators can change or clear it, and a viewer who tries gets
-no reply at all. It is stored in `transporting.json`, so what the truck is
-hauling does not reset when the bot is updated.
+no reply at all. `!hauls` is an alias, and `!transporting` / `!transport`
+still work from before the rename. It is stored in `haul.json`, so what the
+truck is hauling does not reset when the bot is updated; a `transporting.json`
+left over from the older name is carried over automatically.
 
 Both state files are gitignored, like `tokens.json` and `config.json`. Keep
-them when you update the bot's files if you want reminders and the cargo board
+them when you update the bot's files if you want reminders and the haul board
 to carry over.
 
 Facts are trimmed to `max_fact_chars` / `max_message_chars` on a **sentence
@@ -885,7 +887,7 @@ appends fake joke comments.
 | `funfacts.py`        | Fact lookup + ranking, spice, rotation, caching.|
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
-| `transporting.py`    | The `!transporting` cargo board.                |
+| `haul.py`            | The `!haul` board.                              |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
@@ -897,7 +899,7 @@ appends fake joke comments.
 | `fixtures/`          | Recorded MediaWiki responses for the replay.    |
 | `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
-| `mock_reminders_test.py` | Offline reminder/cargo tests.               |
+| `mock_reminders_test.py` | Offline reminder and haul tests.          |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
-| `transporting.json`  | The current cargo line; written at runtime.     |
+| `haul.json`          | The current haul; written at runtime.           |
