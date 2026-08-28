@@ -211,7 +211,7 @@ _POOLS = {
 
 ROAD_TEMPLATES = (
     "{opener}, we got {sighting} {where}. {advice}",
-    "{opener} - {condition} out past {where}, and {sighting}. {signoff}",
+    "{opener} - {condition} {where}, and {sighting}. {signoff}",
     "{opener}, {condition}. {advice} {signoff}",
     "{opener}, {sighting} {where}. {advice} {signoff}",
     "{opener}: {condition}, {sighting} {where}. {signoff}",

@@ -70,6 +70,34 @@ def test_no_line_is_left_partially_filled():
     print("[PASS] 20000 lines, none left with an unfilled slot")
 
 
+# Prepositions that may not sit directly in front of a slot whose values
+# already open with one. "out past {where}" produced "out past just past the
+# Wally World" because every WHERE entry is itself a prepositional phrase.
+_PREP = ("at", "past", "off", "up", "back", "in", "on", "out")
+_LEADING = ("at ", "just past ", "off ", "up at ", "back of ",
+            "comin' up on ", "past ", "in ")
+_SLOT_AFTER_WORD = re.compile(r"(\w[\w']*)\s+\{(\w+)\}")
+
+
+def test_no_template_puts_a_preposition_before_a_preposition():
+    """Checked structurally, on the templates rather than on samples.
+
+    A sample-based test only fails if the bad draw happens; this fails the
+    moment any template is written this way, for any value in the pool.
+    """
+    for name, templates in trucker.REGISTERS.items():
+        for template in templates:
+            for m in _SLOT_AFTER_WORD.finditer(template):
+                prev, slot = m.group(1).lower(), m.group(2)
+                if prev not in _PREP:
+                    continue
+                for value in trucker._POOLS[slot]:
+                    assert not value.lower().startswith(_LEADING), (
+                        f"{name}: '{prev} {{{slot}}}' in {template!r} reads "
+                        f"'{prev} {value}'")
+    print("[PASS] no template puts a preposition in front of one")
+
+
 def test_no_lowercase_after_a_full_stop():
     """Pools are lowercase so they read mid-sentence; the filler must
     capitalise any that land at the start of one."""
@@ -270,6 +298,7 @@ def main():
     tests = [
         test_every_slot_has_a_pool,
         test_no_line_is_left_partially_filled,
+        test_no_template_puts_a_preposition_before_a_preposition,
         test_no_lowercase_after_a_full_stop,
         test_lines_fit_one_irc_message,
         test_the_space_is_actually_large,
