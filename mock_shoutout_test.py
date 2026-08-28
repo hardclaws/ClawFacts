@@ -126,6 +126,103 @@ def test_the_game_is_named_only_when_twitch_confirmed_it():
     print("[PASS] the game appears only when a real stream row confirms it")
 
 
+#: Vocabulary that pins a line to one tense. Checked against the pools rather
+#: than against drawn output, so new copy cannot break the test by rewording.
+_PRESENT = ("right now", "currently", "this minute", "as we speak",
+            "very moment", "live on")
+_PAST = ("last ", "were on", "was the last", "logged off", "signed off")
+
+
+def test_the_two_game_pools_disagree_about_tense():
+    """A past-tense line must never claim the channel is live, and a live one
+    must never claim history.
+
+    Enumerating every past-tense phrasing in a draw-level test is brittle -
+    three rounds of new copy broke it three times. Checking the pools directly
+    is not: whatever the wording, the invariant holds.
+    """
+    for theme in shoutout.THEMES:
+        for line in shoutout.PRAISE_LAST[theme]:
+            low = line.lower()
+            for w in _PRESENT:
+                assert w not in low, (theme, "past line says present", w, line)
+            assert any(w in low for w in _PAST), (theme, "not past tense", line)
+        for line in shoutout.PRAISE_LIVE[theme]:
+            low = line.lower()
+            for w in _PAST:
+                assert w not in low, (theme, "live line says past", w, line)
+            assert any(w in low for w in _PRESENT), (theme, "not present", line)
+        for line in shoutout.PRAISE[theme]:
+            low = line.lower()
+            for w in _PRESENT + _PAST:
+                assert w not in low, (theme, "game-free line claims a time",
+                                      w, line)
+    print("[PASS] present-tense and past-tense pools never share vocabulary")
+
+
+#: Ways a shoutout can say somebody arrived. None may appear in a manual one.
+_ARRIVAL_WORDS = (
+    "raid", "came across", "came through", "came over", "rolled in",
+    "dropped in", "showed up", "swung by", "landed", "sprinted",
+    "pulled into", "glided", "joined the", "crashed the", "backed into",
+    "turned in", "caught us", "rolled up", "attacked off", "is here",
+)
+
+
+def test_a_manual_shoutout_never_says_they_raided():
+    """`!so <name>` works on any channel, and most of them did not raid.
+
+    Both paths used the same openers, so a moderator shouting out a friend got
+    a message claiming that friend had just raided in - a small lie posted in
+    public about a real person, and their chat would read it.
+    """
+    for theme in shoutout.THEMES:
+        for _ in range(300):
+            line = shoutout.format_raid("RoadDog_88", 42, "roaddog_88", {},
+                                        theme=theme, is_raid=False)
+            low = line.lower()
+            for word in _ARRIVAL_WORDS:
+                assert word not in low, (theme, word, line)
+            # The size of a raid belongs to the raid, not to the person.
+            assert "42" not in line, line
+            assert line.endswith("twitch.tv/roaddog_88"), line
+            assert len(line) < 450, (len(line), line)
+    print("[PASS] a manual !so never claims they arrived, or reports a count")
+
+
+def test_a_real_raid_still_says_someone_arrived():
+    """The other half: an actual raid must not read like a plain mention."""
+    for theme in shoutout.THEMES:
+        hit = 0
+        for _ in range(200):
+            line = shoutout.format_raid("RoadDog_88", 42, "roaddog_88", {},
+                                        theme=theme, is_raid=True)
+            low = line.lower()
+            if "42" in line or any(w in low for w in _ARRIVAL_WORDS):
+                hit += 1
+        assert hit == 200, (theme, f"{hit}/200 lines conveyed the arrival")
+    # A one-viewer raid says so without "1 viewers", and an unparseable count
+    # falls through to the count-free wording rather than printing the raw tag.
+    for count in (1, "nope", None):
+        for theme in shoutout.THEMES:
+            line = shoutout.format_raid("RoadDog_88", count, "roaddog_88", {},
+                                        theme=theme)
+            assert "1 viewers" not in line, line
+            assert str(count) not in line or count == 1, line
+            assert re.search(r"\bwith \d", line) is None, line
+    print("[PASS] a real raid reads like an arrival, and the count is honest")
+
+
+def test_a_manual_so_through_the_bot_is_not_called_a_raid():
+    for arg in ("hardclaws", "@hardclaws"):
+        b, said = _bot()
+        b._reply_so("amod", MOD, arg)
+        low = said[0].lower()
+        for word in _ARRIVAL_WORDS:
+            assert word not in low, (arg, word, said[0])
+    print("[PASS] !so <name> from a moderator never says the channel raided")
+
+
 def test_last_seen_is_claimed_only_when_twitch_supplied_it():
     """'Last seen playing X' is sourced, from Get Channel Information.
 
@@ -142,15 +239,16 @@ def test_last_seen_is_claimed_only_when_twitch_supplied_it():
         for _ in range(200):
             line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
                                         theme=theme)
-            for phrase in ("last seen", "was playing", "used to"):
-                assert phrase not in line.lower(), (theme, line)
+            low = line.lower()
+            for phrase in _PRESENT + _PAST + ("was playing", "used to"):
+                assert phrase not in low, (theme, phrase, line)
 
     # Live beats last-played, and the stale category must not leak through.
     line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
                                 theme="fortnite",
                                 raider_stream={"game_name": "Fortnite"},
                                 last_game="Minecraft")
-    assert "last seen" not in line.lower(), line
+    assert not any(p in line.lower() for p in _PAST), line
     assert "Fortnite" in line and "Minecraft" not in line, line
 
     # Offline with a sourced category -> past tense, game named, every time.
@@ -159,14 +257,17 @@ def test_last_seen_is_claimed_only_when_twitch_supplied_it():
         for _ in range(20):
             line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
                                         theme=theme, last_game="Fortnite")
-            named += ("last seen" in line.lower() and "Fortnite" in line)
+            low = line.lower()
+            named += ("fortnite" in low
+                      and not any(p in low for p in _PRESENT))
     total = 20 * len(shoutout.THEMES)
     assert named == total, f"every line must carry the claim ({named}/{total})"
 
     # An empty category is not a claim.
     line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
                                 theme="fortnite", last_game="")
-    assert "last seen" not in line.lower(), line
+    low = line.lower()
+    assert not any(p in low for p in _PAST + _PRESENT), line
     print("[PASS] 'last seen playing' appears only with a sourced category")
 
 
@@ -248,10 +349,14 @@ def test_a_large_sweep_is_clean():
         for _ in range(1500):
             stream = random.choice(streams)
             last = random.choice(lasts)
+            raid = random.choice((True, False))
             line = shoutout.format_raid(
                 "DaniLikesDonuts", random.choice(counts), "danilikesdonuts",
                 random.choice(profiles), theme=theme, raider_stream=stream,
-                last_game=last)
+                last_game=last, is_raid=raid)
+            if not raid:
+                for word in _ARRIVAL_WORDS:
+                    assert word not in line.lower(), (theme, word, line)
             low = line.lower()
             live_game = (stream or {}).get("game_name")
             worst = max(worst, len(line))
@@ -261,14 +366,17 @@ def test_a_large_sweep_is_clean():
             assert low.count("show them some love") == 1, line
             assert line.endswith("twitch.tv/danilikesdonuts"), line
             # The tense has to match the evidence.
+            past_hit = any(w in low for w in _PAST)
+            live_hit = any(w in low for w in _PRESENT)
             if live_game:
-                assert "last seen" not in low, line
+                assert live_hit and not past_hit, line
                 assert live_game.lower() in low, line
             elif last:
-                assert "last seen" in low, line
+                assert past_hit and not live_hit, line
+                assert last.lower() in low, line
             else:
-                assert "last seen" not in low, line
-                for w in ("fortnite", "zwift", "right now"):
+                assert not past_hit and not live_hit, line
+                for w in ("fortnite", "zwift"):
                     assert w not in low, line
     assert worst < 450, worst
     print(f"[PASS] 6,000 mixed draws clean; longest line {worst} characters")
@@ -459,6 +567,10 @@ def main():
         test_an_unparseable_count_says_nothing_about_numbers,
         test_only_real_twitch_data_is_added,
         test_the_game_is_named_only_when_twitch_confirmed_it,
+        test_the_two_game_pools_disagree_about_tense,
+        test_a_manual_shoutout_never_says_they_raided,
+        test_a_real_raid_still_says_someone_arrived,
+        test_a_manual_so_through_the_bot_is_not_called_a_raid,
         test_last_seen_is_claimed_only_when_twitch_supplied_it,
         test_no_clause_repeats_another,
         test_themes_are_chosen_from_the_real_category,

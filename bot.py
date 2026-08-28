@@ -1048,7 +1048,8 @@ class TwitchBot:
             return
         self._jobs.put((name, login or name.lower(), "", "raid", count))
 
-    def _say_shoutout(self, name: str, login: str, count) -> None:
+    def _say_shoutout(self, name: str, login: str, count,
+                      is_raid: bool = True) -> None:
         """Post one shoutout, looking the channel up if we can.
 
         The lookup is optional. A raid is the worst moment to be waiting on a
@@ -1084,7 +1085,7 @@ class TwitchBot:
                     self._log(f"[so] last category lookup failed: {exc!r}")
             line = shoutout_mod.format_raid(
                 name, count, login, profile, theme=self._so_theme(helix),
-                raider_stream=stream, last_game=last_game)
+                raider_stream=stream, last_game=last_game, is_raid=is_raid)
             if not line:
                 self._log("[so] nothing trustworthy to say; skipped")
                 return
@@ -1245,7 +1246,9 @@ class TwitchBot:
         # dead; the name has to be clean too, or the sentence reads "shoutout
         # to twitch.tv/hardclaws" because the moderator pasted a link.
         login = access.clean_login(query)
-        self._say_shoutout(login or query, login, "")
+        # is_raid=False: they almost certainly did not raid, and a message
+        # saying they did would be a small lie posted about a real person.
+        self._say_shoutout(login or query, login, "", is_raid=False)
 
     def _reply_cb(self, nick: str, badges: str = "") -> None:
         """One line of CB chatter, on demand.

@@ -1,32 +1,33 @@
-"""Shoutouts: what the bot says when another channel raids in.
+"""Shoutouts: what the bot says when another channel raids in, and when a
+moderator shouts someone out by hand.
 
-Every fact in the message is read off something real. The raider's display name
-and viewer count come from the raid notice Twitch sends. Affiliate/partner
-status, follower count and what they are streaming right now come from Helix.
-Nothing is invented about the person - a shoutout that makes something up is
-worse than no shoutout, because a real channel will see it and their chat will
-read it.
+Every fact is read off something real. The raider's display name and viewer
+count come from the raid notice Twitch sends. Affiliate/partner status and
+follower count come from Helix. The game is named only from an endpoint that
+can actually see it, and the tense says which one that was.
 
-One limit worth stating plainly, because it shapes the wording: Twitch has no
-"last seen playing" for an arbitrary channel. Get Streams answers for a channel
-that is live *right now* and says nothing otherwise. So the game is only ever
-mentioned as present tense, and only when Twitch confirmed it. A shoutout that
-guessed at what someone was streaming would be a claim about a real person that
-nobody can check.
+Two rules the wording is built around:
+
+* A manual shoutout must never say the person raided. `!so <name>` works on
+  any channel, and most of them did not raid - claiming they did is a small
+  lie posted in public about a real person.
+* The praise has to be about *them*, not filler that would fit anyone. The
+  ask lives in one call to action at the end, so no praise line needs to
+  repeat "go give them a follow".
 
 Messages are assembled from whole sentences rather than by filling slots inside
-one sentence. Two separate bugs came from the other approach: a template that
-hardcoded "a" in front of a slot whose values carried their own article, and a
-second occurrence of a slot that read correctly for mass nouns and wrongly for
-count nouns. Independent clauses cannot produce either.
+one sentence. Two bugs came from the other approach (a hardcoded article before
+a slot whose values carried their own, and a slot used twice that read right
+for mass nouns and wrong for count nouns), and five more came from clauses that
+were each fine alone and collided when joined.
 """
 
 import random
 import re
 
 __all__ = ["format_raid", "url_for", "theme_for_game", "LABEL", "THEMES",
-           "OPENERS", "PRAISE", "PRAISE_LIVE", "PRAISE_LAST", "RAID_PLURAL",
-           "RAID_ONE"]
+           "OPENERS_RAID", "OPENERS_MANUAL", "PRAISE", "PRAISE_LIVE",
+           "PRAISE_LAST", "RAID_PLURAL", "RAID_ONE", "CTA"]
 
 LABEL = "SO"
 
@@ -43,53 +44,92 @@ GAME_THEMES = (
     ("fortnite", ("fortnite",)),
 )
 
-#: Openers: the greeting. Owns the raider's name, says nothing about the raid's
-#: size so it works for 1 viewer or 400.
-OPENERS = {
+#: Openers for an actual raid: they describe somebody arriving.
+OPENERS_RAID = {
     "trucking": (
-        "🙌 Huge shoutout to {name}!",
         "🚛 {name} just pulled into the channel!",
         "📣 Breaker one-nine, {name} is on the road with us!",
         "🚚 {name} rolled in and brought the convoy!",
-        "🙌 Big shoutout to {name}!",
-        "📣 Hammer lane for {name}, they just raided in!",
-        "🚛 Shoutout to {name}, good to see them rolling with us!",
+        "📣 Hammer lane for {name}, they just swung off the interstate!",
         "🙌 {name} caught us on the flip side!",
+        "🚛 {name} just backed into the lot!",
+        "📣 10-4 {name}, we see you rolling through!",
+        "🚚 Good buddy {name} just turned in off the highway!",
     ),
     "zwift": (
-        "🙌 Huge shoutout to {name}!",
         "🚴 {name} just rolled into the pack!",
-        "🏃 {name} sprinted in with a raid!",
-        "📣 Shoutout to {name}, welcome to the group ride!",
-        "🚴 {name} dropped in and the whole peloton noticed!",
-        "💨 {name} attacked off the front with a raid!",
-        "🏃 Big welcome to {name}!",
-        "🙌 Shoutout to {name}, thanks for swinging by!",
+        "🏃 {name} sprinted in!",
+        "📣 {name} just joined the group ride!",
+        "🚴 {name} dropped in and the peloton noticed!",
+        "💨 {name} attacked off the front!",
+        "🏃 {name} just came through the timing mat!",
+        "🚴 {name} tucked in behind us!",
+        "📣 {name} just rolled up to the front of the bunch!",
     ),
     "fortnite": (
-        "🙌 Huge shoutout to {name}!",
-        "🎮 {name} just dropped in with a raid!",
-        "🪂 Shoutout to {name}, they landed hot!",
+        "🎮 {name} just dropped in!",
+        "🪂 {name} landed hot!",
         "🎮 {name} rotated over with the squad!",
-        "📣 {name} just claimed the lobby with a raid!",
-        "🙌 Big shoutout to {name}!",
-        "🪂 Welcome in {name}, thanks for the drop!",
-        "🙌 {name} just squad-joined with a raid!",
+        "📣 {name} just claimed the lobby!",
+        "🪂 {name} just glided in!",
+        "🎮 {name} just joined the squad!",
+        "📣 {name} crashed the lobby!",
+        "🪂 {name} dropped straight in here!",
     ),
     "generic": (
-        "🙌 Huge shoutout to {name}!",
-        "📣 Shoutout to {name} for the raid!",
-        "🙌 Big welcome to {name}!",
-        "📣 {name} just raided in, welcome!",
-        "🙌 Thanks for the raid, {name}!",
-        "📣 {name} swung by with a raid!",
+        "🙌 {name} just came through!",
+        "📣 {name} just showed up!",
+        "🙌 Look who it is - {name}!",
+        "📣 {name} just landed in here!",
+        "🙌 {name} just swung by!",
+        "📣 Everyone, {name} is here!",
     ),
 }
 
-#: The raid itself. Split by shape so a count is never edited out of a
+#: Openers for a moderator shouting someone out by hand. None of these claim
+#: the person arrived, because most of the time they did not.
+OPENERS_MANUAL = {
+    "trucking": (
+        "📣 Chat, go meet {name} - worth the stop.",
+        "🚛 Everybody go say hi to {name}.",
+        "🚛 Go find {name} - good driver, better company.",
+        "📣 {name} is the kind of channel you leave running all shift.",
+        "🚛 Give {name} a look next time you're parked up.",
+        "🙌 Put {name} on the list, driver to driver.",
+        "🙌 Shoutout to {name} - 10-10 on the side.",
+    ),
+    "zwift": (
+        "📣 Chat, go meet {name} - worth the stop.",
+        "🚴 Everybody go say hi to {name}.",
+        "🚴 Go find {name} - good legs, better company.",
+        "📣 {name} is the kind of channel you leave running all ride.",
+        "🏃 Give {name} a look next time you're on the trainer.",
+        "🙌 Put {name} on the list, rider to rider.",
+        "🙌 Shoutout to {name} - worth every watt.",
+    ),
+    "fortnite": (
+        "📣 Chat, go meet {name} - worth the drop.",
+        "🎮 Everybody go say hi to {name}.",
+        "🪂 Go find {name} - good aim, better company.",
+        "📣 {name} is the kind of channel you leave running all lobby.",
+        "🎮 Give {name} a look next time you're short a squad.",
+        "🙌 Put {name} on the list, squad to squad.",
+        "🙌 Shoutout to {name} - they'll carry you.",
+    ),
+    "generic": (
+        "📣 Chat, go meet {name} - worth a look.",
+        "🙌 Everybody go say hi to {name}.",
+        "📣 Go find {name} - good stream, better company.",
+        "📣 {name} is the kind of channel you leave running all evening.",
+        "🙌 Give {name} a look when you've got a minute.",
+        "🙌 Put {name} on the list while you're thinking about it.",
+        "🙌 Shoutout to {name}.",
+    ),
+}
+
+#: The size of the raid. Split by shape so a count is never edited out of a
 #: template by string surgery - that is how "dropped 1 viewers" happened.
-# None of these says "raid" - half the openers already do, and two in a row
-# read as a copy-paste error rather than a sentence.
+#: Used only for real raids; a manual shoutout has no count to report.
 RAID_PLURAL = (
     "They brought {count} viewers over with them.",
     "{count} of you came across.",
@@ -103,98 +143,117 @@ RAID_ONE = (
 #: The count was missing or unparseable, so nothing is said about it.
 RAID_UNKNOWN: tuple[str, ...] = ()
 
-#: Praise, split in two: lines that stand alone, and lines that carry the
-#: raider's current game. Only the second set mentions a game, and only when
-#: Helix confirmed they are live this minute.
+#: Praise. Deliberately carries no call to action - the ask is the CTA at the
+#: end, and a line that also says "go give them a follow" makes the message
+#: ask twice and reads like boilerplate. These describe the person instead.
 PRAISE = {
     "trucking": (
-        "They are an absolute gem of a creator, go give them a follow.",
-        "Proper road company. Stick around and say hello.",
-        "They run a great channel and are well worth a follow.",
-        "One of the good ones. Go say hi.",
-        "Solid channel and a solid human.",
-        "Good people to have in the convoy.",
+        "Clean logbook, clean chat, and no drama at the chicken coop.",
+        "A thousand miles of good stories and a playlist to match.",
+        "The kind of driver who pulls over to help and never mentions it.",
+        "Ten-ten on the side and worth every minute of it.",
+        "They'll run all night and never once let it get dull.",
+        "Good rig, good humour, and they don't brag about the miles.",
+        "Proper road company, the sort you'd share a hundred-mile coffee with.",
+        "They know every truck stop worth stopping at and they'll tell you.",
     ),
     "zwift": (
-        "They are an absolute gem of a creator, go give them a follow.",
-        "Great company on a long ride. Go say hello.",
-        "They run a brilliant channel and are well worth a follow.",
-        "Good legs and good vibes.",
-        "One to keep an eye on. Stick around and say hi.",
-        "Exactly the sort of channel this community should follow.",
+        "The sort of rider who waits at the top for the rest of the group.",
+        "They'll talk you up the climb and never let you bonk alone.",
+        "Proper watts and none of the ego that usually comes with them.",
+        "They'll sit on your wheel all day and still ask how you're going.",
+        "Good legs, good chat, and no sprint-finish nonsense.",
+        "The kind of company that makes two hours feel like forty minutes.",
+        "They've got the suffering sorted and the jokes sorted too.",
+        "Happy to ride at your pace, which is rarer than it should be.",
     ),
     "fortnite": (
-        "They are an absolute gem of a creator, go give them a follow.",
-        "Cracked channel and good people. Go say hello.",
-        "They run a great stream and are well worth a follow.",
-        "One of the good ones. Stick around and say hi.",
-        "Solid squad material.",
-        "Well worth a follow if you like a good lobby.",
+        "Crankin' 90s and never once toxic about it.",
+        "Shares their mats and doesn't rage at the storm.",
+        "They'll carry the lobby and still let you take the win.",
+        "Good aim, better humour, zero bush-camping nonsense.",
+        "They play like it's actually fun, which is rarer than it sounds.",
+        "The kind of channel where the chat is half the entertainment.",
+        "Squad-worthy, and they'll tell you straight when you earned it.",
+        "No tilted nonsense, just someone who's good and knows it's a game.",
     ),
     "generic": (
-        "They are an absolute gem of a creator, go give them a follow.",
-        "Great channel and great people. Go say hello.",
-        "Well worth a follow, and good company besides.",
-        "One of the good ones. Stick around and say hi.",
-        "They run a great channel and are well worth a follow.",
-        "Good people. Go say hello.",
+        "They put more into an hour of stream than most put into a week.",
+        "Genuinely lovely channel and a genuinely lovely person.",
+        "The kind of stream you open for twenty minutes and close three hours "
+        "later.",
+        "They've got the rare trick of making a chat feel like a room full of "
+        "mates.",
+        "Consistently good, which is harder than it sounds.",
+        "Funny without trying too hard, and kind without making a thing of it.",
+        "They're the reason the follow button exists.",
+        "Someone who streams because they like it, and you can tell.",
     ),
 }
 
-#: Same praise, but the raider is live right now and Twitch said what on.
-#: Present tense only: "last seen playing" would be a claim nobody can check.
+#: The raider is live this minute, per Get Streams, whose game_name is "the
+#: category or game being streamed". Present tense only.
 PRAISE_LIVE = {
     "trucking": (
-        "They are an absolute gem of a creator and are live right now on "
-        "{game}.",
-        "Proper road company, and currently out on {game}.",
-        "They are on {game} right now, so go catch them after this.",
+        "They're out on {game} right now, so go catch them before it ends.",
+        "Currently on {game}, mid-run.",
+        "They're on {game} this minute.",
+        "Live on {game} as we speak, engine still warm.",
     ),
     "zwift": (
-        "They are an absolute gem of a creator and are live right now on "
-        "{game}.",
-        "Great company on a long ride, and currently out on {game}.",
-        "They are on {game} right now, so go catch them after this.",
+        "They're out on {game} right now, so go catch them before the ride "
+        "ends.",
+        "Currently on {game}, mid-effort.",
+        "They're grinding out {game} right this minute.",
+        "Live on {game}, wheels turning.",
     ),
     "fortnite": (
-        "They are an absolute gem of a creator and are live right now playing "
-        "{game}.",
-        "Cracked channel, and they are on {game} right now.",
-        "They are playing {game} right now, so go catch them after this.",
+        "They're live on {game} right now, so go catch them before the match "
+        "ends.",
+        "Currently on {game}, mid-lobby.",
+        "They're playing {game} this minute.",
+        "Live on {game} and the squad's already stacked.",
     ),
     "generic": (
-        "They are an absolute gem of a creator and are live right now on "
-        "{game}.",
-        "They are live right now playing {game}.",
-        "Currently on {game}, so go catch them after this.",
+        "They're live on {game} right now, so go catch them while they're on.",
+        "Currently on {game}.",
+        "On {game} right now if you fancy it.",
+        "Live on {game} at this very moment.",
     ),
 }
 
-#: The raider is offline, but Get Channel Information reported the category
-#: they were last on. Twitch documents that field as "the game that the
-#: broadcaster is playing or last played", so "last seen playing" is a sourced
-#: claim here and not a guess. Only used when Get Streams said they are not
-#: live, which is what makes the past tense correct rather than stale.
+#: The raider is offline, but Get Channel Information reported a category.
+#: Twitch documents that field as "the game that the broadcaster is playing or
+#: last played", so "last seen" is sourced here and not a guess. Used only when
+#: Get Streams said they are not live, which is what makes the past tense
+#: correct rather than stale.
 PRAISE_LAST = {
     "trucking": (
-        "They are an absolute gem of a creator, last seen playing {game}.",
-        "Proper road company, and last seen out on {game}.",
-        "Last seen on {game}, so go catch them when they are back.",
+        "Last seen out on {game}, so go catch them when they're back on the "
+        "road.",
+        "Last time we looked, they were on {game}.",
+        "They were on {game} when we last checked.",
+        "Last spotted out on {game}.",
     ),
     "zwift": (
-        "They are an absolute gem of a creator, last seen playing {game}.",
-        "Great company on a long ride, and last seen out on {game}.",
-        "Last seen on {game}, so go catch them when they are back.",
+        "Last seen out on {game}, so go catch them when they're back in the "
+        "saddle.",
+        "Their last session was {game}, as far as we can tell.",
+        "They were on {game} the last time anyone looked.",
+        "Off the bike at the moment - {game} was their last one.",
     ),
     "fortnite": (
-        "They are an absolute gem of a creator, last seen playing {game}.",
-        "Cracked channel, and last seen playing {game}.",
-        "Last seen on {game}, so go catch them when they are back.",
+        "Last seen playing {game}, so go catch them when they're back in the "
+        "lobby.",
+        "Their last lobby was {game}.",
+        "They were on {game} before they logged off.",
+        "{game} was the last thing they queued.",
     ),
     "generic": (
-        "They are an absolute gem of a creator, last seen playing {game}.",
-        "Last seen playing {game}, so go catch them when they are back.",
-        "Last seen out on {game}. Go say hello.",
+        "Last seen playing {game}, so go catch them when they're back on.",
+        "Their last stream was {game}.",
+        "They were on {game} before they signed off.",
+        "{game} was the last thing they were playing.",
     ),
 }
 
@@ -205,7 +264,7 @@ def theme_for_game(category: str | None) -> str:
     """Map a Twitch category to a shoutout flavour.
 
     Unknown, empty or missing categories all land in "generic" rather than
-    raising: a raid should never fail because of a game name.
+    raising: a shoutout should never fail because of a game name.
     """
     text = (category or "").strip().lower()
     if not text:
@@ -267,9 +326,14 @@ def _raider_game(stream: dict | None) -> str:
 
 def format_raid(display_name: str, viewer_count=None, login: str = "",
                 profile: dict | None = None, theme: str = "generic",
-                raider_stream: dict | None = None,
-                last_game: str = "") -> str:
+                raider_stream: dict | None = None, last_game: str = "",
+                is_raid: bool = True) -> str:
     """One shoutout line, or '' if there is nothing trustworthy to say.
+
+    ``is_raid`` decides whether the message may describe someone arriving. A
+    moderator's `!so <name>` passes False, because most channels shouted out by
+    hand did not raid and saying they did would be a small public lie. It also
+    suppresses the viewer count, which belongs to the raid and not the person.
 
     ``viewer_count`` may be an int or the raw string off the IRC tag. Anything
     unparseable falls through to the count-free wording rather than printed
@@ -299,17 +363,16 @@ def format_raid(display_name: str, viewer_count=None, login: str = "",
 
     theme = theme if theme in THEMES else "generic"
 
-    try:
-        count = int(str(viewer_count).strip())
-    except (TypeError, ValueError):
-        count = None
-
-    if count is None:
-        raid = random.choice(RAID_UNKNOWN) if RAID_UNKNOWN else ""
-    elif count == 1:
-        raid = random.choice(RAID_ONE)
-    else:
-        raid = random.choice(RAID_PLURAL).format(count=f"{count:,}")
+    raid = ""
+    if is_raid:
+        try:
+            count = int(str(viewer_count).strip())
+        except (TypeError, ValueError):
+            count = None
+        if count == 1:
+            raid = random.choice(RAID_ONE)
+        elif count is not None:
+            raid = random.choice(RAID_PLURAL).format(count=f"{count:,}")
 
     game = _raider_game(raider_stream)
     last = " ".join(str(last_game or "").split())
@@ -322,8 +385,9 @@ def format_raid(display_name: str, viewer_count=None, login: str = "",
     else:
         praise = random.choice(PRAISE[theme])
 
+    openers = OPENERS_RAID if is_raid else OPENERS_MANUAL
     parts = [
-        random.choice(OPENERS[theme]).format(name=name),
+        random.choice(openers[theme]).format(name=name),
         raid,
         praise,
         profile_tail(profile or {}),

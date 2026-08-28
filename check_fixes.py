@@ -81,31 +81,50 @@ def main() -> int:
         return True
 
     def _last_seen_is_sourced():
-        """'Last seen playing' must come from Get Channel Information.
+        """The two game claims must come from different endpoints, and the
+        tense must say which. Checked on the pools rather than by looking for
+        one phrase, so rewording the copy cannot silently break it.
 
-        That endpoint's game_name is documented as the game the broadcaster
-        "is playing or last played"; Get Streams answers only for channels
-        live right now. Being live must also win, so a stale category never
-        prints next to a current one.
+        Get Channel Information's game_name is documented as the game the
+        broadcaster "is playing or last played"; Get Streams answers only for
+        channels live right now and returns an empty data array otherwise.
         """
         import shoutout as _so
 
+        present = ("right now", "currently", "this minute", "as we speak",
+                   "very moment", "live on")
+        past = ("last ", "were on", "was the last", "logged off",
+                "signed off")
         for theme in _so.THEMES:
-            for _ in range(50):
-                last = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
-                                       theme=theme, last_game="Fortnite")
-                if "last seen" not in last.lower() or "Fortnite" not in last:
+            for line in _so.PRAISE_LAST[theme]:
+                low = line.lower()
+                if any(w in low for w in present):
                     return False
-                live = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
-                                       theme=theme,
-                                       raider_stream={"game_name": "Fortnite"},
-                                       last_game="Minecraft")
-                if "last seen" in live.lower() or "Minecraft" in live:
+                if not any(w in low for w in past):
                     return False
-                none = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
-                                       theme=theme)
-                if "last seen" in none.lower():
+            for line in _so.PRAISE_LIVE[theme]:
+                low = line.lower()
+                if any(w in low for w in past):
                     return False
+                if not any(w in low for w in present):
+                    return False
+
+        for theme in _so.THEMES:
+            last = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                   theme=theme, last_game="Fortnite").lower()
+            if "fortnite" not in last or any(w in last for w in present):
+                return False
+            live = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                   theme=theme,
+                                   raider_stream={"game_name": "Fortnite"},
+                                   last_game="Minecraft").lower()
+            # Being live wins: no stale category alongside a current one.
+            if "minecraft" in live or any(w in live for w in past):
+                return False
+            none = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                   theme=theme).lower()
+            if any(w in none for w in past + present):
+                return False
         return True
 
     checks = [

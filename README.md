@@ -1155,24 +1155,44 @@ When the stream gets raided the bot posts a shoutout on its own, with nothing
 to configure:
 
 ```
-SO | 🚛 Shoutout to DaniLikesDonuts, good to see them rolling with us! They
-brought 42 viewers over with them. They are an absolute gem of a creator, go
-give them a follow. Twitch Affiliate, 1,284 followers. Go show them some love
-at twitch.tv/danilikesdonuts
+SO | 📣 Hammer lane for DaniLikesDonuts, they just swung off the interstate!
+42 of you came across. Live on Just Chatting as we speak, engine still warm.
+Twitch Affiliate, 1,284 followers. Go show them some love at
+twitch.tv/danilikesdonuts
 ```
 
 The wording follows whatever this channel is streaming, so a truck night gets
 trucker talk and a Zwift night gets cycling talk:
 
 ```
-SO | 🚴 NOTTaitch just rolled into the pack! They came across on their own.
-Great company on a long ride. Go say hello. Go show them some love at
-twitch.tv/nottaitch
+SO | 🚴 NOTTaitch dropped in and the peloton noticed! They made the trip solo.
+Proper watts and none of the ego that usually comes with them. Go show them
+some love at twitch.tv/nottaitch
 
-SO | 🎮 Trader rotated over with the squad! That is 7 more people in here.
-Cracked channel and good people. Go say hello. Go show them some love at
-twitch.tv/trader
+SO | 🪂 Trader landed hot! They brought 7 viewers over with them. Their last
+lobby was Fortnite. Go show them some love at twitch.tv/trader
 ```
+
+**A raid and a hand-picked shoutout are worded differently.** `!so <name>`
+works on any channel, and most of them did not raid — so a manual shoutout
+never says the person arrived, and never reports a viewer count, because the
+size of a raid belongs to the raid and not to the person:
+
+```
+SO | 🙌 Put CadenceKate on the list, rider to rider. They were on Zwift the
+last time anyone looked. Twitch Partner, 31,412 followers. Go show them some
+love at twitch.tv/cadencekate
+
+SO | 🎮 Give LlamaLover a look next time you're short a squad. Squad-worthy,
+and they'll tell you straight when you earned it. Go show them some love at
+twitch.tv/llamalover
+```
+
+There are 30 raid openers, 27 manual ones, 32 praise lines, and 16 each of the
+present-tense and past-tense game lines — 121 distinct pieces of copy and
+1,888 combinations before names and counts go in. The praise lines carry no
+call to action on purpose: the ask is the one line at the end, and a message
+that asks twice reads like boilerplate.
 
 `shoutout_theme` picks the flavour: `"auto"` (default) reads the channel's
 current category from Helix, or force one of `"trucking"`, `"zwift"`,
@@ -1207,14 +1227,17 @@ publishes a *last* category, and it needs no scope, so the token the bot
 already holds can read another channel's.
 
 ```
-SO | 🙌 Big shoutout to Trader! They brought 42 viewers over with them. They
-are an absolute gem of a creator and are live right now playing Fortnite. Go
-show them some love at twitch.tv/trader
+SO | 🎮 {name} joined the squad! ... They're live on Fortnite right now, so go
+catch them before the match ends.
 
-SO | 🎮 Trader just dropped in with a raid! That is 42 more people in here.
-They are an absolute gem of a creator, last seen playing Fortnite. Go show
-them some love at twitch.tv/trader
+SO | 🪂 Trader landed hot! ... Their last lobby was Fortnite.
 ```
+
+`mock_shoutout_test.py` checks the two pools against each other rather than
+looking for one phrase: no past-tense line may contain "right now",
+"currently", "this minute", "as we speak" or "live on", and no present-tense
+line may contain "last", "were on", "logged off" or "signed off". Rewording
+the copy cannot quietly break that.
 
 Being live wins when both are available: the present tense is the stronger
 fact, and the stale category from Get Channel Information is dropped rather
