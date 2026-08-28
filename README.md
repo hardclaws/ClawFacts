@@ -1207,6 +1207,51 @@ fails if any of them is ever added to a pool.
   python3 mock_extras_test.py
   ```
 
+## Troubleshooting: `HTTPError 401` in the access log
+
+```
+[access] helix users lookup failed for 'someone': <HTTPError 401: 'Unauthorized'>
+[access] funfact denied for someone: could not verify your follow status (tier=unknown)
+```
+
+A 401 means **Twitch rejected the bot's access token**. It is not about the
+viewer, and it is not about the name in the log line. It also explains why it
+seems intermittent: the token is valid for about four hours, so everything
+works after a login or a restart and then starts failing.
+
+Two independent causes, and the first is the common one:
+
+**1. There is no `client_secret` in config.json.** A Confidential app (the Dev
+Console default) cannot renew a token without one, so when the four hours run
+out the login simply dies and stays dead. The bot says so at startup:
+
+```
+[auth] no client_secret in config.json - if your app is a Confidential client
+the login expires in about 4 hours and will need 'python3 bot.py --login'
+again. Set the app's client type to Public, or add the secret.
+```
+
+Fix it once: Dev Console → your app → **New Secret**, put it in config.json as
+`"client_secret": "..."`, then run `python3 bot.py --login`. Alternatively set
+the app's **client type to Public**, which needs no secret. Either way the bot
+then renews itself indefinitely.
+
+**2. The token expired before the keeper got to it.** Fixed in
+`auth.REFRESH_MARGIN` (one hour). The token keeper wakes every 30 minutes but
+the old code only renewed within 120 seconds of expiry — so the keeper kept
+finding a token that was still good for another half hour, reusing it, and
+never refreshing at all. The token was only renewed *after* it had died, which
+produced up to 30 minutes of 401s every four hours **even with a valid
+secret**.
+
+Either way, a 401 now recovers on its own: the client asks for a fresh token
+and retries the request once. Before that, a single 401 was terminal — it was
+logged and every follow check stayed dead until the process was restarted.
+
+If it still fails, the log now names the cause rather than leaving you to
+guess, and chat is told the bot's login expired rather than being accused of
+not following.
+
 ## Troubleshooting: "the facts aren't adult"
 
 If `!funfact` returns plain, dry facts, the LLM writer isn't running. Check:

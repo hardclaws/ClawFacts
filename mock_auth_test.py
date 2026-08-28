@@ -148,9 +148,65 @@ def test_confidential_refresh_needs_secret():
           "not as a generic failure")
 
 
+def test_the_refresh_margin_outlives_the_keeper_interval():
+    """The bug behind the intermittent 401s.
+
+    The token keeper wakes every 30 minutes (bot._token_keeper), but the
+    refresh only fired within 120s of expiry. So the keeper kept finding a
+    token that was still good for another half hour, reusing it, and never
+    refreshing at all - the token was renewed only after it had already died,
+    and Helix answered 401 for up to 30 minutes every cycle.
+    """
+    assert auth.REFRESH_MARGIN > 1800, auth.REFRESH_MARGIN
+
+    calls = {"validate": 0, "refresh": 0}
+    state = {"access": "old", "expires_at": time.time() + 1800}
+    orig = (auth.load_tokens, auth.validate_token, auth.refresh_access_token,
+            auth._store_tokens)
+    try:
+        auth.load_tokens = lambda: {
+            "access_token": state["access"], "refresh_token": "rt",
+            "expires_at": state["expires_at"], "client_id": "cid"}
+
+        def validate(token):
+            calls["validate"] += 1
+        auth.validate_token = validate
+
+        def refresh(cid, rt, secret):
+            calls["refresh"] += 1
+            return {"access_token": "new", "refresh_token": "rt",
+                    "expires_in": 14400}
+        auth.refresh_access_token = refresh
+
+        def store(tok, cid):
+            state["access"] = tok["access_token"]
+            state["expires_at"] = time.time() + 14400
+            return "oauth:" + tok["access_token"]
+        auth._store_tokens = store
+
+        # 30 minutes left: it would already be expired by the next wake-up,
+        # so it must be renewed now rather than reused.
+        auth.refresh_if_possible({"client_id": "cid", "client_secret": "s"})
+        assert calls["refresh"] == 1, calls
+        assert calls["validate"] == 0, "must not have reused the old token"
+
+        # Plenty of life left: still reused, not churned on every wake-up.
+        calls["refresh"] = calls["validate"] = 0
+        state["expires_at"] = time.time() + 7200
+        auth.refresh_if_possible({"client_id": "cid", "client_secret": "s"})
+        assert calls["refresh"] == 0, calls
+        assert calls["validate"] == 1, calls
+    finally:
+        (auth.load_tokens, auth.validate_token, auth.refresh_access_token,
+         auth._store_tokens) = orig
+    print(f"[PASS] refresh margin {auth.REFRESH_MARGIN:.0f}s exceeds the "
+          f"1800s keeper interval, so renewal happens before expiry")
+
+
 def main():
     test_scopes_all_exist()
     test_confidential_refresh_needs_secret()
+    test_the_refresh_margin_outlives_the_keeper_interval()
     tmp = tempfile.mkdtemp()
     tokens_path = os.path.join(tmp, "tokens.json")
 

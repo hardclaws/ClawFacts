@@ -139,6 +139,12 @@ class Helix:
         self._ids = {}       # login -> user id (ids never change)
         self._follows = {}   # user id -> (expires_at, followed_at or None)
         self.errors = 0
+        # 401s seen. Tracked so a denial can say "my login expired" instead of
+        # the generic "could not verify your follow status".
+        self.unauthorized = 0
+        # Set by the bot to its token refresher. A 401 asks for a new token and
+        # retries once; with no callback the behaviour is exactly as before.
+        self.on_unauthorized = None
         # None = not probed yet, True/False = whether this token is actually
         # allowed to read the follower list. See self_test().
         self.authorised = None
@@ -146,6 +152,28 @@ class Helix:
     @property
     def usable(self) -> bool:
         return bool(self.client_id and self.token and self.broadcaster_id)
+
+    def _fetch(self, path: str, params: dict):
+        """GET a Helix path, refreshing and retrying once on a 401.
+
+        Twitch's own guidance is to react to a 401 rather than refresh purely
+        on a schedule: a token can die early - re-authorised elsewhere, a
+        rotated secret, or simply the keeper not having woken yet. Before this
+        the first 401 was terminal: user_id() logged it and returned None, and
+        every follow check stayed dead until the process was restarted.
+        """
+        try:
+            return _get(f"{HELIX}{path}", params, self.token,
+                        self.client_id, self.timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 401 or self.on_unauthorized is None:
+                raise
+            self.unauthorized += 1
+            # Refreshes cfg and calls set_token(). If it cannot get a new
+            # token this retry 401s again and the caller handles it as before.
+            self.on_unauthorized()
+            return _get(f"{HELIX}{path}", params, self.token,
+                        self.client_id, self.timeout)
 
     def set_token(self, token: str) -> None:
         """Adopt a freshly refreshed token.
@@ -191,8 +219,8 @@ class Helix:
         if not (bid and self.client_id and self.token):
             return None
         try:
-            data = _get(f"{HELIX}/helix/streams", {"user_id": bid, "first": 1},
-                        self.token, self.client_id, self.timeout)
+            data = self._fetch("/helix/streams",
+                               {"user_id": bid, "first": 1})
         except urllib.error.HTTPError as exc:
             self.errors += 1
             print(f"[access] streams lookup HTTP {exc.code}", flush=True)
@@ -215,9 +243,9 @@ class Helix:
         if not (broadcaster_id and user_id):
             return None
         try:
-            data = _get(f"{HELIX}/helix/moderation/moderators",
-                        {"broadcaster_id": broadcaster_id, "user_id": user_id},
-                        self.token, self.client_id, self.timeout)
+            data = self._fetch("/helix/moderation/moderators",
+                               {"broadcaster_id": broadcaster_id,
+                                "user_id": user_id})
         except urllib.error.HTTPError as exc:
             self.errors += 1
             return False if (exc.code == 401 and has_scope) else None
@@ -238,8 +266,7 @@ class Helix:
         if login in self._ids:
             return self._ids[login]
         try:
-            data = _get(f"{HELIX}/helix/users", {"login": login},
-                        self.token, self.client_id, self.timeout)
+            data = self._fetch("/helix/users", {"login": login})
         except (urllib.error.URLError, OSError, ValueError) as exc:
             self.errors += 1
             print(f"[access] helix users lookup failed for {login!r}: {exc!r}",
@@ -264,8 +291,7 @@ class Helix:
         if not login or not (self.client_id and self.token):
             return None
         try:
-            data = _get(f"{HELIX}/helix/users", {"login": login},
-                        self.token, self.client_id, self.timeout)
+            data = self._fetch("/helix/users", {"login": login})
         except urllib.error.HTTPError as exc:
             self.errors += 1
             print(f"[access] helix users HTTP {exc.code} for {login!r}",
@@ -291,9 +317,9 @@ class Helix:
         }
         if profile["id"]:
             try:
-                follows = _get(f"{HELIX}/helix/channels/followers",
-                               {"broadcaster_id": profile["id"], "first": 1},
-                               self.token, self.client_id, self.timeout)
+                follows = self._fetch("/helix/channels/followers",
+                                      {"broadcaster_id": profile["id"],
+                                       "first": 1})
                 total = follows.get("total")
                 profile["followers"] = int(total) if total is not None else None
             except (urllib.error.HTTPError, urllib.error.URLError, OSError,
@@ -310,9 +336,9 @@ class Helix:
         if hit and hit[0] > time.time():
             return hit[1]
         try:
-            data = _get(f"{HELIX}/helix/channels/followers",
-                        {"broadcaster_id": self.broadcaster_id, "user_id": user_id},
-                        self.token, self.client_id, self.timeout)
+            data = self._fetch("/helix/channels/followers",
+                               {"broadcaster_id": self.broadcaster_id,
+                                "user_id": user_id})
         except urllib.error.HTTPError as exc:
             self.errors += 1
             print(f"[access] helix followers HTTP {exc.code} — is the "
@@ -354,9 +380,9 @@ class Helix:
                   "oauth token or broadcaster_id.", flush=True)
             return False
         try:
-            data = _get(f"{HELIX}/helix/channels/followers",
-                        {"broadcaster_id": self.broadcaster_id, "first": 1},
-                        self.token, self.client_id, self.timeout)
+            data = self._fetch("/helix/channels/followers",
+                               {"broadcaster_id": self.broadcaster_id,
+                                "first": 1})
         except urllib.error.HTTPError as exc:
             self.authorised = False
             self.errors += 1

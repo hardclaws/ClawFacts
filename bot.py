@@ -297,6 +297,8 @@ class TwitchBot:
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._last_chat = time.time()       # last message seen in the channel
         self._cb_next = 0.0                 # when the next ramble may post
+        self._refresh_lock = threading.Lock()   # one refresh at a time
+        self._warned_401 = False
         self._cb_ambient_off = False        # !cb off, until the next restart
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
@@ -319,6 +321,10 @@ class TwitchBot:
         and update the token used for IRC PASS. Called before every connect and
         periodically by the keeper thread, so the bot never forces a re-login
         just because a token expired mid-stream."""
+        with self._refresh_lock:
+            self._refresh_locked()
+
+    def _refresh_locked(self) -> None:
         try:
             new = auth.refresh_if_possible(self.cfg)
             if new and new != self.cfg.get("oauth_token"):
@@ -1156,7 +1162,12 @@ class TwitchBot:
         """Helix client for follow checks. The broadcaster's id is the channel
         we are joined to, not necessarily the account the bot logged in as."""
         token = (cfg.get("oauth_token") or "").replace("oauth:", "").strip()
-        return access.Helix(cfg.get("client_id", ""), token)
+        helix = access.Helix(cfg.get("client_id", ""), token)
+        # A 401 means the token died, and it can die between keeper wake-ups.
+        # Let the client ask for a new one and retry, rather than logging the
+        # 401 and leaving every follow check dead until a restart.
+        helix.on_unauthorized = self._maybe_refresh_token
+        return helix
 
     def _resolve_broadcaster(self, channel: str) -> str:
         helix = self._access.helix
@@ -1187,7 +1198,22 @@ class TwitchBot:
         if wait:
             self._say(f"@{nick} that's on cooldown - {int(wait)}s to go.")
         elif "follow" in reason:
-            self._say(f"@{nick} {reason} to use that command.")
+            helix = self._access.helix
+            if helix is not None and helix.unauthorized:
+                # The token is dead; the viewer's follow status was never the
+                # problem. The generic line sends them chasing the wrong thing.
+                self._say(f"@{nick} {reason} - the bot's Twitch login has "
+                          f"expired, so it cannot check. A moderator will "
+                          f"need to renew it.")
+                if not self._warned_401:
+                    self._warned_401 = True
+                    self._log("[access] Twitch rejected the oauth token "
+                              f"({helix.unauthorized} x 401). Run "
+                              "'python3 bot.py --login', and add "
+                              '"client_secret" to config.json so it can renew '
+                              "itself instead of expiring every 4 hours.")
+            else:
+                self._say(f"@{nick} {reason} to use that command.")
         else:
             self._say(f"@{nick} {reason}.")
 

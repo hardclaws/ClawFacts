@@ -13,7 +13,7 @@ import time
 import access
 
 STATE = {"calls": [], "unauthorised": False, "not_a_mod": False,
-         "no_moderator_scope": False}
+         "no_moderator_scope": False, "reject_token": ""}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -22,6 +22,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         STATE["calls"].append(self.path)
+        # Reject by token, not by path: a dead token 401s on everything.
+        if STATE["reject_token"] and self.headers.get(
+                "Authorization", "").endswith(STATE["reject_token"]):
+            self._send(401, {"error": "Unauthorized", "status": 401})
+            return
         if STATE["unauthorised"] and "/helix/channels/followers" in self.path:
             # Exactly what Twitch sends when the token is not the broadcaster
             # or a moderator: 200 OK, the real total, and no rows.
@@ -419,6 +424,96 @@ def test_channel_profile(port):
     print("[PASS] channel_profile: id, display name and follower count")
 
 
+def test_401_refreshes_the_token_and_retries(port):
+    """The defect: a 401 was terminal.
+
+    user_id() caught it, logged it, returned None, and nothing asked for a new
+    token - so every follow check stayed dead until the process restarted.
+    Twitch's own guidance is to react to the 401, so the client now asks for a
+    fresh token and retries once.
+    """
+    STATE["reject_token"] = "stale"
+    try:
+        h = access.Helix("client", "stale", "12345")
+        refreshed = []
+
+        def on_unauthorized():
+            refreshed.append(1)
+            h.set_token("fresh")
+
+        h.on_unauthorized = on_unauthorized
+        uid = h.user_id("truckingwithdoc")
+        assert uid == "999truckingwithdoc", uid
+        assert len(refreshed) == 1, refreshed
+        assert h.unauthorized == 1, h.unauthorized
+        print(f"[PASS] a 401 refreshed the token and the retry succeeded "
+              f"({h.unauthorized} x 401)")
+    finally:
+        STATE["reject_token"] = ""
+
+
+def test_a_400_is_not_treated_as_an_expired_token(port):
+    """Only a 401 means the token died. Refreshing on a 400 would mask the
+    real bug class - a malformed request, like the '#' that reached Helix."""
+    STATE["reject_token"] = ""
+    h = access.Helix("client", "token", "12345")
+    calls = []
+    h.on_unauthorized = lambda: calls.append(1)
+    # A login Twitch will not accept: the fake server 400s on an empty login,
+    # so send one that cannot resolve instead and check the path is taken.
+    import urllib.error
+    orig = access._get
+
+    def boom(url, params, token, client_id, timeout=5.0):
+        raise urllib.error.HTTPError(url, 400, "Bad Request", {}, None)
+    access._get = boom
+    try:
+        assert h.user_id("truckingwithdoc") is None
+        assert calls == [], "a 400 must not trigger a refresh"
+        assert h.unauthorized == 0, h.unauthorized
+    finally:
+        access._get = orig
+    print("[PASS] a 400 propagates without refreshing or counting as a 401")
+
+
+def test_without_a_hook_the_behaviour_is_unchanged(port):
+    """The retry is opt-in. With no callback a 401 must behave exactly as it
+    did before - return None, never raise into the caller."""
+    STATE["reject_token"] = "stale"
+    try:
+        h = access.Helix("client", "stale", "12345")
+        assert h.on_unauthorized is None
+        assert h.user_id("truckingwithdoc") is None
+        assert h.unauthorized == 0, "no retry attempted, so no 401 counted"
+    finally:
+        STATE["reject_token"] = ""
+    print("[PASS] with no refresh hook, a 401 returns None as it always did")
+
+
+def test_the_denial_names_an_expired_token(port):
+    """'Could not verify your follow status' is true but useless when the real
+    cause is a dead token - it sends the viewer chasing their own follow."""
+    import bot as bot_mod
+    b = bot_mod.TwitchBot(dict(bot_mod.DEFAULTS, nick="bot", channel="#test",
+                               prefix="!"))
+    said = []
+    b._say = said.append
+    b._access.helix = access.Helix("client", "stale", "12345")
+    b._access.helix.unauthorized = 3
+    b._note_denial("smithkxx", "smithkxx",
+                   "could not verify your follow status", 0.0)
+    assert said and "expired" in said[0], said
+    assert "moderator" in said[0], said
+    # and the generic wording when it is NOT a token problem
+    said.clear()
+    b._last_denial_note.clear()
+    b._access.helix.unauthorized = 0
+    b._note_denial("smithkxx", "smithkxx",
+                   "could not verify your follow status", 0.0)
+    assert said and "expired" not in said[0], said
+    print("[PASS] a dead token says so; anything else keeps the plain wording")
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
@@ -436,7 +531,11 @@ def main():
                test_moderator_check, test_describe_token,
                test_startup_diagnosis, test_startup_diagnosis_clean,
                test_channel_profile, test_disabled,
-               test_user_id_sends_a_clean_login):
+               test_user_id_sends_a_clean_login,
+               test_401_refreshes_the_token_and_retries,
+               test_a_400_is_not_treated_as_an_expired_token,
+               test_without_a_hook_the_behaviour_is_unchanged,
+               test_the_denial_names_an_expired_token):
         fn(port)
     server.shutdown()
     print("ALL PASSED ✔")

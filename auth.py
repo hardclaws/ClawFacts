@@ -232,6 +232,16 @@ def run_device_login(client_id: str) -> str:
 
 # ---- high-level entry points used by bot.py -----------------------------
 
+#: Renew the access token this far before it expires.
+#:
+#: This has to be comfortably larger than the interval the token keeper sleeps
+#: for (bot._token_keeper, 30 minutes). At 120 seconds the keeper kept waking
+#: up to find a token that was still valid for another half hour, reusing it,
+#: and never refreshing at all - so the token was only ever renewed after it
+#: had already died, and Helix answered 401 for up to 30 minutes every cycle.
+REFRESH_MARGIN = 3600.0
+
+
 def refresh_if_possible(cfg: dict) -> str | None:
     """Reuse or refresh a saved login WITHOUT any interactive step.
 
@@ -256,7 +266,7 @@ def refresh_if_possible(cfg: dict) -> str | None:
     refresh = tokens.get("refresh_token")
     expires_at = float(tokens.get("expires_at") or 0)
 
-    if access and expires_at > time.time() + 120:
+    if access and expires_at > time.time() + REFRESH_MARGIN:
         try:
             validate_token(access)
             return _normalize(access)

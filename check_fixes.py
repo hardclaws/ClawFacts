@@ -294,6 +294,14 @@ def main() -> int:
          "yell" in __import__("trucker").REGISTERS
          and "cb_yell_enabled" in
          pathlib.Path("bot.py").read_text(encoding="utf-8")),
+        ("a 401 from Helix refreshes the token and retries once",
+         hasattr(__import__("access").Helix("c", "t", "1"), "on_unauthorized")
+         and hasattr(__import__("access").Helix("c", "t", "1"), "_fetch")),
+        ("the token is renewed BEFORE it expires, not after",
+         __import__("auth").REFRESH_MARGIN > 1800),
+        ("a dead token says so instead of blaming the viewer's follow",
+         "unauthorized" in
+         pathlib.Path("bot.py").read_text(encoding="utf-8")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),
