@@ -256,6 +256,29 @@ def main() -> int:
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_idle_chat_tick")
          and hasattr(__import__("access").Helix("c", "t", "1"), "is_live")),
+        ("!cb command is wired into the dispatch",
+         "CB_COMMANDS" in pathlib.Path("bot.py").read_text(encoding="utf-8")),
+        ("!cb clears the _on_message allowlist, not just the dispatch",
+         pathlib.Path("bot.py").read_text(encoding="utf-8").count(
+             "CB_COMMANDS") >= 3),
+        ("the CB clock is re-rolled, never a fixed period",
+         "_cb_next_delay" in pathlib.Path("bot.py").read_text("utf-8")
+         and "random.uniform" in
+         pathlib.Path("bot.py").read_text(encoding="utf-8")),
+        ("trucker chatter: over a million distinct lines",
+         __import__("trucker").combination_count() > 1_000_000),
+        ("every CB template slot resolves (a missing pool is a KeyError)",
+         all(__import__("trucker")._ways(x) > 0
+             for ts in __import__("trucker").REGISTERS.values() for x in ts)),
+        ("no explicit CB slang can be generated",
+         not any(term in line.lower()
+                 for lines in
+                 list(__import__("trucker").REGISTERS.values())
+                 + [list(pool)
+                    for pool in __import__("trucker")._POOLS.values()]
+                 for line in lines
+                 for term in ("lot lizard", "sleeper creeper",
+                              "male buffalo", "pickle park"))),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

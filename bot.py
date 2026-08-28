@@ -44,6 +44,7 @@ import extras
 import reminders as reminders_mod
 import haul as haul_mod
 import names as names_mod
+import trucker as trucker_mod
 import whois
 from funfacts import get_funfact, trim_to_fit
 
@@ -76,6 +77,9 @@ REMINDER_COMMANDS = {"reminder", "reminders"}
 # !haul is the command. "transporting"/"transport" stay accepted so anyone
 # mid-habit is not broken by the rename; drop them from the set to retire them.
 HAUL_COMMANDS = {"haul", "hauls", "transporting", "transport"}
+# !cb asks the bot to talk on the radio. No argument, no lookup - it is a
+# local generator, so it costs nothing and never waits on the network.
+CB_COMMANDS = {"cb", "radio", "breaker"}
 
 DEFAULTS = {
     "nick": "",
@@ -108,6 +112,13 @@ DEFAULTS = {
     "idle_chat_enabled": True,
     "idle_chat_minutes": 10,
     "idle_chat_commands": list(IDLE_COMMANDS),
+    # Ambient trucker chatter, posted unprompted while the channel is live.
+    # Deliberately NOT a fixed period: the interval is re-rolled after every
+    # post, so chat cannot learn the rhythm. The number is the average, and
+    # each gap lands between 40% and 200% of it. Set cb_chatter_enabled to
+    # false to keep !cb as a command only.
+    "cb_chatter_enabled": True,
+    "cb_chatter_minutes": 25,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -275,6 +286,7 @@ class TwitchBot:
         self.cargo = haul_mod.Cargo()
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._last_chat = time.time()       # last message seen in the channel
+        self._cb_next = 0.0                 # when the next ramble may post
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -484,6 +496,16 @@ class TwitchBot:
             target=self._names_keeper, name="names-topup", daemon=True
         )
         librarian.start()
+        if self.cfg.get("cb_chatter_enabled", True):
+            self._log(
+                f"cb chatter: {trucker_mod.combination_count():,} distinct "
+                f"lines, one every "
+                f"{self.cfg.get('cb_chatter_minutes', 25)} min on average"
+            )
+            radio = threading.Thread(
+                target=self._cb_chatter_keeper, name="cb-chatter", daemon=True
+            )
+            radio.start()
 
         backoff = 2
         while self.running:
@@ -630,7 +652,8 @@ class TwitchBot:
             pass
         elif command in SMK_ALIASES:
             command = "smk"
-        elif extras_enabled and command in EXTRAS_COMMANDS:
+        elif extras_enabled and (command in EXTRAS_COMMANDS
+                                 or command in CB_COMMANDS):
             pass
         else:
             return
@@ -811,6 +834,79 @@ class TwitchBot:
     @staticmethod
     def _mention(nick: str) -> str:
         return f"@{nick} " if nick else ""
+
+    def _reply_cb(self, nick: str) -> None:
+        """One line of CB chatter, on demand.
+
+        Deliberately no `@nick` prefix: the bot is talking on the radio, not
+        answering a question, and the mention breaks the voice. The log names
+        whoever asked so a moderator can still trace it.
+        """
+        line = trucker_mod.ramble()
+        self._say(self._fit("", line))
+        self._log(f"cb ramble for {nick or 'chat'}: {line[:60]}")
+
+    def _cb_next_delay(self) -> float:
+        """Seconds until the next ambient ramble. Re-rolled every time.
+
+        A fixed period is exactly what was not wanted - chat learns "the bot
+        posts every ten minutes" and it becomes a clock. Uniform over 0.4x to
+        2.0x of the configured average is unpredictable in both directions,
+        and the lower bound means it can never fire twice in quick succession.
+        """
+        base = float(self.cfg.get("cb_chatter_minutes", 25)) * 60.0
+        if base <= 0:
+            return 0.0
+        return base * random.uniform(0.4, 2.0)
+
+    def _cb_chatter_tick(self, now: float | None = None):
+        """One pass of the ambient CB clock. Returns the line it posted.
+
+        Unlike `_idle_chat_tick`, this does not wait for the channel to go
+        quiet - ambient chatter is meant to land in a live room. It does
+        refuse to talk over an active conversation, and it holds back while
+        the channel is offline.
+        """
+        now = time.time() if now is None else now
+        if not self.cfg.get("cb_chatter_enabled", True):
+            return None
+        if self.paused or not self.cfg.get("fun_commands", True):
+            return None
+        if now < self._cb_next:
+            return None
+
+        helix = self._access.helix
+        if helix is not None and helix.is_live() is False:
+            # Offline: push the whole schedule out rather than muttering into
+            # an empty room, and without burning the next roll.
+            self._cb_next = now + self._cb_next_delay()
+            return None
+
+        # Someone is mid-conversation. Deferring does not consume the roll, so
+        # the retry is soon rather than another full interval away.
+        if now - self._last_chat < 60.0:
+            self._cb_next = now + 45.0
+            return None
+
+        line = trucker_mod.ramble()
+        self._cb_next = now + self._cb_next_delay()
+        self._say(self._fit("", line))
+        self._log(f"cb ramble: {line[:60]}")
+        return line
+
+    def _cb_chatter_keeper(self) -> None:
+        # A long first wait: this is flavour, and nobody joining the stream
+        # should be greeted by the bot talking to itself.
+        time.sleep(120.0)
+        self._cb_next = time.time() + self._cb_next_delay()
+        while self.running:
+            time.sleep(15.0)
+            if not self.running:
+                return
+            try:
+                self._cb_chatter_tick()
+            except Exception as exc:
+                self._log(f"cb-chatter error: {exc!r}")
 
     def _idle_chat_tick(self, now: float | None = None):
         """One pass of the idle-chat clock. Returns the command it posted.
@@ -1015,6 +1111,8 @@ class TwitchBot:
                     self._reply_whois(nick, argument)
                 elif command in TWITCH_COMMANDS:
                     self._reply_twitch(nick, argument)
+                elif command in CB_COMMANDS:
+                    self._reply_cb(nick)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -1035,6 +1133,7 @@ class TwitchBot:
             f"{prefix}haul - what the truck is hauling right now",
             f"{prefix}whois <name> - who that person is",
             f"{prefix}twitch <name> - who that Twitch channel is",
+            f"{prefix}cb - the bot talks on the radio",
         ]
         self._say(f"@{nick} commands: " + " | ".join(lines))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "

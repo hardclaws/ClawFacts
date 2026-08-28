@@ -208,6 +208,7 @@ Quick-and-dirty local alternatives:
 | `!haul`               | What the truck is hauling right now.                          |
 | `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
 | `!twitch hardclaws`   | Who that Twitch channel is.                                   |
+| `!cb`                 | The bot talks on the radio. No argument (also `!radio`).      |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -1029,6 +1030,67 @@ needed.
 
 - Without any LLM the bot just posts the plain real facts — no fake jokes.
 - The LLM is only used in spicy mode; clean mode stays factual.
+
+
+## Truck talk on the radio
+
+The bot can mutter to itself on the CB while you stream. Three voices, picked
+at random each time so chat cannot learn the tone either:
+
+```
+[21:04:12] Breaker one-nine, we got a bear in the bushes at the 42 yardstick. Ease off the loud pedal.
+[21:37:55] Heater's a-glowin', manners are showin', and I still can't get the travel agent on the box. Catch you on the flip flop.
+[22:05:41] Somethin' else - I just got passed by a cheese wagon at the 96 and I have never felt more seen.
+```
+
+* **road** — dry channel-19 traffic report. What CB actually sounds like.
+* **grizzled** — an old-timer grumbling to himself.
+* **ramble** — the weird one.
+
+`!cb` (or `!radio`, `!breaker`) asks for one on demand. It is a local
+generator, so it costs nothing and never waits on the network, and it answers
+without an `@` mention — the bot is on the radio, not replying to a question.
+
+```json
+"cb_chatter_enabled": true,
+"cb_chatter_minutes": 25
+```
+
+**The timing is deliberately not a fixed period.** `cb_chatter_minutes` is an
+*average*: the gap before each post is re-rolled between 40% and 200% of it, so
+a 25-minute setting produces gaps anywhere from 10 to 50 minutes and chat
+cannot settle into a rhythm. The lower bound also means it can never fire twice
+in quick succession.
+
+Three things hold it back:
+
+* **The channel has to be streaming.** Same live check as the idle poster.
+* **It will not talk over an active conversation.** If anyone has spoken in
+  the last 60 seconds it waits and tries again shortly.
+* **`!bot off` silences it**, along with everything else.
+
+### Why there is no API for this
+
+There isn't one. What exists is static quote listicles — a few dozen lines,
+nearly all attributed "Unknown" — and CB slang glossaries, which are reference
+dictionaries rather than generators. The glossaries turned out to be the better
+raw material: they give an authentic vocabulary, and a slot generator built
+from real terms produces far more than any fixed list.
+
+Every term in the pools is genuine CB usage — *bear in the bushes*, *Kojak with
+a Kodak*, *chicken coop*, *alligator*, *hundred-mile coffee*, *yardstick*,
+*stay loaded*. Nothing is invented lore dressed up as trucker talk.
+
+That currently comes to **over 10 million distinct lines**, and the weakest of
+the 28 templates still produces 400+ on its own, so there is no line chat keeps
+hearing. `python3 mock_trucker_test.py` checks both numbers rather than
+asserting them.
+
+**The slang is held to "crude but never explicit."** The bot posts unprompted
+into a live channel, so the bar is higher than for a command a viewer chose to
+run. Four genuine CB terms that refer to sex work — *lot lizard*, *sleeper
+creeper*, *male buffalo*, *pickle park* — are deliberately absent, and a test
+fails if any of them is ever added to a pool.
 
 ## Testing without Twitch
 

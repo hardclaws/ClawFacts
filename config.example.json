@@ -37,6 +37,8 @@
   "idle_chat_enabled": true,
   "idle_chat_minutes": 10,
   "idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr"],
+  "cb_chatter_enabled": true,
+  "cb_chatter_minutes": 25,
   "names_topup_enabled": true,
   "names_topup_hours": 12
 }

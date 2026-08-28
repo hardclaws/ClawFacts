@@ -67,6 +67,12 @@ def _fake_twitch_lookup(q, helix=None, **kw):
 bot_mod.whois.lookup = _fake_lookup
 bot_mod.whois.twitch_lookup = _fake_twitch_lookup
 
+# !cb is a local generator, so the end-to-end run stubs the line it returns
+# and asserts that line actually reached the socket. The generator's own
+# variety is covered by mock_trucker_test.py.
+CB_SENTINEL = "Breaker one-nine, this is the test rig. 10-4, driver."
+bot_mod.trucker_mod.ramble = lambda register=None: CB_SENTINEL
+
 HOST, PORT = "127.0.0.1", 6667
 
 def privmsg(login, text, badges=""):
@@ -125,6 +131,9 @@ SCRIPT = [
     (54.5, privmsg("viewer18", "!whotwitch hardclaws", "subscriber/01")),
     # '@' is how chat actually types it - the mention picker inserts it.
     (55.5, privmsg("viewer19", "!twitch @hardclaws", "subscriber/01")),
+    # !cb takes no argument: the bot just talks on the radio.
+    (57.0, privmsg("viewer20", "!cb", "subscriber/01")),
+    (58.0, privmsg("viewer21", "!radio", "subscriber/01")),
     (59.5, privmsg("viewer17", "!smk any", "vip/1")),
 ]
 
@@ -387,6 +396,24 @@ def main():
         return 1
     print(f"[PASS] !twitch answered a channel, refused a miss, showed usage, "
           f"and accepts !whotwitch and @name ({len(twitch_lines)} profile(s))")
+
+    # !cb: reached the socket, twice (!cb and its !radio alias), with no
+    # @mention on it - the bot is on the radio, not answering a question.
+    cb_lines = [l for l in bot_lines if CB_SENTINEL in l]
+    if len(cb_lines) != 2:
+        print(f"FAIL: expected !cb and !radio to each answer once, got "
+              f"{len(cb_lines)}: {cb_lines}")
+        return 1
+    elif any(f"@viewer20 {CB_SENTINEL}" in l or f"@viewer21 {CB_SENTINEL}" in l
+             for l in cb_lines):
+        print(f"FAIL: !cb posted with an @mention: {cb_lines}")
+        return 1
+    elif any(len(l) > 500 for l in cb_lines):
+        print("FAIL: !cb exceeded Twitch's 500-character limit")
+        return 1
+    else:
+        print("[PASS] !cb and !radio each answered once, unmentioned, and "
+              "inside Twitch's limit")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "
