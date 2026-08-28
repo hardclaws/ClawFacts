@@ -44,6 +44,9 @@
   "cb_yell_enabled": true,
   "shoutout_enabled": true,
   "custom_commands_enabled": true,
+  "smk_twitch_enabled": true,
+  "smk_twitch_followers": false,
+  "smk_twitch_refresh_minutes": 30,
   "names_topup_enabled": true,
   "names_topup_hours": 12
 }

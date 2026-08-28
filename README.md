@@ -205,6 +205,7 @@ Quick-and-dirty local alternatives:
 | `!riddle`             | A riddle; the answer is posted ~20s later.                    |
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
 | `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
+| `!smk twitch`         | The same game, drawn from live Twitch.                        |
 | `!haul`               | What the truck is hauling right now.                          |
 | `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
 | `!twitch hardclaws`   | Who that Twitch channel is.                                   |
@@ -619,6 +620,71 @@ The six lines become one:
 Wikipedia also asks callers to back off after any request that took more than
 a second to serve; `harvest_category` sleeps five seconds when that happens,
 which is the signal that usually precedes a 429 rather than the 429 itself.
+
+### !smk twitch — names from live Twitch
+
+```
+!smk twitch
+ShagMarryKill [twitch] | KaiCenat (streaming Just Chatting), Jinnytty (streaming League of Legends), OldTimer (followed since May 2019) - shag one, marry one, kill one.
+```
+
+`!smk streamers`, `!smk streamer` and `!smk tw` mean the same thing. Plain
+`!smk` and `!smk female|male|any` are untouched and still draw from the
+celebrity pool.
+
+**There is no list of famous streamers in the code.** A hardcoded roster is a
+list someone typed two years ago, and it is wrong the day it is written. The
+pool is filled from Twitch itself:
+
+| Pool | Source | What it really is |
+| ---- | ------ | ----------------- |
+| Top streamers | `GET /helix/streams?first=100` | Twitch's own API guide: *"Get Streams orders the list of streamers by the number of viewers they have."* So page one is the top of the site **right now**. There is no separate "top channels" endpoint; this is the honest way to get it. |
+| Followers | `GET /helix/channels/followers` | The channel's own followers, newest first. Needs `moderator:read:followers` — a scope this bot already holds — **and** the bot being a moderator of the channel. |
+
+Every name carries a real descriptor from the same response: the game a
+streamer is on, their viewer count if they set no category, or the month and
+year a follower has been following. Nothing is invented to fill the slot, and
+if Twitch cannot be reached the game says so and names nobody:
+
+```
+@viewer19 I could not get three Twitch names for a round just now (0 cached) - try again in a minute.
+```
+
+Both pools are cached to `twitch_names.json` and refetched on a window
+(`smk_twitch_refresh_minutes`, 30 by default) rather than on every command. A
+failed refresh keeps the last good pool instead of emptying it, and losing one
+pool does not cost the game — if the follower call fails, the streamers still
+play. Each endpoint costs 1 rate-limit point, so this is nowhere near Twitch's
+allowance.
+
+**Followers are switched off by default, and that is deliberate.** The top
+streamers are public figures who put themselves in front of an audience. Your
+followers are private people who never asked to be nominated for
+shag/marry/kill in front of the whole channel, and "kill" is one of the three
+options. Twitch's harassment policy is about the effect on the person named,
+not the intent of the person naming them, so this is a genuine risk to the
+channel and not just a matter of taste. If your community would enjoy it, turn
+it on and it works exactly as described above:
+
+```json
+"smk_twitch_followers": true
+```
+
+**What is not possible with the bot's own login: who the streamer follows.**
+`GET /helix/channels/followed` requires the `user:read:follows` scope *and*
+Twitch rejects the call unless *"the ID in the user_id query parameter matches
+the user ID in the access token."* This bot's token belongs to
+`TruckingWithDocBot`, so it can only ever read the channels **the bot** follows
+— not yours. There is no moderator-level variant of that scope. The only way to
+get your followed list is a second token: you authorise the app yourself with
+`user:read:follows` and the bot stores it alongside its own, using it for that
+one read. It is a real option, just a bigger change than the rest of this.
+
+| Setting | Effect |
+| ------- | ------ |
+| `"smk_twitch_enabled": false` | Turns the command off; `!help` stops advertising it. |
+| `"smk_twitch_followers": true` | Adds the channel's followers to the pool. **Off by default.** |
+| `"smk_twitch_refresh_minutes"` | How often to re-pull. 30 by default. |
 
 ### The other games never run dry either
 
@@ -1431,6 +1497,7 @@ appends fake joke comments.
 | `access.py`          | Who may use a command, and how often.           |
 | `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
+| `twitchnames.py`     | The `!smk twitch` pools (top streams, followers).|
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
@@ -1449,8 +1516,10 @@ appends fake joke comments.
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
 | `mock_shoutout_test.py` | Offline raid-shoutout tests.                 |
 | `mock_customcmds_test.py` | Offline `!cmd` tests.                      |
+| `mock_twitchsmk_test.py` | Offline `!smk twitch` tests.                |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |
 | `custom_commands.json` | Mod-defined commands; written at runtime.     |
 | `names.json`         | Harvested `!smk` names; written at runtime.     |
+| `twitch_names.json`  | Cached Twitch names; written at runtime.        |

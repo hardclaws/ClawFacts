@@ -47,6 +47,7 @@ import names as names_mod
 import trucker as trucker_mod
 import shoutout as shoutout_mod
 import customcmds as customcmds_mod
+import twitchnames as twitchnames_mod
 import whois
 from funfacts import get_funfact, trim_to_fit
 
@@ -59,6 +60,8 @@ FUNFACT_ALIASES = {"funfact", "funfacts"}
 EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr",
                    "smk"}
 SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
+# !smk twitch draws from live Twitch instead of the celebrity pool.
+SMK_TWITCH_WORDS = {"twitch", "streamer", "streamers", "tw"}
 # !help is documentation, not a game: it stays reachable for everyone so a
 # viewer can read what the bot does even if they may not run a command yet.
 HELP_COMMANDS = {"help", "commands"}
@@ -149,6 +152,11 @@ DEFAULTS = {
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
     "custom_commands_enabled": True,
+    "smk_twitch_enabled": True,
+    # Off by default: the follower pool names real people in this channel who
+    # never asked to be nominated for shag/marry/kill. See the README.
+    "smk_twitch_followers": False,
+    "smk_twitch_refresh_minutes": 30,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -317,6 +325,9 @@ class TwitchBot:
         self.reminders = reminders_mod.ReminderSet()
         self.cargo = haul_mod.Cargo()
         self.custom_cmds = customcmds_mod.CommandSet(reserved=RESERVED_COMMANDS)
+        self._twitch_pool = twitchnames_mod.TwitchNamePool(
+            refresh_seconds=60.0 * float(cfg.get("smk_twitch_refresh_minutes",
+                                                 30)))
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._last_chat = time.time()       # last message seen in the channel
         self._cb_next = 0.0                 # when the next ramble may post
@@ -1537,6 +1548,8 @@ class TwitchBot:
             f"{prefix}funfact <place> - a real fun fact about a town "
             f"({prefix}funfacts works too)",
             f"{prefix}smk female|male|any - shag, marry or kill three names",
+            f"{prefix}smk twitch - the same game, drawn from Twitch"
+            if self.cfg.get("smk_twitch_enabled", True) else None,
             f"{prefix}joke - a joke",
             f"{prefix}randomfact - a random fact",
             f"{prefix}riddle - a riddle; the answer follows shortly",
@@ -1575,6 +1588,45 @@ class TwitchBot:
                 f"create your own command, {prefix}cmd list / {prefix}cmd "
                 f"delete <name> to manage them")
 
+    def _refresh_twitch_names(self) -> None:
+        """Refill the Twitch name pools. Partial success is kept."""
+        helix = getattr(self._access, "helix", None)
+        if helix is None:
+            self._log("smk twitch: no Helix client, cannot refresh names")
+            return
+        self._resolve_broadcaster(self.cfg.get("channel", ""))
+        try:
+            result = self._twitch_pool.refresh(
+                helix, self._broadcaster_id,
+                include_followers=bool(
+                    self.cfg.get("smk_twitch_followers", False)))
+        except Exception as exc:
+            # A refresh must never take the worker down with it.
+            self._log(f"smk twitch refresh failed: {exc!r}")
+            return
+        self._log(f"smk twitch refresh: {result}")
+
+    def _reply_smk_twitch(self, nick: str) -> None:
+        limit = int(self.cfg.get("max_message_chars", 450))
+        if not self.cfg.get("smk_twitch_enabled", True):
+            self._say(f"{self._mention(nick)}the Twitch edition is switched "
+                      f"off in config.json (smk_twitch_enabled).")
+            return
+        if self._twitch_pool.stale():
+            self._refresh_twitch_names()
+        picks = self._twitch_pool.draw(3)
+        if not picks:
+            # Says what it could not do rather than filling the round with
+            # names it invented. There is no seeded streamer list on purpose.
+            total = self._twitch_pool.counts()["total"]
+            self._say(f"{self._mention(nick)}I could not get three Twitch "
+                      f"names for a round just now ({total} cached) - try "
+                      f"again in a minute.")
+            return
+        self._say(_CONTROL.sub(
+            "", f"ShagMarryKill [twitch] | {extras.format_smk(picks)} - "
+                f"shag one, marry one, kill one.")[:limit])
+
     def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:
         limit = int(self.cfg.get("max_message_chars", 450))
         text = None
@@ -1588,6 +1640,10 @@ class TwitchBot:
             elif command in ("wouldyourather", "wyr"):
                 text = extras.get_wyr()
                 label = "WouldYouRather"
+            elif command == "smk" and argument.strip().lower() \
+                    in SMK_TWITCH_WORDS:
+                self._reply_smk_twitch(nick)
+                return
             elif command == "smk":
                 picked = extras.get_smk(argument)
                 if not picked:

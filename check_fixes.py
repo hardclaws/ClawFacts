@@ -43,6 +43,23 @@ def main() -> int:
 
     _bot_src = pathlib.Path("bot.py").read_text(encoding="utf-8")
 
+    def _no_invented_streamers():
+        """A dead API must produce no names at all, not a fallback roster."""
+        import twitchnames as _tw
+
+        class _Dead:
+            def top_streams(self, first=100):
+                return None
+
+            def channel_followers(self, *a, **k):
+                return None
+
+        pool = _tw.TwitchNamePool(
+            path=os.path.join(tempfile.mkdtemp(prefix="clawfacts-check-"),
+                              "tw.json"))
+        pool.refresh(_Dead(), "1", include_followers=True)
+        return pool.draw(3) == []
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -351,6 +368,19 @@ def main() -> int:
         ("a mod-created command survives a restart", _survives_restart()),
         ("an over-long command message is refused, not truncated",
          not _cc.add("toolong", "w" * (_cc_mod.MAX_MESSAGE + 1))[0]),
+        ("!smk twitch draws from live Twitch (Get Streams by viewer count)",
+         hasattr(_bot.TwitchBot, "_reply_smk_twitch")
+         and hasattr(__import__("access").Helix("c", "t", "1"), "top_streams")),
+        ("the Twitch SMK pool has no hardcoded streamer roster",
+         [n for n in dir(__import__("twitchnames"))
+          if n.isupper() and isinstance(getattr(__import__("twitchnames"), n),
+                                        (list, tuple))] == ["MONTHS"]),
+        ("a dead Twitch API invents no names for the round",
+         _no_invented_streamers()),
+        ("the channel's followers are opt-in for !smk twitch",
+         _bot.DEFAULTS.get("smk_twitch_followers") is False
+         and hasattr(__import__("access").Helix("c", "t", "1"),
+                     "channel_followers")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),
