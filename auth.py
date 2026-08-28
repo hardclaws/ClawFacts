@@ -242,6 +242,83 @@ def run_device_login(client_id: str) -> str:
 REFRESH_MARGIN = 3600.0
 
 
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Print a diagnostic once per reason.
+
+    refresh_if_possible runs every 30 minutes for as long as the bot is up, so
+    an ungated print would scroll the same explanation past all night and
+    still be missed. Once, at the point it first matters, is the useful form.
+    """
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(message, file=sys.stderr)
+
+
+def describe_login(cfg: dict) -> list[str]:
+    """Every fact about the saved login, as printable lines.
+
+    Used by --doctor. Reads the real files rather than guessing, and never
+    prints a secret - only whether one is present.
+    """
+    out = []
+    client_id = (cfg.get("client_id") or "").strip()
+    secret = (cfg.get("client_secret") or "").strip()
+    out.append(f"client_id      : {client_id or '(missing)'}")
+    out.append(f"client_secret  : {'present' if secret else 'MISSING'}")
+
+    tokens = load_tokens()
+    if not tokens:
+        out.append(f"tokens.json    : MISSING or unreadable at {TOKENS_PATH}")
+        out.append("-> nothing can be renewed. Run: python3 bot.py --login")
+        return out
+
+    saved_id = tokens.get("client_id")
+    out.append(f"tokens.json    : present at {TOKENS_PATH}")
+    out.append(f"  its client_id: {saved_id or '(none recorded)'}")
+    if client_id and saved_id != client_id:
+        out.append("-> MISMATCH with config.json. The saved login can never be "
+                   "renewed.")
+        out.append("   Fix client_id in config.json, or re-run "
+                   "'python3 bot.py --login' for this app.")
+
+    out.append(f"  refresh token: {'present' if tokens.get('refresh_token') else 'MISSING'}")
+    if not tokens.get("refresh_token"):
+        out.append("-> without a refresh token the login cannot be renewed. "
+                   "Run: python3 bot.py --login")
+
+    expires_at = float(tokens.get("expires_at") or 0)
+    if expires_at:
+        left = expires_at - time.time()
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_at))
+        if left > 0:
+            out.append(f"  access token : valid until {when} "
+                       f"({left / 3600:.1f}h left)")
+        else:
+            out.append(f"  access token : EXPIRED at {when} "
+                       f"({-left / 3600:.1f}h ago)")
+    else:
+        out.append("  access token : no expiry recorded")
+
+    access = tokens.get("access_token")
+    if access:
+        try:
+            info = validate_token(access)
+            scopes = info.get("scope") or info.get("scopes") or []
+            out.append(f"  validate     : OK as {info.get('login')!r}")
+            out.append(f"  scopes       : {', '.join(scopes) or '(none)'}")
+            if "moderator:read:followers" not in scopes:
+                out.append("-> missing moderator:read:followers. Run: "
+                           "python3 bot.py --login")
+        except OAuthError as exc:
+            out.append(f"  validate     : REJECTED ({exc}) - Twitch will "
+                       f"answer 401 on every Helix call")
+    return out
+
+
 def refresh_if_possible(cfg: dict) -> str | None:
     """Reuse or refresh a saved login WITHOUT any interactive step.
 
@@ -258,9 +335,23 @@ def refresh_if_possible(cfg: dict) -> str | None:
 
     tokens = load_tokens()
     if not tokens:
+        _warn_once("no-tokens",
+                   "[auth] no saved login - tokens.json is missing or "
+                   "unreadable, so the token can never be renewed and the "
+                   "bot will start getting 401s when it expires. Run "
+                   "'python3 bot.py --login'.")
         return None
     if client_id and tokens.get("client_id") != client_id:
-        return None  # tokens belong to a different app — don't touch them
+        # Silent here is what makes this so confusing: the bot runs fine for
+        # four hours, then every Helix call 401s, with nothing in the log to
+        # say the saved login belonged to a different app.
+        _warn_once("client-id-mismatch",
+                   f"[auth] tokens.json was saved for client_id "
+                   f"{tokens.get('client_id')!r} but config.json has "
+                   f"{client_id!r}. They must match, or the saved login can "
+                   f"never be renewed. Fix client_id in config.json, or run "
+                   f"'python3 bot.py --login' to save tokens for this app.")
+        return None
 
     access = tokens.get("access_token")
     refresh = tokens.get("refresh_token")
@@ -293,6 +384,15 @@ def refresh_if_possible(cfg: dict) -> str | None:
             else:
                 print(f"[auth] refresh failed ({exc}); a fresh login is "
                       f"needed.", file=sys.stderr)
+    if not refresh:
+        _warn_once("no-refresh-token",
+                   "[auth] the saved login has no refresh token, so it cannot "
+                   "be renewed. Run 'python3 bot.py --login'.")
+    elif not client_id:
+        _warn_once("no-client-id",
+                   "[auth] config.json has no client_id, so the saved login "
+                   "cannot be renewed. Add it, or run "
+                   "'python3 bot.py --login'.")
     return None
 
 

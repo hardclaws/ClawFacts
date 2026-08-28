@@ -302,6 +302,12 @@ def main() -> int:
         ("a dead token says so instead of blaming the viewer's follow",
          "unauthorized" in
          pathlib.Path("bot.py").read_text(encoding="utf-8")),
+        ("a client_id mismatch is reported, not silently ignored",
+         "client-id-mismatch" in
+         pathlib.Path("auth.py").read_text(encoding="utf-8")),
+        ("'python3 bot.py --doctor' explains why the login dies",
+         hasattr(__import__("bot"), "run_doctor")
+         and hasattr(__import__("auth"), "describe_login")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

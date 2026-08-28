@@ -1221,6 +1221,18 @@ works after a login or a restart and then starts failing.
 
 Two independent causes, and the first is the common one:
 
+**Run this first:**
+
+```
+python3 bot.py --doctor
+```
+
+It reads your actual `config.json` and `tokens.json` and prints the reason,
+including the two that leave no trace in the log — a `tokens.json` saved for a
+different `client_id`, and a missing refresh token. It never prints a secret,
+only whether one is present. It also attempts a real renewal so you can see
+whether one can happen at all.
+
 **1. There is no `client_secret` in config.json.** A Confidential app (the Dev
 Console default) cannot renew a token without one, so when the four hours run
 out the login simply dies and stays dead. The bot says so at startup:
@@ -1243,6 +1255,19 @@ finding a token that was still good for another half hour, reusing it, and
 never refreshing at all. The token was only renewed *after* it had died, which
 produced up to 30 minutes of 401s every four hours **even with a valid
 secret**.
+
+**3. `tokens.json` was saved for a different app.** If `client_id` in
+config.json is not the one in `tokens.json`, the saved login can never be
+renewed. This used to fail completely silently — the bot ran fine for four
+hours and then every Helix call 401s, with nothing in the log to say why. It
+now says so once, at the first failure:
+
+```
+[auth] tokens.json was saved for client_id 'OTHER-APP' but config.json has
+'abc123'. They must match, or the saved login can never be renewed.
+```
+
+`tokens.json` lives next to `bot.py`, not in the working directory.
 
 Either way, a 401 now recovers on its own: the client asks for a fresh token
 and retries the request once. Before that, a single 401 was terminal — it was

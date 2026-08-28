@@ -148,6 +148,69 @@ def test_confidential_refresh_needs_secret():
           "not as a generic failure")
 
 
+def test_the_two_silent_renewal_failures_now_say_why():
+    """The reason a 401 can look random even with client_secret set.
+
+    refresh_if_possible returned None with no message at all when tokens.json
+    was missing, or when it had been saved for a different client_id. Either
+    makes renewal fail permanently while the bot keeps running, so it works
+    for four hours and then every Helix call 401s - with nothing in the log
+    to explain it.
+    """
+    orig = (auth.load_tokens, auth.TOKENS_PATH)
+    try:
+        # --- missing tokens.json -------------------------------------
+        auth.load_tokens = lambda: None
+        auth._WARNED.clear()
+        assert auth.refresh_if_possible({"client_id": "c",
+                                         "client_secret": "s"}) is None
+        assert "no-tokens" in auth._WARNED, auth._WARNED
+
+        # --- tokens saved for a different app ------------------------
+        auth.load_tokens = lambda: {"access_token": "t", "refresh_token": "r",
+                                    "expires_at": 0.0,
+                                    "client_id": "OTHER-APP"}
+        auth._WARNED.clear()
+        assert auth.refresh_if_possible({"client_id": "MINE",
+                                         "client_secret": "s"}) is None
+        assert "client-id-mismatch" in auth._WARNED, auth._WARNED
+
+        # --- and describe_login states it as a fact ------------------
+        lines = "\n".join(auth.describe_login({"client_id": "MINE",
+                                                "client_secret": "s"}))
+        assert "MISMATCH" in lines, lines
+        assert "OTHER-APP" in lines, lines
+        # the secret is never printed, only whether one exists
+        assert "somesecret" not in lines and "s" != lines
+        assert "client_secret  : present" in lines, lines
+    finally:
+        auth.load_tokens, auth.TOKENS_PATH = orig
+        auth._WARNED.clear()
+    print("[PASS] a missing tokens.json and a client_id mismatch both name "
+          "themselves")
+
+
+def test_a_warning_is_printed_once_not_every_wake_up():
+    """refresh_if_possible runs every 30 minutes for as long as the bot is up,
+    so an ungated print would scroll the same line past all night."""
+    import io as _io
+    import contextlib
+    orig = auth.load_tokens
+    try:
+        auth.load_tokens = lambda: None
+        auth._WARNED.clear()
+        buf = _io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            for _ in range(5):
+                auth.refresh_if_possible({"client_id": "c",
+                                          "client_secret": "s"})
+        assert buf.getvalue().count("no saved login") == 1, buf.getvalue()
+    finally:
+        auth.load_tokens = orig
+        auth._WARNED.clear()
+    print("[PASS] the diagnostic prints once, not on every 30-minute wake-up")
+
+
 def test_the_refresh_margin_outlives_the_keeper_interval():
     """The bug behind the intermittent 401s.
 
@@ -207,6 +270,8 @@ def main():
     test_scopes_all_exist()
     test_confidential_refresh_needs_secret()
     test_the_refresh_margin_outlives_the_keeper_interval()
+    test_the_two_silent_renewal_failures_now_say_why()
+    test_a_warning_is_printed_once_not_every_wake_up()
     tmp = tempfile.mkdtemp()
     tokens_path = os.path.join(tmp, "tokens.json")
 

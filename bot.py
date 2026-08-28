@@ -192,7 +192,7 @@ def _fail_config_syntax(path: str, exc: json.JSONDecodeError) -> None:
     raise SystemExit(2)
 
 
-def load_config(path: str) -> dict:
+def load_config(path: str, require: bool = True) -> dict:
     cfg = dict(DEFAULTS)
     if os.path.exists(path):
         try:
@@ -249,8 +249,10 @@ def load_config(path: str) -> dict:
                     break
 
     # The OAuth token is optional here — it can come from the auto-login flow.
+    # `require` is False for --doctor: a half-finished config is exactly what
+    # you are diagnosing, so refusing to load it would hide the answer.
     missing = [k for k in ("nick", "channel") if not cfg.get(k)]
-    if missing:
+    if require and missing:
         raise SystemExit(
             f"Missing config for: {', '.join(missing)} "
             f"(edit the config file or set the env vars)"
@@ -1509,13 +1511,40 @@ def run_selftest(cfg: dict) -> int:
     return 0 if ok else 1
 
 
+def run_doctor(cfg: dict) -> int:
+    """Print exactly why the login does or does not stay alive.
+
+    The 401 in the access log says the token was rejected but not why. Two of
+    the reasons are invisible from chat - a tokens.json saved for a different
+    client_id, and a missing refresh token - and both make renewal fail
+    silently, so the bot works for four hours and then breaks.
+    """
+    print("ClawFacts login check\n")
+    for line in auth.describe_login(cfg):
+        print("  " + line)
+
+    print("\n  attempting a real renewal ...")
+    auth._WARNED.clear()      # so this run always shows the reason
+    try:
+        new = auth.refresh_if_possible(cfg)
+    except Exception as exc:
+        print(f"  renewal raised: {exc!r}")
+        return 1
+    if new:
+        print("  renewal: OK - the bot can keep itself logged in.")
+        return 0
+    print("  renewal: did not happen. The lines above say why.")
+    return 1
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     force_login = "--login" in sys.argv
     do_selftest = "--selftest" in sys.argv
+    do_doctor = "--doctor" in sys.argv
     path = args[0] if args else "config.json"
 
-    cfg = load_config(path)
+    cfg = load_config(path, require=not do_doctor)
 
     # --debug (or TWITCH_DEBUG=1 / "debug": true) prints the exact prompts and
     # responses sent to the LLM, so you can see precisely what the AI receives.
@@ -1533,6 +1562,9 @@ def main() -> None:
 
     if not do_selftest:
         warn_config(cfg)
+
+    if do_doctor:
+        raise SystemExit(run_doctor(cfg))
 
     if do_selftest:
         raise SystemExit(run_selftest(cfg))
