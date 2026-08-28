@@ -46,6 +46,7 @@ import haul as haul_mod
 import names as names_mod
 import trucker as trucker_mod
 import shoutout as shoutout_mod
+import customcmds as customcmds_mod
 import whois
 from funfacts import get_funfact, trim_to_fit
 
@@ -84,6 +85,16 @@ CB_COMMANDS = {"cb", "radio", "breaker"}
 # !so <name> shouts a channel out. It also fires on its own when the stream
 # gets raided, so the switch moderates both paths.
 SO_COMMANDS = {"so", "shoutout"}
+# !cmd lets a moderator define new commands in chat, with no restart.
+CMD_COMMANDS = {"cmd", "customcmd"}
+
+# Everything a moderator must not be able to redefine. Without this, "!help"
+# typed by a moderator would silently stop meaning help.
+RESERVED_COMMANDS = (
+    FUNFACT_ALIASES | {"funfact"} | EXTRAS_COMMANDS | SMK_ALIASES
+    | HELP_COMMANDS | WHOIS_COMMANDS | TWITCH_COMMANDS | REMINDER_COMMANDS
+    | HAUL_COMMANDS | CB_COMMANDS | SO_COMMANDS | CMD_COMMANDS | {"bot"}
+)
 
 DEFAULTS = {
     "nick": "",
@@ -137,6 +148,7 @@ DEFAULTS = {
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
+    "custom_commands_enabled": True,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -304,6 +316,7 @@ class TwitchBot:
         # restart. A reminder set for tomorrow must not be lost to an update.
         self.reminders = reminders_mod.ReminderSet()
         self.cargo = haul_mod.Cargo()
+        self.custom_cmds = customcmds_mod.CommandSet(reserved=RESERVED_COMMANDS)
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._last_chat = time.time()       # last message seen in the channel
         self._cb_next = 0.0                 # when the next ramble may post
@@ -687,6 +700,12 @@ class TwitchBot:
             self._say_haul(nick)
             return
 
+        # Defining a command is moderation rather than chatter, so like
+        # !haul update it stays reachable while the bot is switched off.
+        if command in CMD_COMMANDS:
+            self._cmd_command(nick, badges, argument)
+            return
+
         if self.paused:
             return
 
@@ -700,6 +719,10 @@ class TwitchBot:
         elif extras_enabled and (command in EXTRAS_COMMANDS
                                  or command in CB_COMMANDS
                                  or command in SO_COMMANDS):
+            pass
+        elif command in self.custom_cmds:
+            # A command a moderator defined themselves. Deliberately outside
+            # fun_commands: they created it, so they expect it to answer.
             pass
         else:
             return
@@ -771,6 +794,55 @@ class TwitchBot:
     # ---- reminders and the cargo board --------------------------------
     def _is_mod(self, badges: str) -> bool:
         return access.tier_from_badges(badges) in ("broadcaster", "moderator")
+
+    @staticmethod
+    def _chunks(parts, budget: int, sep: str = " | ") -> list[str]:
+        """Pack `parts` into groups that each fit inside `budget` characters.
+
+        A single part longer than the budget is kept whole and passed through;
+        cutting a command name in half would advertise one that does not exist.
+        """
+        out, current = [], ""
+        for part in parts:
+            if not part:
+                continue
+            candidate = current + sep + part if current else part
+            if current and len(candidate) > budget:
+                out.append(current)
+                current = part
+            else:
+                current = candidate
+        if current:
+            out.append(current)
+        return out
+
+    def _queue_say(self, text: str) -> None:
+        """Post `text` from the worker thread instead of this one.
+
+        _say sleeps to pace messages, and while it sleeps the reader thread is
+        not reading. A multi-line !help used to sit there for seconds; the
+        commands that arrived during the freeze were then read in a burst, and
+        the channel-wide cooldown dropped them. Multi-line output goes through
+        the queue so reading never stops.
+        """
+        self._jobs.put(("", "", "", "say", text))
+
+    def _msg_limit(self) -> int:
+        return max(60, min(500, int(self.cfg.get("max_message_chars", 450))))
+
+    def _queue_fitted(self, head: str, text: str) -> None:
+        """Queue head + text, splitting on word boundaries if it will not fit.
+
+        Splitting rather than trimming: a help line cut mid-word would tell
+        someone to type half a command.
+        """
+        limit = self._msg_limit()
+        if len(head) + len(text) <= limit:
+            self._queue_say(head + text)
+            return
+        for chunk in self._chunks(text.split(), limit - len(head), sep=" "):
+            self._queue_say(head + chunk)
+            head = ""           # continuation lines carry no repeated prefix
 
     def _fit(self, head: str, body: str, tail: str = "") -> str:
         """Keep head + body + tail inside Twitch's 500-character limit."""
@@ -996,6 +1068,82 @@ class TwitchBot:
                 return
             self._say(self._fit(f"{shoutout_mod.LABEL} | ", line))
             self._log(f"[so] {name} ({count} viewers)")
+
+    def _say_custom(self, nick: str, command: str) -> None:
+        """Post a command a moderator defined."""
+        if not self.cfg.get("custom_commands_enabled", True):
+            return
+        message = self.custom_cmds.get(command)
+        if not message:
+            # Deleted between being queued and being handled. Say nothing
+            # rather than answer a command that no longer exists.
+            return
+        self._say(f"@{nick} "
+                  f"{customcmds_mod.CommandSet.render(message, nick)}")
+
+    def _cmd_command(self, nick: str, badges: str, argument: str) -> bool:
+        """!cmd add | edit | delete | list - moderators define chat commands.
+
+        Handled inline, not queued: it reads and writes one local file and
+        makes no network call, so there is nothing to pace and no reason to
+        make a moderator wait behind the rate limiter to fix a typo.
+        """
+        pre = self.cfg.get("prefix", "!")
+        sub, _, rest = argument.partition(" ")
+        sub, rest = sub.strip().lower(), rest.strip()
+
+        if sub == "list":
+            # Read-only and useful to everyone, so viewers get it too.
+            if not self.cfg.get("custom_commands_enabled", True):
+                self._say(f"@{nick} custom commands are switched off in "
+                          f"config.json (custom_commands_enabled).")
+                return True
+            names = self.custom_cmds.names()
+            if not names:
+                self._say(f"@{nick} no custom commands yet. Mods: {pre}cmd add "
+                          f"<name> <what it should say>")
+                return True
+            shown = " ".join(f"{pre}{n}" for n in names)
+            self._say(f"@{nick} {len(names)} custom command"
+                      f"{'s' if len(names) != 1 else ''}: {shown}")
+            return True
+
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            # Silent for viewers, like !so off: no reply to build a flood from.
+            self._log(f"!cmd {sub or '?'} from {nick} ignored - not a mod")
+            return True
+
+        if sub in ("", "help"):
+            self._say(f"@{nick} {pre}cmd add <name> <message> | {pre}cmd edit "
+                      f"<name> <message> | {pre}cmd delete <name> | "
+                      f"{pre}cmd list")
+            return True
+        if sub not in ("add", "edit", "delete"):
+            self._say(f"@{nick} I don't do '{pre}cmd {sub}' - try add, edit, "
+                      f"delete or list.")
+            return True
+
+        if sub == "delete":
+            name = rest
+            if not name:
+                self._say(f"@{nick} {pre}cmd delete needs the command name.")
+                return True
+            ok, why = self.custom_cmds.delete(name)
+        else:
+            name, _, message = rest.partition(" ")
+            if not name or not message.strip():
+                self._say(f"@{nick} {pre}cmd {sub} <name> <what it should say>")
+                return True
+            if sub == "add":
+                ok, why = self.custom_cmds.add(name, message)
+            else:
+                ok, why = self.custom_cmds.edit(name, message)
+
+        if ok and not self.custom_cmds.save():
+            why += " - but I could not save it, so it will not survive a restart"
+        self._say(f"@{nick} {why}")
+        self._log(f"!cmd {sub} {name} from {nick} -> ok={ok}")
+        return True
 
     def _so_switch(self, nick: str, badges: str, argument: str) -> bool:
         """!so off | !so on | !so status - moderators only.
@@ -1347,6 +1495,11 @@ class TwitchBot:
                     self._say_shoutout(nick, login, argument)
                     continue
 
+                # A literal line to post, queued by _queue_say.
+                if command == "say":
+                    self._say(argument)
+                    continue
+
                 # Every command shares the one per-user schedule: !joke and
                 # !funfact draw on the same budget, so the cheap commands
                 # cannot be used to flood either.
@@ -1369,10 +1522,8 @@ class TwitchBot:
                     self._reply_cb(nick, badges)
                 elif command in SO_COMMANDS:
                     self._reply_so(nick, badges, argument)
-                elif command == "raid":
-                    # nick carries the raider's display name, login their
-                    # login, argument the viewer count - see _on_raid.
-                    self._say_shoutout(nick, login, argument)
+                elif command in self.custom_cmds:
+                    self._say_custom(nick, command)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -1398,17 +1549,31 @@ class TwitchBot:
             f"{prefix}so <name> - shout a channel out (mods only)"
             if self.cfg.get("shoutout_enabled", True) else None,
         ]
-        self._say(f"@{nick} commands: " + " | ".join(l for l in lines if l))
-        self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
-                  f"VIP and subscribers every 60s, followers of over a day "
-                  f"every 5 minutes.")
+        # Packed into as few messages as fit, rather than one "|" line.
+        # Joining them all means every command added pushes the same message
+        # closer to Twitch's limit until it goes over, and help silently stops
+        # being deliverable. Chunking makes that impossible.
+        limit = self._msg_limit()
+        head, more = f"@{nick} commands: ", f"@{nick} more: "
+        for i, chunk in enumerate(self._chunks(lines, limit - len(head))):
+            self._queue_say((head if i == 0 else more) + chunk)
+        self._queue_fitted(
+            f"@{nick} ", "who can use them: broadcaster/mod every 30s, VIP "
+            "and subscribers every 60s, followers of over a day every 5 "
+            "minutes.")
         if self._is_mod(badges):
             # Only worth advertising to the people allowed to use it.
-            self._say(f"@{nick} mods: {prefix}reminder 60mins <message> or "
-                      f"{prefix}reminder 01:30PDT <message>, then "
-                      f"{prefix}reminder list / cancel <n>|all")
-            self._say(f"@{nick} mods: {prefix}haul update <cargo> / "
-                      f"delete, and {prefix}bot off / on / status")
+            self._queue_fitted(
+                f"@{nick} ", f"mods: {prefix}reminder 60mins <message> or "
+                f"{prefix}reminder 01:30PDT <message>, then {prefix}reminder "
+                f"list / cancel <n>|all")
+            self._queue_fitted(
+                f"@{nick} ", f"mods: {prefix}haul update <cargo> / delete, "
+                f"and {prefix}bot off / on / status")
+            self._queue_fitted(
+                f"@{nick} ", f"mods: {prefix}cmd add <name> <message> to "
+                f"create your own command, {prefix}cmd list / {prefix}cmd "
+                f"delete <name> to manage them")
 
     def _reply_extra(self, nick: str, command: str, argument: str = "") -> None:
         limit = int(self.cfg.get("max_message_chars", 450))

@@ -14,6 +14,35 @@ import funfacts
 
 
 def main() -> int:
+    # Built once so the checks below can exercise the real classes rather than
+    # grep for a string that happens to appear in a comment.
+    import os
+    import tempfile
+
+    import bot as _bot
+    import customcmds as _cc_mod
+    import shoutout as _so
+
+    def _fresh():
+        return _cc_mod.CommandSet(
+            path=os.path.join(tempfile.mkdtemp(prefix="clawfacts-check-"),
+                              "cc.json"),
+            reserved=_bot.RESERVED_COMMANDS)
+
+    _cc = _fresh()
+
+    def _survives_restart():
+        path = os.path.join(tempfile.mkdtemp(prefix="clawfacts-check-"),
+                            "cc.json")
+        made = _cc_mod.CommandSet(path=path, reserved=_bot.RESERVED_COMMANDS)
+        made.add("survivor", "still here")
+        if not made.save():
+            return False
+        again = _cc_mod.CommandSet(path=path, reserved=_bot.RESERVED_COMMANDS)
+        return again.get("survivor") == "still here"
+
+    _bot_src = pathlib.Path("bot.py").read_text(encoding="utf-8")
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -308,6 +337,20 @@ def main() -> int:
         ("'python3 bot.py --doctor' explains why the login dies",
          hasattr(__import__("bot"), "run_doctor")
          and hasattr(__import__("auth"), "describe_login")),
+        ("a raid is answered (USERNOTICE msg-id=raid is parsed at all)",
+         hasattr(_bot.TwitchBot, "_on_raid") and "USERNOTICE" in _bot_src),
+        ("the shoutout link comes from the login, never the display name",
+         _so.url_for("Big Al") == ""
+         and _so.url_for("@Hardclaws") == "twitch.tv/hardclaws"),
+        ("moderators can switch raid shoutouts off in chat",
+         hasattr(_bot.TwitchBot, "_so_switch")),
+        ("a moderator can create a new command in chat",
+         _cc.add("checkfix", "hello")[0] and _cc.get("checkfix") == "hello"),
+        ("a custom command cannot hijack a built-in like !help",
+         not _cc.add("help", "hijacked")[0]),
+        ("a mod-created command survives a restart", _survives_restart()),
+        ("an over-long command message is refused, not truncated",
+         not _cc.add("toolong", "w" * (_cc_mod.MAX_MESSAGE + 1))[0]),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

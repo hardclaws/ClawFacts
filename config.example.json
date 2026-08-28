@@ -42,6 +42,8 @@
   "cb_command_enabled": true,
   "cb_command_access": "everyone",
   "cb_yell_enabled": true,
+  "shoutout_enabled": true,
+  "custom_commands_enabled": true,
   "names_topup_enabled": true,
   "names_topup_hours": 12
 }

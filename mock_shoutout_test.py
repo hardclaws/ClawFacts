@@ -7,6 +7,7 @@ the interesting failures here are in the IRC parse - and USERNOTICE was not
 handled at all before, so a raid was invisible to the bot.
 """
 
+import threading
 import re
 
 import bot as bot_mod
@@ -236,11 +237,24 @@ def test_so_with_no_name_shows_usage():
 def test_help_mentions_it():
     b, said = _bot()
     b._say_help("viewer19")
+    _drain(b)
     assert any("!so <name>" in m for m in said), said
     b, said = _bot(shoutout_enabled=False)
     b._say_help("viewer19")
+    _drain(b)
     assert not any("!so" in m for m in said), said
     print("[PASS] !help advertises !so, and drops it when switched off")
+
+
+def _drain(b):
+    """Collect what the bot queued.
+
+    !help now queues its lines instead of saying them inline, so the reader
+    thread is never left sleeping inside _say's pacing gap. Run the real
+    worker to collect them.
+    """
+    threading.Thread(target=b._worker, daemon=True).start()
+    b._jobs.join()
 
 
 def main():

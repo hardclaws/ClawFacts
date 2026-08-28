@@ -12,3 +12,4 @@ __pycache__/
 
 # harvested !smk name cache (rebuilt in the background, never hand-edited)
 names.json
+custom_commands.json

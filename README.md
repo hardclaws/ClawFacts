@@ -209,6 +209,10 @@ Quick-and-dirty local alternatives:
 | `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
 | `!twitch hardclaws`   | Who that Twitch channel is.                                   |
 | `!cb`                 | The bot talks on the radio, or yells at a car (also `!radio`).|
+| `!so <name>`          | Shout a channel out. **Moderators only.**                     |
+| `!so off` / `!so on`  | Moderator switch for raid shoutouts.                          |
+| `!cmd add <n> <msg>`  | Create your own command. **Moderators only.**                 |
+| `!cmd list`           | The commands this channel has defined. Anyone may read it.    |
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -1145,6 +1149,89 @@ run. Four genuine CB terms that refer to sex work — *lot lizard*, *sleeper
 creeper*, *male buffalo*, *pickle park* — are deliberately absent, and a test
 fails if any of them is ever added to a pool.
 
+## Shoutouts on a raid
+
+When the stream gets raided the bot posts a shoutout on its own, with nothing
+to configure:
+
+```
+SO | Shoutout to DaniLikesDonuts for raiding in with 42! Go say hello and
+give 'em a follow. Twitch Affiliate, 1,284 followers. They're over at
+twitch.tv/danilikesdonuts
+```
+
+Every part of that line is read off something real. The name and the viewer
+count come from the raid notice Twitch itself sends (`USERNOTICE` with
+`msg-id=raid`). The affiliate/partner line and the follower count come from the
+Helix API. The link is built from the raider's **login**, never their display
+name — display names carry capitals, spaces and unicode that a URL does not. If
+the login cannot be a Twitch login (4-25 characters of `a-z`, `0-9` and `_`)
+then no link is posted at all, because a dead link in a shoutout is worse than
+no link. If nothing trustworthy can be said, the bot says nothing.
+
+The Helix lookup is best-effort. A raid is the worst possible moment to be
+waiting on a network call, and the token can be expired, so the name-and-count
+shoutout is always available as the floor. The bot also never claims to know
+what the raider is streaming, because the profile lookup does not fetch that.
+
+A raid is answered without checking whether the raider follows the channel.
+They usually do not, and they carry no badges in this message — running a raid
+through the normal access gate would refuse the one thing that should always be
+answered.
+
+| Switch | Effect |
+| ------ | ------ |
+| `!so off` / `!so on` / `!so status` | Moderator switch, lasts until the bot restarts. Silent for viewers. |
+| `!so <name>` | Shout a channel out by hand. **Moderators only.** |
+| `!so` (no argument) | Shows usage rather than guessing. |
+| `"shoutout_enabled": false` | Turns both paths off in `config.json`. |
+
+## Commands your mods write themselves
+
+A moderator can add a command in chat, with no restart and no editing files:
+
+```
+!cmd add discord Join us on Discord - discord.gg/example
+!cmd list
+!cmd edit discord New link: discord.gg/example
+!cmd delete discord
+```
+
+`!discord` then answers for anyone who passes the normal access gate. `{user}`
+is replaced with whoever asked:
+
+```
+!cmd add hi G'day {user}, welcome aboard
+```
+
+What is *not* up to the moderator:
+
+* **A custom command cannot shadow a built-in.** `!cmd add help ...` is
+  refused. If it were allowed, `!help` would still look like it worked while
+  meaning something else.
+* **The message is capped at 380 characters**, and an over-long one is refused
+  with its length named rather than cut off mid-sentence when posted.
+* **Names are 2-25 characters** of `a-z`, `0-9` and `_`, starting with a
+  letter. Upper case is folded, not refused.
+* **They still go through the access gate and the channel cooldown** — a custom
+  command is not a way around the rate limit.
+* **`!bot off` silences them**, though a moderator can still define one while
+  the bot is paused, so switching the bot off is not a one-way trip.
+
+They live in `custom_commands.json` next to the code, written atomically, so
+they survive a restart. An unreadable or wrong-shaped file is reported and
+ignored rather than stopping the bot, and a hand-edited file still cannot
+hijack a built-in name. There is a ceiling of 100 commands.
+
+`!cmd list` is readable by anyone — the commands are used in public chat, so
+there is nothing to hide. Everything else is moderator-only and **silent** for
+viewers, so it cannot be used to make the bot spam. An unknown placeholder such
+as `{usr}` is left visible rather than blanked, so a typo shows up instead of
+quietly eating text.
+
+`"custom_commands_enabled": false` in `config.json` stops them running without
+deleting them, and `!cmd list` names that as the reason.
+
 ## Testing without Twitch
 
 - **Full self-test** (recommended): runs the login check + sample fact lookups
@@ -1338,6 +1425,10 @@ appends fake joke comments.
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
 | `haul.py`            | The `!haul` board.                              |
+| `customcmds.py`      | `!cmd` - moderator-defined commands.            |
+| `shoutout.py`        | The raid shoutout wording.                      |
+| `trucker.py`         | The `!cb` radio chatter generator.              |
+| `access.py`          | Who may use a command, and how often.           |
 | `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
@@ -1355,7 +1446,11 @@ appends fake joke comments.
 | `mock_whois_test.py` | Offline `!whois` / `!twitch` tests.             |
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_idle_test.py`  | Offline idle-chat tests.                        |
+| `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
+| `mock_shoutout_test.py` | Offline raid-shoutout tests.                 |
+| `mock_customcmds_test.py` | Offline `!cmd` tests.                      |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |
+| `custom_commands.json` | Mod-defined commands; written at runtime.     |
 | `names.json`         | Harvested `!smk` names; written at runtime.     |

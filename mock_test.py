@@ -272,7 +272,11 @@ def main():
     pongs = [l for l in bot_lines if l.startswith("PONG")]
     riddles = [l for l in bot_lines if "PRIVMSG" in l and "Riddle |" in l]
     answers = [l for l in bot_lines if "PRIVMSG" in l and "Answer |" in l]
-    helps = [l for l in bot_lines if "PRIVMSG" in l and "commands:" in l]
+    # The command list is packed into as many messages as fit, so the
+    # continuation lines have to be collected too or the later commands in the
+    # list would never be checked.
+    helps = [l for l in bot_lines if "PRIVMSG" in l
+             and ("commands:" in l or " more: " in l)]
     smk = [l for l in bot_lines if "PRIVMSG" in l and "ShagMarryKill" in l]
     switches = [l for l in bot_lines if "PRIVMSG" in l and "!bot" in l]
     cargo = [l for l in bot_lines if "PRIVMSG" in l
@@ -455,7 +459,11 @@ def main():
     if not any("@nobody" in l for l in helps):
         print("FAIL: !help did not answer the badge-less viewer")
         return 1
-    if not any("!funfact <place>" in l and "!smk" in l for l in helps):
+    # The command list is packed into as many messages as fit rather than one
+    # "|" line, so both names have to be present somewhere in the help output
+    # rather than on the same line.
+    help_all = " ".join(helps)
+    if "!funfact <place>" not in help_all or "!smk" not in help_all:
         print("FAIL: !help did not list the commands")
         return 1
     for want in ("[female]", "[male]", "[any]"):

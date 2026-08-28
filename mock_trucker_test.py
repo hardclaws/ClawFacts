@@ -6,6 +6,7 @@ Nothing reaches the network. The generator is local, so the interesting
 failures here are grammar, exhaustiveness and clock behaviour rather than I/O.
 """
 
+import threading
 import re
 
 import bot as bot_mod
@@ -317,6 +318,7 @@ def test_command_reply_posts_without_a_mention():
 def test_help_advertises_the_command():
     b, said = _bot()
     b._say_help("viewer19")
+    _drain(b)
     joined = " ".join(said)
     assert "!cb - the bot talks on the radio" in joined, joined[:200]
     print("[PASS] !help advertises !cb")
@@ -439,9 +441,11 @@ def test_on_names_the_config_setting_when_config_has_it_off():
 def test_help_omits_a_command_that_is_switched_off():
     b, said = _bot(cb_command_enabled=False)
     b._say_help("viewer19")
+    _drain(b)
     assert not any("!cb" in m for m in said), said
     b, said = _bot()
     b._say_help("viewer19")
+    _drain(b)
     assert any("!cb" in m for m in said)
     print("[PASS] !help only advertises !cb when the command is on")
 
@@ -541,6 +545,17 @@ def test_the_yelling_is_grammatical():
     assert not bad, bad[:2]
     print("[PASS] 30000 yells, no 'to <past tense>' and no ordinal before a "
           "vehicle")
+
+
+def _drain(b):
+    """Collect what the bot queued.
+
+    !help now queues its lines instead of saying them inline, so the reader
+    thread is never left sleeping inside _say's pacing gap. Run the real
+    worker to collect them.
+    """
+    threading.Thread(target=b._worker, daemon=True).start()
+    b._jobs.join()
 
 
 def main():

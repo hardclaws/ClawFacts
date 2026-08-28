@@ -420,6 +420,7 @@ def test_twitch_legacy_spellings_still_work():
     # !twitch is the only spelling that gets advertised.
     b, said = _bot()
     b._say_help("viewer1", "")
+    _drain(b)
     help_text = " ".join(said)
     assert "!twitch <name>" in help_text, help_text
     assert "!whotwitch" not in help_text, help_text
@@ -431,6 +432,17 @@ def test_twitch_legacy_spellings_still_work():
         b._reply_twitch("viewer1", "hardclaws")
         assert said[-1].startswith("Twitch | Hardclaws |"), (spelling, said[-1])
     print("[PASS] all four spellings work; only !twitch appears in !help")
+
+
+def _drain(b):
+    """Collect what the bot queued.
+
+    !help now queues its lines instead of saying them inline, so the reader
+    thread is never left sleeping inside _say's pacing gap. Run the real
+    worker to collect them.
+    """
+    threading.Thread(target=b._worker, daemon=True).start()
+    b._jobs.join()
 
 
 def main():
