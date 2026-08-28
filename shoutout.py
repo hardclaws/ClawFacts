@@ -99,7 +99,7 @@ OPENERS_MANUAL = {
         "🙌 Shoutout to {name} - 10-10 on the side.",
     ),
     "zwift": (
-        "📣 Chat, go meet {name} - worth the stop.",
+        "📣 Chat, go meet {name} - worth every kilometre.",
         "🚴 Everybody go say hi to {name}.",
         "🚴 Go find {name} - good legs, better company.",
         "📣 {name} is the kind of channel you leave running all ride.",

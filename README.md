@@ -1188,8 +1188,8 @@ and they'll tell you straight when you earned it. Go show them some love at
 twitch.tv/llamalover
 ```
 
-There are 30 raid openers, 27 manual ones, 32 praise lines, and 16 each of the
-present-tense and past-tense game lines — 121 distinct pieces of copy and
+There are 30 raid openers, 28 manual ones, 32 praise lines, and 16 each of the
+present-tense and past-tense game lines — 122 distinct pieces of copy and
 1,888 combinations before names and counts go in. The praise lines carry no
 call to action on purpose: the ask is the one line at the end, and a message
 that asks twice reads like boilerplate.
