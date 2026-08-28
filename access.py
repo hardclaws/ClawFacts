@@ -228,7 +228,11 @@ class Helix:
         return bool(data.get("data"))
 
     def user_id(self, login: str):
-        login = (login or "").strip().lower()
+        # clean_login, not a bare strip: callers hand this a channel name, and
+        # "#truckingwithdoc" is what config carries. Sending the '#' to Helix
+        # gets a 400, which reads as "that channel does not exist" and quietly
+        # disables every follow check.
+        login = clean_login(login).lower()
         if not login:
             return None
         if login in self._ids:

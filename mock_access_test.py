@@ -81,6 +81,30 @@ def make_helix(**kw):
     return access.Helix("client", "token", "12345", **kw)
 
 
+def test_user_id_sends_a_clean_login(port):
+    """'#truckingwithdoc' must reach Helix as 'truckingwithdoc'.
+
+    Sending the '#' gets HTTP 400, which reads as "that channel does not
+    exist" and silently disables every follow check in the bot. user_id used
+    to depend on its caller stripping the '#'; when that was removed the
+    channel name went through verbatim. Assert what actually left the process,
+    not what the helper returns - that is the only way this can be caught.
+    """
+    h = make_helix()
+    for raw in ("#truckingwithdoc", "@truckingwithdoc", "truckingwithdoc"):
+        STATE["calls"].clear()
+        h._ids.clear()
+        uid = h.user_id(raw)
+        sent = [p for p in STATE["calls"] if "/helix/users" in p]
+        assert sent, f"no Helix call for {raw!r}: {STATE['calls']}"
+        assert "login=truckingwithdoc" in sent[0], (raw, sent[0])
+        # Neither '#' nor '@' may survive in any encoding.
+        assert "%23" not in sent[0] and "%40" not in sent[0], sent[0]
+        assert "#" not in sent[0].split("login=")[-1], sent[0]
+        assert uid, (raw, uid)
+    print("[PASS] user_id sends a clean login for #name, @name and a bare name")
+
+
 def test_badge_tiers(port):
     assert access.tier_from_badges("broadcaster/1") == "broadcaster"
     assert access.tier_from_badges("moderator/1") == "moderator"
@@ -411,7 +435,8 @@ def main():
                test_set_token_recovers_after_a_refresh,
                test_moderator_check, test_describe_token,
                test_startup_diagnosis, test_startup_diagnosis_clean,
-               test_channel_profile, test_disabled):
+               test_channel_profile, test_disabled,
+               test_user_id_sends_a_clean_login):
         fn(port)
     server.shutdown()
     print("ALL PASSED ✔")
