@@ -279,6 +279,14 @@ def main() -> int:
                  for line in lines
                  for term in ("lot lizard", "sleeper creeper",
                               "male buffalo", "pickle park"))),
+        ("!cb can be switched off on its own (ambient keeps going)",
+         "cb_command_enabled" in
+         pathlib.Path("bot.py").read_text(encoding="utf-8")),
+        ("!cb can be limited to moderators or the broadcaster",
+         "cb_command_access" in
+         pathlib.Path("bot.py").read_text(encoding="utf-8")),
+        ("a moderator can switch the random chatter from chat",
+         hasattr(__import__("bot").TwitchBot, "_cb_switch")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

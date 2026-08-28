@@ -134,6 +134,10 @@ SCRIPT = [
     # !cb takes no argument: the bot just talks on the radio.
     (57.0, privmsg("viewer20", "!cb", "subscriber/01")),
     (58.0, privmsg("viewer21", "!radio", "subscriber/01")),
+    # The switch is moderator-only. A viewer gets no answer at all, so it
+    # cannot be used to make the bot talk; the moderator gets a real status.
+    (58.4, privmsg("viewer22", "!cb off", "subscriber/01")),
+    (58.8, privmsg("viewer1", "!cb status", "moderator/1")),
     (59.5, privmsg("viewer17", "!smk any", "vip/1")),
 ]
 
@@ -414,6 +418,18 @@ def main():
     else:
         print("[PASS] !cb and !radio each answered once, unmentioned, and "
               "inside Twitch's limit")
+
+    # !cb off/on/status: a viewer is ignored silently, a moderator is answered.
+    if any("viewer22" in l for l in bot_lines):
+        print(f"FAIL: a viewer's !cb off was answered: "
+              f"{[l for l in bot_lines if 'viewer22' in l]}")
+        return 1
+    status = [l for l in bot_lines if "random truck talk is" in l]
+    if not status:
+        print("FAIL: the moderator's !cb status was not answered")
+        return 1
+    print(f"[PASS] !cb status answered the moderator and ignored a viewer "
+          f"({status[0].split(':', 1)[-1].strip()[:58]})")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "

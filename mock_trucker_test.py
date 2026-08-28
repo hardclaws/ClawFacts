@@ -20,6 +20,7 @@ SLOT_RE = re.compile(r"\{(\w+)\}")
 LOWERCASE_AFTER_STOP = re.compile(r"(?<=\. )[a-z]")
 
 IRC_CAP = 450
+T = 1_000_000.0
 
 
 def _bot(live=True, **cfg):
@@ -294,6 +295,130 @@ def test_help_advertises_the_command():
     print("[PASS] !help advertises !cb")
 
 
+# --- the three switches ---------------------------------------------------
+
+MOD = "moderator/1"
+BC = "broadcaster/1"
+VIEWER = ""
+SUB = "subscriber/12"
+
+
+def test_command_can_be_switched_off_while_ambient_survives():
+    """The point of a separate switch: random chatter keeps going."""
+    b, said = _bot(cb_command_enabled=False)
+    b._reply_cb("viewer19", SUB)
+    assert said == [], said
+    b._cb_next = 0.0
+    b._last_chat = T - 3600.0
+    assert b._cb_chatter_tick(now=T), "ambient must survive"
+    assert len(said) == 1
+    print("[PASS] cb_command_enabled=false silences !cb but not the chatter")
+
+
+def test_access_can_be_limited_to_moderators():
+    b, _ = _bot(cb_command_access="moderator")
+    assert b._cb_allowed(VIEWER) is False
+    assert b._cb_allowed(SUB) is False
+    assert b._cb_allowed(MOD) is True
+    assert b._cb_allowed(BC) is True
+    b, said = _bot(cb_command_access="moderator")
+    b._reply_cb("viewer19", SUB)
+    assert said == [], "a subscriber must be ignored"
+    b._reply_cb("amod", MOD)
+    assert len(said) == 1, said
+    print("[PASS] cb_command_access=moderator ignores viewers and subs")
+
+
+def test_access_can_be_limited_to_the_broadcaster():
+    b, _ = _bot(cb_command_access="broadcaster")
+    assert b._cb_allowed(MOD) is False
+    assert b._cb_allowed(BC) is True
+    print("[PASS] cb_command_access=broadcaster excludes even moderators")
+
+
+def test_a_misspelt_access_setting_fails_closed():
+    """A typo must not silently open the command to everyone."""
+    for bad in ("moderatr", "every one", "", "nobody"):
+        b, _ = _bot(cb_command_access=bad)
+        assert b._cb_allowed(VIEWER) is False, bad
+        assert b._cb_allowed(MOD) is True, bad
+    print("[PASS] an unrecognised cb_command_access fails closed to moderator")
+
+
+def test_everyone_is_the_default():
+    b, _ = _bot()
+    assert b.cfg["cb_command_access"] == "everyone"
+    assert b._cb_allowed(VIEWER) is True
+    print("[PASS] by default anyone may ask for one")
+
+
+def test_a_bare_cb_is_not_mistaken_for_a_switch():
+    b, said = _bot()
+    assert b._cb_switch("amod", MOD, "") is False
+    assert b._cb_switch("amod", MOD, "hardclaws") is False
+    assert said == [], said
+    print("[PASS] !cb with no verb still rambles instead of switching")
+
+
+def test_a_viewer_cannot_touch_the_switch():
+    b, said = _bot()
+    assert b._cb_switch("viewer19", SUB, "off") is True   # recognised
+    assert said == [], f"a viewer must get no answer: {said}"
+    assert b._cb_ambient_off is False, "and it must not take effect"
+    print("[PASS] !cb off from a viewer is ignored, and stays silent")
+
+
+def test_a_moderator_can_switch_the_random_chatter():
+    T2 = T
+    b, said = _bot()
+    assert b._cb_switch("amod", MOD, "off") is True
+    assert any("OFF" in m for m in said), said
+    b._cb_next = 0.0
+    b._last_chat = T2 - 3600.0
+    said.clear()
+    assert b._cb_chatter_tick(now=T2) is None
+    assert said == [], "off must actually stop it"
+    assert b._cb_next > T2, "and must push the clock, not leave it due"
+
+    assert b._cb_switch("amod", MOD, "on") is True
+    b._cb_next = 0.0
+    assert b._cb_chatter_tick(now=T2), "on must bring it back"
+    print("[PASS] !cb off stops the random chatter, !cb on restores it")
+
+
+def test_status_reports_the_real_state():
+    b, said = _bot()
+    b._cb_switch("amod", MOD, "status")
+    assert "ON" in said[0], said
+    b._cb_switch("amod", MOD, "off")
+    b._cb_switch("amod", MOD, "status")
+    assert "OFF" in said[-1], said
+    print("[PASS] !cb status reports the state it is actually in")
+
+
+def test_on_names_the_config_setting_when_config_has_it_off():
+    """Promising 'back on' while the keeper thread was never started is a
+    lie, so it names the setting that is really holding it."""
+    b, said = _bot(cb_chatter_enabled=False)
+    assert b._cb_switch("amod", MOD, "on") is True
+    assert "cb_chatter_enabled" in said[0], said
+    assert "back ON" not in said[0], said
+    said.clear()
+    b._cb_switch("amod", MOD, "status")
+    assert "config.json" in said[0], said
+    print("[PASS] with cb_chatter_enabled=false it names the config key")
+
+
+def test_help_omits_a_command_that_is_switched_off():
+    b, said = _bot(cb_command_enabled=False)
+    b._say_help("viewer19")
+    assert not any("!cb" in m for m in said), said
+    b, said = _bot()
+    b._say_help("viewer19")
+    assert any("!cb" in m for m in said)
+    print("[PASS] !help only advertises !cb when the command is on")
+
+
 def main():
     tests = [
         test_every_slot_has_a_pool,
@@ -317,6 +442,17 @@ def main():
         test_it_posts_when_due_and_reschedules,
         test_command_reply_posts_without_a_mention,
         test_help_advertises_the_command,
+        test_command_can_be_switched_off_while_ambient_survives,
+        test_access_can_be_limited_to_moderators,
+        test_access_can_be_limited_to_the_broadcaster,
+        test_a_misspelt_access_setting_fails_closed,
+        test_everyone_is_the_default,
+        test_a_bare_cb_is_not_mistaken_for_a_switch,
+        test_a_viewer_cannot_touch_the_switch,
+        test_a_moderator_can_switch_the_random_chatter,
+        test_status_reports_the_real_state,
+        test_on_names_the_config_setting_when_config_has_it_off,
+        test_help_omits_a_command_that_is_switched_off,
     ]
     failed = 0
     for test in tests:

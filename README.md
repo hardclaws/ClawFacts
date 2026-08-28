@@ -1053,8 +1053,40 @@ without an `@` mention — the bot is on the radio, not replying to a question.
 
 ```json
 "cb_chatter_enabled": true,
-"cb_chatter_minutes": 25
+"cb_chatter_minutes": 25,
+"cb_command_enabled": true,
+"cb_command_access": "everyone"
 ```
+
+### Turning parts of it off
+
+The random chatter and the command are separate switches, so you can keep one
+without the other:
+
+| You want | Set this |
+| --- | --- |
+| Only the random chatter, nobody can ask for one | `"cb_command_enabled": false` |
+| Only on demand, never unprompted | `"cb_chatter_enabled": false` |
+| Only mods (and the broadcaster) may ask for one | `"cb_command_access": "moderator"` |
+| Only the broadcaster may ask for one | `"cb_command_access": "broadcaster"` |
+
+A misspelt `cb_command_access` is treated as `"moderator"`, not `"everyone"` —
+an access setting should fail closed. When the command is switched off it also
+disappears from `!help`.
+
+**A moderator can also switch the random chatter from chat**, without editing a
+file:
+
+```
+!cb off      - silence the random chatter (mods and broadcaster only)
+!cb on       - bring it back
+!cb status   - which state it is in
+```
+
+`!cb off` lasts until the next restart; `cb_chatter_enabled` in config.json is
+the permanent setting. That is the same split `!bot off` uses. A viewer who
+types `!cb off` gets no answer at all, so the switch cannot become a spam
+vector — and unlike `!bot off`, it does not silence anything else.
 
 **The timing is deliberately not a fixed period.** `cb_chatter_minutes` is an
 *average*: the gap before each post is re-rolled between 40% and 200% of it, so

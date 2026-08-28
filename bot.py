@@ -119,6 +119,13 @@ DEFAULTS = {
     # false to keep !cb as a command only.
     "cb_chatter_enabled": True,
     "cb_chatter_minutes": 25,
+    # The !cb command itself, kept separate from the random chatter above:
+    # switch the command off and the bot still talks on the radio by itself.
+    "cb_command_enabled": True,
+    # Who may ask for one on demand: "everyone", "moderator" (mods and the
+    # broadcaster) or "broadcaster". Anything unrecognised is treated as
+    # "moderator" - an access setting should fail closed, not open.
+    "cb_command_access": "everyone",
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -287,6 +294,7 @@ class TwitchBot:
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._last_chat = time.time()       # last message seen in the channel
         self._cb_next = 0.0                 # when the next ramble may post
+        self._cb_ambient_off = False        # !cb off, until the next restart
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -627,6 +635,12 @@ class TwitchBot:
             self._bot_switch(nick, badges, argument.strip().lower())
             return
 
+        # !cb off/on/status moderates the random chatter and must stay
+        # reachable while the bot is switched off, or a moderator could not
+        # re-enable it. A bare !cb still falls through to the normal gate.
+        if command in CB_COMMANDS and self._cb_switch(nick, badges, argument):
+            return
+
         if command in REMINDER_COMMANDS:
             self._reminder_command(nick, badges, argument)
             return
@@ -835,13 +849,84 @@ class TwitchBot:
     def _mention(nick: str) -> str:
         return f"@{nick} " if nick else ""
 
-    def _reply_cb(self, nick: str) -> None:
+    def _cb_allowed(self, badges: str) -> bool:
+        """Whether these badges may run !cb on demand.
+
+        Separate from the rate limit, which still applies on top: this decides
+        *whether* a request is honoured at all, not how often.
+        """
+        want = str(self.cfg.get("cb_command_access", "everyone")).lower()
+        if want == "everyone":
+            return True
+        tier = access.tier_from_badges(badges)
+        if want == "broadcaster":
+            return tier == "broadcaster"
+        # "moderator", and anything misspelt, means mod or broadcaster.
+        return tier in ("broadcaster", "moderator")
+
+    def _cb_switch(self, nick: str, badges: str, argument: str) -> bool:
+        """!cb off | !cb on | !cb status - moderates the RANDOM chatter only.
+
+        Returns True when the argument was a switch verb, so the caller does
+        not also post a ramble on the same line. "Off" lasts until the next
+        restart; `cb_chatter_enabled` in config.json is the permanent setting.
+        That is the same split `!bot off` uses, and it means a moderator can
+        quiet an annoying feature mid-stream without editing a file.
+        """
+        verb = (argument or "").strip().lower()
+        if verb not in ("off", "on", "status", "disable", "enable",
+                        "pause", "resume"):
+            return False
+        pre = self.cfg.get("prefix", "!")
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            # Silent for everyone else, as with !bot: answering would make the
+            # switch itself a spam vector for viewers who find it by accident.
+            self._log(f"!cb {verb} from {nick} ignored - not a moderator")
+            return True
+        if verb in ("off", "disable", "pause"):
+            self._cb_ambient_off = True
+            self._say(f"@{nick} random truck talk is OFF - {pre}cb on brings "
+                      f"it back. {pre}cb on its own still works.")
+        elif verb in ("on", "enable", "resume"):
+            if not self.cfg.get("cb_chatter_enabled", True):
+                # The keeper thread was never started, so promising "back on"
+                # would be a lie. Name the setting that is actually holding it.
+                self._say(f"@{nick} random truck talk is switched off in "
+                          f"config.json (cb_chatter_enabled) - {pre}cb on its "
+                          f"own still works.")
+                return True
+            self._cb_ambient_off = False
+            self._say(f"@{nick} random truck talk is back ON, every "
+                      f"{self.cfg.get('cb_chatter_minutes', 25)} min on "
+                      f"average.")
+        else:
+            if not self.cfg.get("cb_chatter_enabled", True):
+                self._say(f"@{nick} random truck talk is OFF in config.json "
+                          f"(cb_chatter_enabled).")
+            else:
+                state = "OFF" if self._cb_ambient_off else "ON"
+                self._say(f"@{nick} random truck talk is {state}. {pre}cb off "
+                          f"to silence it, {pre}cb on to resume.")
+        self._log(f"!cb {verb} from {nick} -> "
+                  f"ambient={not self._cb_ambient_off}")
+        return True
+
+    def _reply_cb(self, nick: str, badges: str = "") -> None:
         """One line of CB chatter, on demand.
 
         Deliberately no `@nick` prefix: the bot is talking on the radio, not
         answering a question, and the mention breaks the voice. The log names
         whoever asked so a moderator can still trace it.
         """
+        if not self.cfg.get("cb_command_enabled", True):
+            self._log(f"!cb from {nick or 'chat'} ignored - cb_command_enabled "
+                      f"is false")
+            return
+        if not self._cb_allowed(badges):
+            self._log(f"!cb from {nick or 'chat'} ignored - "
+                      f"cb_command_access is "
+                      f"{self.cfg.get('cb_command_access', 'everyone')!r}")
+            return
         line = trucker_mod.ramble()
         self._say(self._fit("", line))
         self._log(f"cb ramble for {nick or 'chat'}: {line[:60]}")
@@ -871,6 +956,11 @@ class TwitchBot:
         if not self.cfg.get("cb_chatter_enabled", True):
             return None
         if self.paused or not self.cfg.get("fun_commands", True):
+            return None
+        if self._cb_ambient_off:
+            # Held by a moderator. Keep pushing the clock forward so that
+            # re-enabling does not fire into chat on the very next tick.
+            self._cb_next = now + self._cb_next_delay()
             return None
         if now < self._cb_next:
             return None
@@ -1112,7 +1202,7 @@ class TwitchBot:
                 elif command in TWITCH_COMMANDS:
                     self._reply_twitch(nick, argument)
                 elif command in CB_COMMANDS:
-                    self._reply_cb(nick)
+                    self._reply_cb(nick, badges)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -1133,9 +1223,10 @@ class TwitchBot:
             f"{prefix}haul - what the truck is hauling right now",
             f"{prefix}whois <name> - who that person is",
             f"{prefix}twitch <name> - who that Twitch channel is",
-            f"{prefix}cb - the bot talks on the radio",
+            f"{prefix}cb - the bot talks on the radio"
+            if self.cfg.get("cb_command_enabled", True) else None,
         ]
-        self._say(f"@{nick} commands: " + " | ".join(lines))
+        self._say(f"@{nick} commands: " + " | ".join(l for l in lines if l))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
                   f"VIP and subscribers every 60s, followers of over a day "
                   f"every 5 minutes.")
