@@ -1058,6 +1058,7 @@ class TwitchBot:
         with self._so_lock:
             profile = None
             stream = None
+            last_game = ""
             helix = self._access.helix
             if helix is not None:
                 try:
@@ -1072,9 +1073,18 @@ class TwitchBot:
             if profile and profile.get("display_name"):
                 name = profile["display_name"]
                 login = profile.get("login") or login
+            if not stream and profile and profile.get("id") and helix:
+                # Offline, so ask the one endpoint that knows what they were
+                # last on. Skipped entirely when they are live: Get Streams
+                # already gave the current category.
+                try:
+                    info = helix.channel_info(profile["id"])
+                    last_game = (info or {}).get("game_name") or ""
+                except Exception as exc:
+                    self._log(f"[so] last category lookup failed: {exc!r}")
             line = shoutout_mod.format_raid(
-                name, count, login, profile,
-                theme=self._so_theme(helix), raider_stream=stream)
+                name, count, login, profile, theme=self._so_theme(helix),
+                raider_stream=stream, last_game=last_game)
             if not line:
                 self._log("[so] nothing trustworthy to say; skipped")
                 return
@@ -1231,7 +1241,11 @@ class TwitchBot:
             # answering every viewer who finds it becomes a spam vector.
             self._log(f"!so from {nick} ignored - not a moderator")
             return
-        self._say_shoutout(query, access.clean_login(query), "")
+        # One cleaning, used for both. The login has to be clean or the URL is
+        # dead; the name has to be clean too, or the sentence reads "shoutout
+        # to twitch.tv/hardclaws" because the moderator pasted a link.
+        login = access.clean_login(query)
+        self._say_shoutout(login or query, login, "")
 
     def _reply_cb(self, nick: str, badges: str = "") -> None:
         """One line of CB chatter, on demand.

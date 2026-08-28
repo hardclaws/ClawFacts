@@ -61,6 +61,8 @@ def main() -> int:
                 low = line.lower()
                 game = (stream or {}).get("game_name") or ""
                 if "last seen" in low:
+                    # No last_game is passed here, so any past-tense claim is
+                    # unsourced and wrong.
                     return False
                 if game:
                     # A confirmed game must always be named.
@@ -75,6 +77,34 @@ def main() -> int:
                 if low.count("show them some love") != 1:
                     return False
                 if low.count("raid") > 1:
+                    return False
+        return True
+
+    def _last_seen_is_sourced():
+        """'Last seen playing' must come from Get Channel Information.
+
+        That endpoint's game_name is documented as the game the broadcaster
+        "is playing or last played"; Get Streams answers only for channels
+        live right now. Being live must also win, so a stale category never
+        prints next to a current one.
+        """
+        import shoutout as _so
+
+        for theme in _so.THEMES:
+            for _ in range(50):
+                last = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                       theme=theme, last_game="Fortnite")
+                if "last seen" not in last.lower() or "Fortnite" not in last:
+                    return False
+                live = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                       theme=theme,
+                                       raider_stream={"game_name": "Fortnite"},
+                                       last_game="Minecraft")
+                if "last seen" in live.lower() or "Minecraft" in live:
+                    return False
+                none = _so.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                       theme=theme)
+                if "last seen" in none.lower():
                     return False
         return True
 
@@ -395,6 +425,9 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("'last seen playing' is sourced from Get Channel Information",
+         hasattr(__import__("access").Helix("c", "t", "1"), "channel_info")
+         and _last_seen_is_sourced()),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

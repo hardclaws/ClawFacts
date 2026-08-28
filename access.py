@@ -259,6 +259,35 @@ class Helix:
         rows = data.get("data") or []
         return rows[0] if rows else None
 
+    def channel_info(self, broadcaster_id: str):
+        """What the channel says about itself, whether it is live or not.
+
+        This is the only Helix endpoint that publishes a *last* category. Its
+        game_name is documented as "the game that the broadcaster is playing
+        or last played", and unlike Get Streams it answers for offline
+        channels - Get Streams returns {"data": []} for anyone not live right
+        now, so it can never say what they were on before.
+
+        "Last seen playing" in a shoutout is therefore sourced from here and
+        nowhere else. Needs no scope, so the token the bot already has is
+        enough to read another channel's.
+        """
+        bid = (broadcaster_id or "").strip()
+        if not bid:
+            return None
+        try:
+            data = self._fetch("/helix/channels", {"broadcaster_id": bid})
+        except urllib.error.HTTPError as exc:
+            self.errors += 1
+            print(f"[access] channel info HTTP {exc.code}", flush=True)
+            return None
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self.errors += 1
+            print(f"[access] channel info failed: {exc!r}", flush=True)
+            return None
+        rows = data.get("data") or []
+        return rows[0] if rows else None
+
     def moderator_of(self, broadcaster_id: str, user_id: str,
                      has_scope: bool = False):
         """True if this token's user moderates the channel, False if provably

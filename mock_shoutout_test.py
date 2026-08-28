@@ -126,20 +126,48 @@ def test_the_game_is_named_only_when_twitch_confirmed_it():
     print("[PASS] the game appears only when a real stream row confirms it")
 
 
-def test_it_never_claims_history_it_cannot_see():
-    """Twitch has no 'last played' for an arbitrary channel.
+def test_last_seen_is_claimed_only_when_twitch_supplied_it():
+    """'Last seen playing X' is sourced, from Get Channel Information.
 
-    Every game mention is present tense. 'were last seen playing X' would be a
-    claim about a real person that nobody, including the bot, can check.
+    Twitch documents that endpoint's game_name as "the game that the
+    broadcaster is playing or last played", and it answers for offline
+    channels - Get Streams returns an empty data array for anyone not live
+    right now, so it can never say what they were on before. The past tense is
+    therefore allowed, but only with a real value behind it, and only when
+    they are not live: if Get Streams says they are on now, the present tense
+    is both available and more useful.
     """
-    live = {"game_name": "Fortnite"}
+    # No last_game supplied -> no history claim, in any theme.
     for theme in shoutout.THEMES:
         for _ in range(200):
             line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
-                                        theme=theme, raider_stream=live)
-            for phrase in ("last seen", "was playing", "used to", "recently"):
+                                        theme=theme)
+            for phrase in ("last seen", "was playing", "used to"):
                 assert phrase not in line.lower(), (theme, line)
-    print("[PASS] no shoutout claims history the API never supplied")
+
+    # Live beats last-played, and the stale category must not leak through.
+    line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                theme="fortnite",
+                                raider_stream={"game_name": "Fortnite"},
+                                last_game="Minecraft")
+    assert "last seen" not in line.lower(), line
+    assert "Fortnite" in line and "Minecraft" not in line, line
+
+    # Offline with a sourced category -> past tense, game named, every time.
+    named = 0
+    for theme in shoutout.THEMES:
+        for _ in range(20):
+            line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                        theme=theme, last_game="Fortnite")
+            named += ("last seen" in line.lower() and "Fortnite" in line)
+    total = 20 * len(shoutout.THEMES)
+    assert named == total, f"every line must carry the claim ({named}/{total})"
+
+    # An empty category is not a claim.
+    line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                theme="fortnite", last_game="")
+    assert "last seen" not in line.lower(), line
+    print("[PASS] 'last seen playing' appears only with a sourced category")
 
 
 def test_no_clause_repeats_another():
@@ -213,22 +241,35 @@ def test_a_large_sweep_is_clean():
     """
     profiles = [None, {"broadcaster_type": "affiliate", "followers": 1284}]
     streams = [None, {"game_name": "Fortnite"}, {"game_name": ""}]
+    lasts = ["", "Fortnite", "Zwift"]
     counts = [1, 42, 318, None, "nope", 0]
     worst = 0
     for theme in shoutout.THEMES:
         for _ in range(1500):
+            stream = random.choice(streams)
+            last = random.choice(lasts)
             line = shoutout.format_raid(
                 "DaniLikesDonuts", random.choice(counts), "danilikesdonuts",
-                random.choice(profiles), theme=theme,
-                raider_stream=random.choice(streams))
+                random.choice(profiles), theme=theme, raider_stream=stream,
+                last_game=last)
             low = line.lower()
+            live_game = (stream or {}).get("game_name")
             worst = max(worst, len(line))
             assert re.search(r"\b(a|an|the) (a|an|the)\b", low) is None, line
             assert "  " not in line and "{" not in line, line
             assert low.count("raid") <= 1, line
             assert low.count("show them some love") == 1, line
-            assert "last seen" not in low, line
             assert line.endswith("twitch.tv/danilikesdonuts"), line
+            # The tense has to match the evidence.
+            if live_game:
+                assert "last seen" not in low, line
+                assert live_game.lower() in low, line
+            elif last:
+                assert "last seen" in low, line
+            else:
+                assert "last seen" not in low, line
+                for w in ("fortnite", "zwift", "right now"):
+                    assert w not in low, line
     assert worst < 450, worst
     print(f"[PASS] 6,000 mixed draws clean; longest line {worst} characters")
 
@@ -356,6 +397,31 @@ def test_so_with_a_name_is_moderator_only():
     print(f"[PASS] !so <name> answers a moderator only: {said[0][:58]}...")
 
 
+def test_the_decoration_chat_puts_on_a_name_is_stripped():
+    """'!so @name', '!so #name' and a pasted URL all name the same person.
+
+    The login was always cleaned, so the link was right - but the *sentence*
+    was built from the raw text, so a moderator who pasted twitch.tv/hardclaws
+    got "shoutout to twitch.tv/hardclaws", which reads as a URL standing in
+    for a person. Only visible when Helix cannot answer, because a successful
+    profile lookup replaces the name with the real display name.
+    """
+    for arg in ("@hardclaws", "#hardclaws", "twitch.tv/hardclaws",
+                "  @Hardclaws  ", "hardclaws"):
+        b, said = _bot()          # no helix: the floor path, where this shows
+        b._reply_so("amod", MOD, arg)
+        body = said[0].split("|", 1)[1]
+        assert "@" not in body and "#" not in body, (arg, body)
+        assert "twitch.tv/" in body, (arg, body)      # the link is still there
+        assert body.count("twitch.tv/") == 1, (arg, body)
+        assert "hardclaws" in body.lower(), (arg, body)
+    # Case is preserved rather than flattened: clean_login does not lowercase.
+    b, said = _bot()
+    b._reply_so("amod", MOD, "@Big_Al")
+    assert "Big_Al" in said[0], said[0]
+    print("[PASS] @name, #name and a pasted URL all name the person, not the link")
+
+
 def test_so_with_no_name_shows_usage():
     b, said = _bot()
     b._reply_so("amod", MOD, "")
@@ -393,7 +459,7 @@ def main():
         test_an_unparseable_count_says_nothing_about_numbers,
         test_only_real_twitch_data_is_added,
         test_the_game_is_named_only_when_twitch_confirmed_it,
-        test_it_never_claims_history_it_cannot_see,
+        test_last_seen_is_claimed_only_when_twitch_supplied_it,
         test_no_clause_repeats_another,
         test_themes_are_chosen_from_the_real_category,
         test_every_theme_answers_every_shape_of_raid,
@@ -408,6 +474,7 @@ def main():
         test_config_can_switch_it_off_entirely,
         test_status_reports_the_real_state,
         test_so_with_a_name_is_moderator_only,
+        test_the_decoration_chat_puts_on_a_name_is_stripped,
         test_so_with_no_name_shows_usage,
         test_help_mentions_it,
     ]

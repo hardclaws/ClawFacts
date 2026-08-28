@@ -1191,18 +1191,35 @@ characters of `a-z`, `0-9` and `_`) then no link is posted at all, because a
 dead link in a shoutout is worse than no link. If nothing trustworthy can be
 said, the bot says nothing.
 
-**Why it never says "last seen playing".** Get Streams answers only for a
-channel that is live *this minute*; Twitch has no "last played" for an
-arbitrary channel. So the game is mentioned only in the present tense, and only
-when a real stream row came back:
+**How the game is known, and why the tense changes.** Two endpoints, two
+different facts, and the wording tells you which one it came from:
+
+| They are | Source | Twitch's own wording for the field | The shoutout says |
+| -------- | ------ | ---------------------------------- | ----------------- |
+| live now | `GET /helix/streams` | `game_name` is "the category or game **being streamed**" | "live right now playing Fortnite" |
+| offline | `GET /helix/channels` | `game_name` is "the game that the broadcaster **is playing or last played**" | "last seen playing Fortnite" |
+| neither | — | — | no game named at all |
+
+Get Streams is the wrong tool for a channel that is not live: it returns
+`{"data": [], "pagination": {}}` for anyone offline, so it can never say what
+they were on before. Get Channel Information is the only Helix endpoint that
+publishes a *last* category, and it needs no scope, so the token the bot
+already holds can read another channel's.
 
 ```
-SO | 🙌 Huge shoutout to Trader! 42 of you came across. They are an absolute
-gem of a creator and are live right now playing Fortnite. Go show them some
-love at twitch.tv/trader
+SO | 🙌 Big shoutout to Trader! They brought 42 viewers over with them. They
+are an absolute gem of a creator and are live right now playing Fortnite. Go
+show them some love at twitch.tv/trader
+
+SO | 🎮 Trader just dropped in with a raid! That is 42 more people in here.
+They are an absolute gem of a creator, last seen playing Fortnite. Go show
+them some love at twitch.tv/trader
 ```
 
-Offline, no category set, or the lookup failed: no game is named at all.
+Being live wins when both are available: the present tense is the stronger
+fact, and the stale category from Get Channel Information is dropped rather
+than printed alongside it. Neither endpoint answering, or no category ever
+set, means no game is named.
 
 **How the message is built.** Each part is a whole sentence — opener, the size
 of the raid, the praise, the Twitch facts, then the link — and the sentences are

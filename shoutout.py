@@ -25,7 +25,8 @@ import random
 import re
 
 __all__ = ["format_raid", "url_for", "theme_for_game", "LABEL", "THEMES",
-           "OPENERS", "PRAISE", "PRAISE_LIVE", "RAID_PLURAL", "RAID_ONE"]
+           "OPENERS", "PRAISE", "PRAISE_LIVE", "PRAISE_LAST", "RAID_PLURAL",
+           "RAID_ONE"]
 
 LABEL = "SO"
 
@@ -169,6 +170,34 @@ PRAISE_LIVE = {
     ),
 }
 
+#: The raider is offline, but Get Channel Information reported the category
+#: they were last on. Twitch documents that field as "the game that the
+#: broadcaster is playing or last played", so "last seen playing" is a sourced
+#: claim here and not a guess. Only used when Get Streams said they are not
+#: live, which is what makes the past tense correct rather than stale.
+PRAISE_LAST = {
+    "trucking": (
+        "They are an absolute gem of a creator, last seen playing {game}.",
+        "Proper road company, and last seen out on {game}.",
+        "Last seen on {game}, so go catch them when they are back.",
+    ),
+    "zwift": (
+        "They are an absolute gem of a creator, last seen playing {game}.",
+        "Great company on a long ride, and last seen out on {game}.",
+        "Last seen on {game}, so go catch them when they are back.",
+    ),
+    "fortnite": (
+        "They are an absolute gem of a creator, last seen playing {game}.",
+        "Cracked channel, and last seen playing {game}.",
+        "Last seen on {game}, so go catch them when they are back.",
+    ),
+    "generic": (
+        "They are an absolute gem of a creator, last seen playing {game}.",
+        "Last seen playing {game}, so go catch them when they are back.",
+        "Last seen out on {game}. Go say hello.",
+    ),
+}
+
 CTA = "Go show them some love at {url}"
 
 
@@ -238,7 +267,8 @@ def _raider_game(stream: dict | None) -> str:
 
 def format_raid(display_name: str, viewer_count=None, login: str = "",
                 profile: dict | None = None, theme: str = "generic",
-                raider_stream: dict | None = None) -> str:
+                raider_stream: dict | None = None,
+                last_game: str = "") -> str:
     """One shoutout line, or '' if there is nothing trustworthy to say.
 
     ``viewer_count`` may be an int or the raw string off the IRC tag. Anything
@@ -246,9 +276,18 @@ def format_raid(display_name: str, viewer_count=None, login: str = "",
     as-is.
 
     ``theme`` picks the flavour (see THEMES); an unknown value falls back to
-    generic rather than raising. ``raider_stream`` is the raider's live Helix
-    stream row, or None when they are not live or the lookup failed - the game
-    is mentioned only when it is present.
+    generic rather than raising.
+
+    Two different game claims, two different sources, and the tense is what
+    tells them apart:
+
+    * ``raider_stream`` - a Get Streams row, which only exists for a channel
+      live right now, so the wording is present tense.
+    * ``last_game`` - Get Channel Information's game_name, documented as the
+      game they "are playing or last played". Used only when they are NOT
+      live, which is what makes "last seen playing" true rather than a guess.
+
+    With neither, no game is named at all.
 
     The URL always comes last: it is the actionable part, and a link buried
     mid-sentence is easy to miss and awkward to click.
@@ -273,8 +312,13 @@ def format_raid(display_name: str, viewer_count=None, login: str = "",
         raid = random.choice(RAID_PLURAL).format(count=f"{count:,}")
 
     game = _raider_game(raider_stream)
-    if game and PRAISE_LIVE.get(theme):
+    last = " ".join(str(last_game or "").split())
+    if game:
+        # Live this minute, per Get Streams. Present tense.
         praise = random.choice(PRAISE_LIVE[theme]).format(game=game)
+    elif last:
+        # Offline, but Twitch says what they were last on. Past tense.
+        praise = random.choice(PRAISE_LAST[theme]).format(game=last)
     else:
         praise = random.choice(PRAISE[theme])
 
