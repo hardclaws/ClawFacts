@@ -230,6 +230,35 @@ class Helix:
             return None
         return bool(data.get("data"))
 
+    def stream_info(self, user_id: str = "", user_login: str = ""):
+        """The live stream row for one channel, or None.
+
+        Get Streams omits offline channels entirely, so None covers both "not
+        streaming" and "could not be settled" and nothing downstream may tell
+        them apart. That is deliberate: the shoutout only names a game when a
+        real row came back. Needs no scope, so the token the bot already holds
+        is enough.
+        """
+        params = {"first": 1}
+        if user_id:
+            params["user_id"] = user_id
+        elif user_login:
+            params["user_login"] = user_login
+        else:
+            return None
+        try:
+            data = self._fetch("/helix/streams", params)
+        except urllib.error.HTTPError as exc:
+            self.errors += 1
+            print(f"[access] streams lookup HTTP {exc.code}", flush=True)
+            return None
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self.errors += 1
+            print(f"[access] streams lookup failed: {exc!r}", flush=True)
+            return None
+        rows = data.get("data") or []
+        return rows[0] if rows else None
+
     def moderator_of(self, broadcaster_id: str, user_id: str,
                      has_scope: bool = False):
         """True if this token's user moderates the channel, False if provably

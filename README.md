@@ -1155,19 +1155,66 @@ When the stream gets raided the bot posts a shoutout on its own, with nothing
 to configure:
 
 ```
-SO | Shoutout to DaniLikesDonuts for raiding in with 42! Go say hello and
-give 'em a follow. Twitch Affiliate, 1,284 followers. They're over at
-twitch.tv/danilikesdonuts
+SO | 🚛 Shoutout to DaniLikesDonuts, good to see them rolling with us! They
+brought 42 viewers over with them. They are an absolute gem of a creator, go
+give them a follow. Twitch Affiliate, 1,284 followers. Go show them some love
+at twitch.tv/danilikesdonuts
 ```
+
+The wording follows whatever this channel is streaming, so a truck night gets
+trucker talk and a Zwift night gets cycling talk:
+
+```
+SO | 🚴 NOTTaitch just rolled into the pack! They came across on their own.
+Great company on a long ride. Go say hello. Go show them some love at
+twitch.tv/nottaitch
+
+SO | 🎮 Trader rotated over with the squad! That is 7 more people in here.
+Cracked channel and good people. Go say hello. Go show them some love at
+twitch.tv/trader
+```
+
+`shoutout_theme` picks the flavour: `"auto"` (default) reads the channel's
+current category from Helix, or force one of `"trucking"`, `"zwift"`,
+`"fortnite"`, `"generic"`. Categories are matched by substring, so *Euro Truck
+Simulator 2*, *American Truck Simulator*, *SnowRunner* and *MudRunner* all
+reach trucking. Anything unrecognised, and any moment the channel is offline,
+falls back to generic — never to a guess.
 
 Every part of that line is read off something real. The name and the viewer
 count come from the raid notice Twitch itself sends (`USERNOTICE` with
-`msg-id=raid`). The affiliate/partner line and the follower count come from the
-Helix API. The link is built from the raider's **login**, never their display
-name — display names carry capitals, spaces and unicode that a URL does not. If
-the login cannot be a Twitch login (4-25 characters of `a-z`, `0-9` and `_`)
-then no link is posted at all, because a dead link in a shoutout is worse than
-no link. If nothing trustworthy can be said, the bot says nothing.
+`msg-id=raid`). The affiliate/partner line, the follower count and the raider's
+current game come from the Helix API. The link is built from the raider's
+**login**, never their display name — display names carry capitals, spaces and
+unicode that a URL does not. If the login cannot be a Twitch login (4-25
+characters of `a-z`, `0-9` and `_`) then no link is posted at all, because a
+dead link in a shoutout is worse than no link. If nothing trustworthy can be
+said, the bot says nothing.
+
+**Why it never says "last seen playing".** Get Streams answers only for a
+channel that is live *this minute*; Twitch has no "last played" for an
+arbitrary channel. So the game is mentioned only in the present tense, and only
+when a real stream row came back:
+
+```
+SO | 🙌 Huge shoutout to Trader! 42 of you came across. They are an absolute
+gem of a creator and are live right now playing Fortnite. Go show them some
+love at twitch.tv/trader
+```
+
+Offline, no category set, or the lookup failed: no game is named at all.
+
+**How the message is built.** Each part is a whole sentence — opener, the size
+of the raid, the praise, the Twitch facts, then the link — and the sentences are
+joined rather than slots being filled inside one sentence. That is deliberate.
+Two separate bugs came from the other approach: a template that hardcoded "a"
+in front of a slot whose values carried their own article, and a slot used
+twice that read correctly for mass nouns and wrongly for count nouns. Five more
+showed up in the first draft of these themed pools, all of them collisions
+between clauses that were each fine on their own: *"they just raided in! They
+raided in with 7 in tow"*, and a praise line ending "show them some love"
+immediately before the call to action that says it again. `mock_shoutout_test.py`
+now sweeps 6,000 mixed combinations and fails on any of them.
 
 The Helix lookup is best-effort. A raid is the worst possible moment to be
 waiting on a network call, and the token can be expired, so the name-and-count
@@ -1185,6 +1232,7 @@ answered.
 | `!so <name>` | Shout a channel out by hand. **Moderators only.** |
 | `!so` (no argument) | Shows usage rather than guessing. |
 | `"shoutout_enabled": false` | Turns both paths off in `config.json`. |
+| `"shoutout_theme"` | `"auto"` (follows the current category) or `trucking` / `zwift` / `fortnite` / `generic`. |
 
 ## Commands your mods write themselves
 

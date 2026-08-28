@@ -148,6 +148,9 @@ DEFAULTS = {
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
+    # "auto" follows whatever this channel is streaming; or force one of
+    # trucking / zwift / fortnite / generic.
+    "shoutout_theme": "auto",
     "custom_commands_enabled": True,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
@@ -325,6 +328,7 @@ class TwitchBot:
         self._cb_ambient_off = False        # !cb off, until the next restart
         self._so_off = False                # !so off, until the next restart
         self._so_lock = threading.Lock()    # one shoutout per raid
+        self._so_theme_cache = ("generic", 0.0)   # (theme, valid until)
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -1053,21 +1057,56 @@ class TwitchBot:
         """
         with self._so_lock:
             profile = None
+            stream = None
             helix = self._access.helix
             if helix is not None:
                 try:
                     profile = helix.channel_profile(login or name)
                 except Exception as exc:
                     self._log(f"[so] profile lookup failed: {exc!r}")
+                try:
+                    # Their live row, for the game. None if they are offline.
+                    stream = helix.stream_info(user_login=login or name)
+                except Exception as exc:
+                    self._log(f"[so] raider stream lookup failed: {exc!r}")
             if profile and profile.get("display_name"):
                 name = profile["display_name"]
                 login = profile.get("login") or login
-            line = shoutout_mod.format_raid(name, count, login, profile)
+            line = shoutout_mod.format_raid(
+                name, count, login, profile,
+                theme=self._so_theme(helix), raider_stream=stream)
             if not line:
                 self._log("[so] nothing trustworthy to say; skipped")
                 return
             self._say(self._fit(f"{shoutout_mod.LABEL} | ", line))
             self._log(f"[so] {name} ({count} viewers)")
+
+    def _so_theme(self, helix) -> str:
+        """Which shoutout flavour to use: what this channel is streaming.
+
+        Cached for ten minutes rather than asked on every raid, because a
+        category changes a handful of times a stream at most and a raid should
+        not wait on a lookup for its own wording. An unknown or unresolvable
+        category falls back to generic - never to a guess.
+        """
+        forced = str(self.cfg.get("shoutout_theme", "auto") or "auto").lower()
+        if forced != "auto":
+            return forced if forced in shoutout_mod.THEMES else "generic"
+        now = time.time()
+        cached, until = self._so_theme_cache
+        if until > now:
+            return cached
+        theme = "generic"
+        if helix is not None:
+            try:
+                self._resolve_broadcaster(self.cfg.get("channel", ""))
+                info = helix.stream_info(user_id=self._broadcaster_id)
+                theme = shoutout_mod.theme_for_game(
+                    (info or {}).get("game_name"))
+            except Exception as exc:
+                self._log(f"[so] category lookup failed: {exc!r}")
+        self._so_theme_cache = (theme, now + 600.0)
+        return theme
 
     def _say_custom(self, nick: str, command: str) -> None:
         """Post a command a moderator defined."""

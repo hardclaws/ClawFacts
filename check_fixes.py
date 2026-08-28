@@ -43,6 +43,41 @@ def main() -> int:
 
     _bot_src = pathlib.Path("bot.py").read_text(encoding="utf-8")
 
+    def _shoutout_says_nothing_false():
+        """Sweep the shoutout pools for claims and clause collisions."""
+        import random
+
+        import shoutout as _so
+
+        rng = random.Random(20260828)
+        streams = [None, {"game_name": "Fortnite"}, {"game_name": ""}]
+        counts = [1, 42, None, "nope"]
+        for theme in _so.THEMES:
+            for _ in range(400):
+                stream = rng.choice(streams)
+                line = _so.format_raid("RoadDog_88", rng.choice(counts),
+                                       "roaddog_88", {}, theme=theme,
+                                       raider_stream=stream)
+                low = line.lower()
+                game = (stream or {}).get("game_name") or ""
+                if "last seen" in low:
+                    return False
+                if game:
+                    # A confirmed game must always be named.
+                    if game.lower() not in low:
+                        return False
+                else:
+                    # No stream row, so no game and no present-tense claim.
+                    for phrase in ("fortnite", "live right now", "right now",
+                                   "currently on", "currently out"):
+                        if phrase in low:
+                            return False
+                if low.count("show them some love") != 1:
+                    return False
+                if low.count("raid") > 1:
+                    return False
+        return True
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -351,6 +386,15 @@ def main() -> int:
         ("a mod-created command survives a restart", _survives_restart()),
         ("an over-long command message is refused, not truncated",
          not _cc.add("toolong", "w" * (_cc_mod.MAX_MESSAGE + 1))[0]),
+        ("shoutouts follow what the channel is streaming (trucking/zwift/...)",
+         hasattr(_bot.TwitchBot, "_so_theme")
+         and __import__("shoutout").theme_for_game("Euro Truck Simulator 2")
+         == "trucking"
+         and __import__("shoutout").theme_for_game("Zwift") == "zwift"
+         and __import__("shoutout").theme_for_game("Fortnite") == "fortnite"),
+        ("a shoutout names a game only when Twitch confirmed the stream",
+         hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
+         and _shoutout_says_nothing_false()),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

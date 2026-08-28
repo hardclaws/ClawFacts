@@ -43,6 +43,7 @@
   "cb_command_access": "everyone",
   "cb_yell_enabled": true,
   "shoutout_enabled": true,
+  "shoutout_theme": "auto",
   "custom_commands_enabled": true,
   "names_topup_enabled": true,
   "names_topup_hours": 12

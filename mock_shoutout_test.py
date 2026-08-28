@@ -7,8 +7,9 @@ the interesting failures here are in the IRC parse - and USERNOTICE was not
 handled at all before, so a raid was invisible to the bot.
 """
 
-import threading
+import random
 import re
+import threading
 
 import bot as bot_mod
 import shoutout
@@ -91,17 +92,145 @@ def test_only_real_twitch_data_is_added():
           "Twitch supplied them")
 
 
-def test_it_never_claims_to_know_what_they_stream():
-    """channel_profile does not fetch the game, so nothing may imply it does.
-    A made-up 'streaming X' about a real channel is exactly the kind of
-    invented claim this bot is not allowed to make."""
-    for profile in ({"broadcaster_type": "affiliate", "followers": 10,
-                     "game_name": "Euro Truck Simulator 2"},
-                    {"game_name": "Minecraft"}, {}, None):
-        line = shoutout.format_raid("X", 5, "x", profile)
-        assert "streaming" not in line.lower(), line
-        assert "Euro Truck" not in line and "Minecraft" not in line, line
-    print("[PASS] no line claims to know what the channel is streaming")
+def test_the_game_is_named_only_when_twitch_confirmed_it():
+    """Get Streams answers only for a channel that is live this minute.
+
+    So the game may appear when a real stream row came back, and must not
+    appear at all otherwise. A stream row with no category set is a real thing
+    (plenty of channels set none) and counts as "no game to name".
+    """
+    # Note the login must be a valid one: a 1-character login makes
+    # format_raid return "" and every assertion passes on an empty string.
+    for stream in (None, {}, {"game_name": ""}, {"game_name": None}):
+        for profile in ({"broadcaster_type": "affiliate", "followers": 10,
+                         "game_name": "Euro Truck Simulator 2"},
+                        {"game_name": "Minecraft"}, {}, None):
+            line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", profile,
+                                        raider_stream=stream)
+            assert line, (stream, profile)
+            low = line.lower()
+            for word in ("streaming", "live right now", "currently on",
+                         "euro truck", "minecraft"):
+                assert word not in low, (stream, profile, line)
+            # A game_name sitting in the PROFILE must be ignored: that field
+            # is not one channel_profile returns.
+            assert "Euro Truck" not in line and "Minecraft" not in line, line
+
+    live = {"game_name": "Fortnite"}
+    named = 0
+    for _ in range(30):
+        line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                    raider_stream=live)
+        named += "Fortnite" in line
+    assert named == 30, f"the confirmed game must always appear ({named}/30)"
+    print("[PASS] the game appears only when a real stream row confirms it")
+
+
+def test_it_never_claims_history_it_cannot_see():
+    """Twitch has no 'last played' for an arbitrary channel.
+
+    Every game mention is present tense. 'were last seen playing X' would be a
+    claim about a real person that nobody, including the bot, can check.
+    """
+    live = {"game_name": "Fortnite"}
+    for theme in shoutout.THEMES:
+        for _ in range(200):
+            line = shoutout.format_raid("RoadDog_88", 5, "roaddog_88", {},
+                                        theme=theme, raider_stream=live)
+            for phrase in ("last seen", "was playing", "used to", "recently"):
+                assert phrase not in line.lower(), (theme, line)
+    print("[PASS] no shoutout claims history the API never supplied")
+
+
+def test_no_clause_repeats_another():
+    """The clauses are assembled, so two of them can collide.
+
+    Both of these shipped once and were only caught by reading real output:
+    'they just raided in! They raided in with 7 in tow.' and a praise line
+    ending 'show them some love' directly before the CTA that says it again.
+    """
+    live = {"game_name": "Fortnite"}
+    for theme in shoutout.THEMES:
+        for count in (1, 5, None, "nope"):
+            for stream in (None, live):
+                for _ in range(150):
+                    line = shoutout.format_raid("RoadDog_88", count,
+                                                "roaddog_88", {}, theme=theme,
+                                                raider_stream=stream)
+                    low = line.lower()
+                    assert low.count("raid") <= 1, line
+                    assert low.count("show them some love") == 1, line
+                    assert re.search(r"\b(a|an|the) (a|an|the)\b", low) \
+                        is None, line
+                    assert "  " not in line and "{" not in line, line
+                    assert ".." not in line, line
+    print("[PASS] no clause repeats another across 4 themes x 8 conditions")
+
+
+def test_themes_are_chosen_from_the_real_category():
+    cases = {
+        "Euro Truck Simulator 2": "trucking",
+        "American Truck Simulator": "trucking",
+        "SnowRunner": "trucking",
+        "MudRunner": "trucking",
+        "Zwift": "zwift",
+        "Fortnite": "fortnite",
+        "Just Chatting": "generic",
+        "Minecraft": "generic",
+        "": "generic",
+        None: "generic",
+    }
+    for category, want in cases.items():
+        assert shoutout.theme_for_game(category) == want, (category, want)
+    print("[PASS] category names map to a flavour, unknowns fall to generic")
+
+
+def test_every_theme_answers_every_shape_of_raid():
+    profiles = [None, {}, {"broadcaster_type": "affiliate", "followers": 1284},
+                {"broadcaster_type": "partner", "followers": 1}]
+    for theme in shoutout.THEMES:
+        for count in (1, 42, 318, None, "nope"):
+            for profile in profiles:
+                line = shoutout.format_raid("RoadDog_88", count, "roaddog_88",
+                                            profile, theme=theme)
+                assert line, (theme, count, profile)
+                assert line.endswith("twitch.tv/roaddog_88"), line
+                assert len(line) < 450, (len(line), line)
+                if profile and profile.get("broadcaster_type"):
+                    assert "Twitch " in line, line
+    # An unknown theme must not raise in the middle of a raid.
+    assert shoutout.format_raid("RoadDog_88", 5, "roaddog_88",
+                                theme="nonsense"), "unknown theme must degrade"
+    print("[PASS] all 4 themes answer every shape of raid, all under 450")
+
+
+def test_a_large_sweep_is_clean():
+    """The structural scan, kept as a test so the pools cannot rot.
+
+    This is the check that found five defects in the first draft of the
+    themed pools; sample-reading output finds some of them, this finds all
+    the combinations.
+    """
+    profiles = [None, {"broadcaster_type": "affiliate", "followers": 1284}]
+    streams = [None, {"game_name": "Fortnite"}, {"game_name": ""}]
+    counts = [1, 42, 318, None, "nope", 0]
+    worst = 0
+    for theme in shoutout.THEMES:
+        for _ in range(1500):
+            line = shoutout.format_raid(
+                "DaniLikesDonuts", random.choice(counts), "danilikesdonuts",
+                random.choice(profiles), theme=theme,
+                raider_stream=random.choice(streams))
+            low = line.lower()
+            worst = max(worst, len(line))
+            assert re.search(r"\b(a|an|the) (a|an|the)\b", low) is None, line
+            assert "  " not in line and "{" not in line, line
+            assert low.count("raid") <= 1, line
+            assert low.count("show them some love") == 1, line
+            assert "last seen" not in low, line
+            assert line.endswith("twitch.tv/danilikesdonuts"), line
+    assert worst < 450, worst
+    print(f"[PASS] 6,000 mixed draws clean; longest line {worst} characters")
 
 
 def test_the_url_comes_from_the_login_not_the_display_name():
@@ -263,7 +392,12 @@ def main():
         test_one_viewer_is_not_pluralised,
         test_an_unparseable_count_says_nothing_about_numbers,
         test_only_real_twitch_data_is_added,
-        test_it_never_claims_to_know_what_they_stream,
+        test_the_game_is_named_only_when_twitch_confirmed_it,
+        test_it_never_claims_history_it_cannot_see,
+        test_no_clause_repeats_another,
+        test_themes_are_chosen_from_the_real_category,
+        test_every_theme_answers_every_shape_of_raid,
+        test_a_large_sweep_is_clean,
         test_the_url_comes_from_the_login_not_the_display_name,
         test_it_stays_silent_rather_than_saying_nothing_true,
         test_a_raid_notice_produces_a_shoutout,
