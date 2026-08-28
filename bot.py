@@ -45,6 +45,7 @@ import reminders as reminders_mod
 import haul as haul_mod
 import names as names_mod
 import trucker as trucker_mod
+import shoutout as shoutout_mod
 import whois
 from funfacts import get_funfact, trim_to_fit
 
@@ -80,6 +81,9 @@ HAUL_COMMANDS = {"haul", "hauls", "transporting", "transport"}
 # !cb asks the bot to talk on the radio. No argument, no lookup - it is a
 # local generator, so it costs nothing and never waits on the network.
 CB_COMMANDS = {"cb", "radio", "breaker"}
+# !so <name> shouts a channel out. It also fires on its own when the stream
+# gets raided, so the switch moderates both paths.
+SO_COMMANDS = {"so", "shoutout"}
 
 DEFAULTS = {
     "nick": "",
@@ -129,6 +133,10 @@ DEFAULTS = {
     # The car yelling is the loudest thing the bot does, so it gets its own
     # switch. False leaves the three CB voices and drops the WINDOW one.
     "cb_yell_enabled": True,
+    # Shout out whoever raids in, and let a moderator trigger one with !so.
+    # Nothing in the message is invented: the name and viewer count come off
+    # the raid notice, and the affiliate/follower line comes from Helix.
+    "shoutout_enabled": True,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -302,6 +310,8 @@ class TwitchBot:
         self._refresh_lock = threading.Lock()   # one refresh at a time
         self._warned_401 = False
         self._cb_ambient_off = False        # !cb off, until the next restart
+        self._so_off = False                # !so off, until the next restart
+        self._so_lock = threading.Lock()    # one shoutout per raid
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -616,6 +626,11 @@ class TwitchBot:
             login = (login_match.group(1) if login_match else nick).lower()
             self._on_message(nick, target, message, login,
                              tags.get("badges", ""))
+        elif command == "USERNOTICE":
+            # Twitch sends this for subs, gift subs and - the one that matters
+            # here - raids. Nothing handled it before, so raids were invisible.
+            if tags.get("msg-id") == "raid":
+                self._on_raid(tags)
         elif command == "USERSTATE":
             # Twitch sends this when we join a channel and again after every
             # PRIVMSG we send, and it carries OUR OWN badges. That is the only
@@ -652,6 +667,11 @@ class TwitchBot:
         if command in CB_COMMANDS and self._cb_switch(nick, badges, argument):
             return
 
+        # !so off/on/status must stay reachable while the bot is switched off,
+        # or a moderator could not turn shoutouts back on.
+        if command in SO_COMMANDS and self._so_switch(nick, badges, argument):
+            return
+
         if command in REMINDER_COMMANDS:
             self._reminder_command(nick, badges, argument)
             return
@@ -678,7 +698,8 @@ class TwitchBot:
         elif command in SMK_ALIASES:
             command = "smk"
         elif extras_enabled and (command in EXTRAS_COMMANDS
-                                 or command in CB_COMMANDS):
+                                 or command in CB_COMMANDS
+                                 or command in SO_COMMANDS):
             pass
         else:
             return
@@ -929,6 +950,101 @@ class TwitchBot:
         self._log(f"!cb {verb} from {nick} -> "
                   f"ambient={not self._cb_ambient_off}")
         return True
+
+    @staticmethod
+    def _unescape_tag(value: str) -> str:
+        """Undo IRC tag escaping. Twitch sends a space as \\s."""
+        return (value or "").replace("\\s", " ").replace("\\:", ";")
+
+    def _on_raid(self, tags: dict) -> None:
+        """Another channel just raided in. Shout them out.
+
+        Runs off the worker thread: the Helix lookup is best-effort and must
+        never hold up the read loop.
+        """
+        if not self.cfg.get("shoutout_enabled", True) or self._so_off:
+            return
+        name = self._unescape_tag(tags.get("msg-param-displayName", ""))
+        login = self._unescape_tag(tags.get("msg-param-login", ""))
+        count = self._unescape_tag(tags.get("msg-param-viewerCount", ""))
+        if not (name or login):
+            self._log("[so] raid notice carried no raider name; skipped")
+            return
+        self._jobs.put((name, login or name.lower(), "", "raid", count))
+
+    def _say_shoutout(self, name: str, login: str, count) -> None:
+        """Post one shoutout, looking the channel up if we can.
+
+        The lookup is optional. A raid is the worst moment to be waiting on a
+        network call, and the token can be expired, so the name-and-count
+        shoutout goes out regardless.
+        """
+        with self._so_lock:
+            profile = None
+            helix = self._access.helix
+            if helix is not None:
+                try:
+                    profile = helix.channel_profile(login or name)
+                except Exception as exc:
+                    self._log(f"[so] profile lookup failed: {exc!r}")
+            if profile and profile.get("display_name"):
+                name = profile["display_name"]
+                login = profile.get("login") or login
+            line = shoutout_mod.format_raid(name, count, login, profile)
+            if not line:
+                self._log("[so] nothing trustworthy to say; skipped")
+                return
+            self._say(self._fit(f"{shoutout_mod.LABEL} | ", line))
+            self._log(f"[so] {name} ({count} viewers)")
+
+    def _so_switch(self, nick: str, badges: str, argument: str) -> bool:
+        """!so off | !so on | !so status - moderators only.
+
+        Returns True when the argument was a switch verb, so the caller does
+        not also treat it as a channel name to shout out.
+        """
+        verb = (argument or "").strip().lower()
+        if verb not in ("off", "on", "status", "disable", "enable"):
+            return False
+        pre = self.cfg.get("prefix", "!")
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            self._log(f"!so {verb} from {nick} ignored - not a moderator")
+            return True
+        if verb in ("off", "disable"):
+            self._so_off = True
+            self._say(f"@{nick} shoutouts are OFF - raids will not be "
+                      f"announced. {pre}so on to resume.")
+        elif verb in ("on", "enable"):
+            if not self.cfg.get("shoutout_enabled", True):
+                self._say(f"@{nick} shoutouts are switched off in config.json "
+                          f"(shoutout_enabled).")
+                return True
+            self._so_off = False
+            self._say(f"@{nick} shoutouts are back ON - raids will be "
+                      f"announced again.")
+        else:
+            state = ("OFF in config.json"
+                     if not self.cfg.get("shoutout_enabled", True)
+                     else ("OFF" if self._so_off else "ON"))
+            self._say(f"@{nick} shoutouts are {state}. {pre}so off to silence "
+                      f"them, {pre}so on to resume.")
+        self._log(f"!so {verb} from {nick} -> on={not self._so_off}")
+        return True
+
+    def _reply_so(self, nick: str, badges: str, argument: str) -> None:
+        """!so <name> - a moderator triggers a shoutout by hand."""
+        query = (argument or "").strip()
+        if not query:
+            pre = self.cfg.get("prefix", "!")
+            self._say(f"@{nick} usage: {pre}so <twitch name>  (e.g. "
+                      f"{pre}so hardclaws)")
+            return
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            # Silent, as with !bot and !cb: it posts a link into chat, so
+            # answering every viewer who finds it becomes a spam vector.
+            self._log(f"!so from {nick} ignored - not a moderator")
+            return
+        self._say_shoutout(query, access.clean_login(query), "")
 
     def _reply_cb(self, nick: str, badges: str = "") -> None:
         """One line of CB chatter, on demand.
@@ -1223,6 +1339,14 @@ class TwitchBot:
         while True:
             nick, login, badges, command, argument = self._jobs.get()
             try:
+                # A raid is not a command from a viewer. The raider is often
+                # not a follower and carries no badges here, so running it
+                # through the access gate would refuse the one thing that
+                # should always be answered.
+                if command == "raid":
+                    self._say_shoutout(nick, login, argument)
+                    continue
+
                 # Every command shares the one per-user schedule: !joke and
                 # !funfact draw on the same budget, so the cheap commands
                 # cannot be used to flood either.
@@ -1243,6 +1367,12 @@ class TwitchBot:
                     self._reply_twitch(nick, argument)
                 elif command in CB_COMMANDS:
                     self._reply_cb(nick, badges)
+                elif command in SO_COMMANDS:
+                    self._reply_so(nick, badges, argument)
+                elif command == "raid":
+                    # nick carries the raider's display name, login their
+                    # login, argument the viewer count - see _on_raid.
+                    self._say_shoutout(nick, login, argument)
                 else:
                     self._reply_extra(nick, command, argument)
             except Exception as exc:
@@ -1265,6 +1395,8 @@ class TwitchBot:
             f"{prefix}twitch <name> - who that Twitch channel is",
             f"{prefix}cb - the bot talks on the radio, or yells at a car"
             if self.cfg.get("cb_command_enabled", True) else None,
+            f"{prefix}so <name> - shout a channel out (mods only)"
+            if self.cfg.get("shoutout_enabled", True) else None,
         ]
         self._say(f"@{nick} commands: " + " | ".join(l for l in lines if l))
         self._say(f"@{nick} who can use them: broadcaster/mod every 30s, "
