@@ -92,13 +92,26 @@ def test_parse_clock():
 
 
 def test_clock_rolls_to_tomorrow():
-    """A time already past today means tomorrow, not 'immediately'."""
+    """A time already past today means tomorrow, not 'immediately'.
+
+    Picks its "already passed" time from the real clock, so it has to survive
+    every hour of the day: in the first two hours there is no "two hours ago"
+    that is still today, and midnight is used instead. Asserting a fixed
+    "more than 20 hours out" made this red every night after 23:00.
+    """
     now = time.time()
-    passed = (datetime.datetime.now() - datetime.timedelta(hours=2)
-              ).strftime("%H:%M")
+    base = datetime.datetime.now()
+    earlier = base - datetime.timedelta(hours=2)
+    if earlier.date() == base.date():
+        passed = earlier.strftime("%H:%M")
+    else:
+        passed = "00:00"           # midnight has always already passed
     due, _, rolled = reminders.parse_clock(passed, now)
     assert rolled and due > now, (passed, rolled, due - now)
-    assert due - now > 20 * 3600, "should land roughly a day out"
+    # It must land on the NEXT calendar day, not merely "later today".
+    assert time.localtime(due)[:3] != time.localtime(now)[:3], (passed, due)
+    assert time.localtime(due)[:3] == time.localtime(now + 86400)[:3], \
+        (passed, due)
     print("[PASS] a time that has passed today rolls to tomorrow")
 
 

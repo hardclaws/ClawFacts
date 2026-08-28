@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 
+import access
 import bot as bot_mod
 import extras
 from bot import DEFAULTS, TwitchBot  # noqa: E402
@@ -47,8 +48,12 @@ def _fake_lookup(q, max_chars=400, **kw):
 
 
 def _fake_twitch_lookup(q, helix=None, **kw):
-    """Twitch only. It has never heard of an actress."""
-    login = (q or "").strip().lstrip("#").lower()
+    """Twitch only. It has never heard of an actress.
+
+    Cleans the query with the same helper the real lookup uses, so an
+    '@name' typed in chat is exercised end to end rather than stubbed away.
+    """
+    login = access.clean_login(q).lower()
     if login == "hardclaws":
         return {"found": True, "display_name": "Hardclaws",
                 "profile": dict(_TWITCH)}
@@ -118,6 +123,8 @@ SCRIPT = [
     (52.0, privmsg("viewer13", "!twitch nosuchchannel", "subscriber/01")),
     (53.5, privmsg("nobody", "!twitch", "")),
     (54.5, privmsg("viewer18", "!whotwitch hardclaws", "subscriber/01")),
+    # '@' is how chat actually types it - the mention picker inserts it.
+    (55.5, privmsg("viewer19", "!twitch @hardclaws", "subscriber/01")),
     (59.5, privmsg("viewer17", "!smk any", "vip/1")),
 ]
 
@@ -357,9 +364,14 @@ def main():
                for l in twitch_lines):
         print(f"FAIL: !twitch did not post the channel: {twitch_lines}")
         return 1
-    # Two answers means the legacy !whotwitch spelling still works.
-    if len(twitch_lines) < 2:
-        print(f"FAIL: the old !whotwitch spelling stopped working: {twitch_lines}")
+    # Two answers means the legacy !whotwitch spelling still works, and a
+    # third means the '@' the mention picker inserts is accepted too.
+    if len(twitch_lines) < 3:
+        print(f"FAIL: expected !twitch, !whotwitch and !twitch @name to all "
+              f"answer: {twitch_lines}")
+        return 1
+    if any("no Twitch channel called @hardclaws" in l for l in bot_lines):
+        print("FAIL: an @mention was reported as a channel that does not exist")
         return 1
     if any("Twitch" in l for l in whois_lines):
         print(f"FAIL: !whois leaked Twitch data: {whois_lines}")
@@ -374,7 +386,7 @@ def main():
         print("FAIL: !twitch exceeded Twitch's 500-character limit")
         return 1
     print(f"[PASS] !twitch answered a channel, refused a miss, showed usage, "
-          f"and still accepts !whotwitch ({len(twitch_lines)} profile(s))")
+          f"and accepts !whotwitch and @name ({len(twitch_lines)} profile(s))")
 
     print(f"\nfacts: {len(facts)}, usage replies: {len(usage)}, jokes: {len(jokes)}, "
           f"randomfacts: {len(rf)}, pongs: {len(pongs)}, "

@@ -494,8 +494,27 @@ real person's name. Two commands, no guessing.
 `GET /helix/channels/followers`. Neither needs a scope, and the count comes
 back even for a channel the bot cannot moderate — only the per-user rows need
 `moderator:read:followers`. So this works with the token you already have, no
-re-login. A leading `#` is stripped, and a Helix failure is reported as "I
-couldn't reach Twitch", never as "there is no such channel".
+re-login. A Helix failure is reported as "I couldn't reach Twitch", never as
+"there is no such channel".
+
+**Names are cleaned the way chat types them.** All of these work, because
+Twitch's mention picker inserts the `@` and people paste URLs:
+
+```
+!twitch NOTTaitch
+!twitch @NOTTaitch
+!twitch #hardclaws
+!twitch https://twitch.tv/nottaitch
+```
+
+None of `@`, `#` or a URL can appear in a real login — Twitch allows only
+`[a-z0-9_]` — so stripping them can never damage a name, and the spelling the
+viewer typed is what gets echoed back. This is one helper,
+`access.clean_login`, shared by every site that normalises a login. It used to
+be two separate `lstrip("#")` calls, which is how `@name` slipped through: the
+bot answered *"there is no Twitch channel called @NOTTaitch"* for a channel
+that plainly exists. A query it cannot parse must never be reported as a
+missing channel.
 
 `!whois` costs two calls at most — the article, and Wikipedia's search when the
 name as typed is not a page title. Results are cached for six hours because

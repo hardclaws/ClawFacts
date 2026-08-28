@@ -33,6 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import access
 import funfacts
 
 REST = "https://en.wikipedia.org/api/rest_v1/page/summary/"
@@ -147,7 +148,7 @@ def _twitch_profile(query: str, helix):
     """
     if helix is None:
         return None
-    login = query.strip().lstrip("#").lower()
+    login = access.clean_login(query).lower()
     # Twitch logins are 4-25 characters of [a-z0-9_]. Anything else cannot be
     # one, so do not spend an API call finding that out.
     if not login or not 4 <= len(login) <= 25 or " " in login \
@@ -237,7 +238,7 @@ def twitch_lookup(query: str, helix, now: float | None = None,
     # No truncation here. Cutting a 40-character name down to 25 would
     # turn it into something that *looks* like a valid login, and then the
     # shape check in _twitch_profile would happily spend an API call on it.
-    login = " ".join((query or "").split()).strip().lstrip("#")
+    login = access.clean_login(query)
     if len(login) < MIN_QUERY:
         return {"found": False, "reason": "which Twitch name should I look up?"}
 

@@ -94,6 +94,24 @@ def tier_from_badges(badges: str) -> str | None:
     return None
 
 
+def clean_login(text: str) -> str:
+    """Strip the decoration chat puts around a Twitch login.
+
+    Typing '@' in chat opens the mention picker, so '!twitch @name' is how
+    people naturally ask about someone. '#' and a pasted twitch.tv URL are the
+    other two. None of those characters can appear in a real login - Twitch
+    allows only [a-z0-9_] - so removing them can never damage a name.
+
+    Deliberately does NOT lowercase. Callers that need a canonical form
+    lower-case themselves; the ones that echo the name back to chat should
+    keep the spelling the viewer actually typed.
+    """
+    text = " ".join((text or "").split()).strip()
+    if "/" in text:                       # a pasted twitch.tv/name URL
+        text = text.rstrip("/").rsplit("/", 1)[-1]
+    return text.lstrip("#@").strip()
+
+
 def _get(url: str, params: dict, token: str, client_id: str, timeout: float = 5.0):
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v})
     req = urllib.request.Request(
@@ -238,7 +256,7 @@ class Helix:
         per-user rows that need moderator:read:followers. So this works with
         the token the bot already has, no re-login.
         """
-        login = (login or "").strip().lstrip("#").lower()
+        login = clean_login(login).lower()
         if not login or not (self.client_id and self.token):
             return None
         try:

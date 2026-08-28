@@ -357,6 +357,57 @@ def test_bot_twitch():
     print("[PASS] !twitch answers a login, a #channel, a miss and a blank")
 
 
+def test_at_mention_is_accepted_as_a_login():
+    """'!twitch @name' must work - that is how chat actually asks.
+
+    Typing '@' in Twitch chat opens the mention picker, so it is the natural
+    way to find someone. '@' can never be part of a real login, so the old
+    code did not corrupt a name; it just failed the shape check and reported
+    'there is no Twitch channel called @NOTTaitch' for a channel that exists.
+    """
+    import access
+
+    cases = {
+        "@NOTTaitch": "NOTTaitch",
+        "#hardclaws": "hardclaws",
+        "@#hardclaws": "hardclaws",          # both, either order of typing
+        "  @ Hardclaws ": "Hardclaws",       # picker inserts a space
+        "https://twitch.tv/nottaitch": "nottaitch",
+        "NOTTaitch": "NOTTaitch",            # untouched
+        "@": "",                             # nothing left to look up
+    }
+    for raw, want in cases.items():
+        got = access.clean_login(raw)
+        assert got == want, f"{raw!r} -> {got!r}, wanted {want!r}"
+
+    # Case must survive: it is echoed back into chat verbatim.
+    assert access.clean_login("@NOTTaitch") == "NOTTaitch"
+    assert access.clean_login("@NOTTaitch").lower() == "nottaitch"
+
+    # And it reaches the real lookup, not just the helper.
+    whois.clear_cache()
+    b, said = _bot()
+    b._reply_twitch("viewer1", "@hardclaws")
+    assert said[-1].startswith("Twitch | Hardclaws |"), said[-1]
+    print("[PASS] @name, #name, a pasted URL and a bare name all resolve")
+
+
+def test_at_mention_lookup_is_not_reported_as_missing():
+    """The specific wrong answer from the log.
+
+    '@NOTTaitch' used to come back as 'there is no Twitch channel called
+    @NOTTaitch' - a claim about a channel that exists, caused by our own
+    parsing. An unparseable query must never be reported as a missing channel.
+    """
+    whois.clear_cache()
+    result = whois.twitch_lookup("@", helix=None)
+    assert result["found"] is False
+    assert "which Twitch name" in result["reason"], result
+    assert "no Twitch channel" not in result["reason"], result
+    print("[PASS] an empty query asks for a name; it never claims the channel "
+          "does not exist")
+
+
 def test_twitch_legacy_spellings_still_work():
     """!whotwitch / !whotw / !twitchwho keep working, unadvertised.
 
@@ -399,7 +450,9 @@ def main():
                test_broken_twitch_says_so_instead_of_denying_the_channel,
                test_no_helix_is_reported_honestly, test_missing_channel,
                test_format_twitch_variants, test_bot_whois_is_wikipedia_only,
-               test_bot_twitch, test_twitch_legacy_spellings_still_work):
+               test_bot_twitch, test_twitch_legacy_spellings_still_work,
+               test_at_mention_is_accepted_as_a_login,
+               test_at_mention_lookup_is_not_reported_as_missing):
         fn()
     server.shutdown()
     print("ALL PASSED \u2714")

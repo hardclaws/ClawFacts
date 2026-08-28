@@ -965,7 +965,7 @@ class TwitchBot:
         if not helix or not (helix.client_id and helix.token):
             return ""
         if not self._broadcaster_id:
-            uid = helix.user_id(channel.lstrip("#"))
+            uid = helix.user_id(channel)   # user_id cleans '#' and '@' itself
             if not uid:
                 return ""
             self._broadcaster_id = uid
