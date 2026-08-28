@@ -140,15 +140,21 @@ RAMBLES = (
     "not one of 'em sells a decent sandwich.",
     "The bear in the bushes at the {yardstick} and me have an understandin'. "
     "He stays in the bushes.",
-    "I'm haulin' {freight} and thinkin' about the {freight} I hauled last "
-    "week. That's the whole job.",
+    # {freight} once, not twice: FREIGHT mixes mass nouns ("swingin' meat")
+    # with count nouns that need an article ("a skateboard load"), so a second
+    # "the {freight}" read as "the a skateboard load".
+    "I'm haulin' {freight} and thinkin' about the load I hauled last week. "
+    "That's the whole job.",
     "My handle's {handle} and I answer to nobody, including the dispatcher, "
     "especially the dispatcher.",
     "Radio check. I hear static, I hear a stagecoach, I hear {miles} miles "
     "of my own choices.",
     "Somethin' else - I just got passed by a cheese wagon at the {yardstick} "
     "and I have never felt more seen.",
-    "There is a {sighting} out here somewhere and I have decided it is "
+    # No article of its own: SIGHTINGS entries already carry one ("a bear in
+    # the bushes", "an alligator", "three four-wheelers"), so "a {sighting}"
+    # produced "There is a a parking lot haulin' empty".
+    "There's {sighting} out here somewhere and I have decided it is "
     "followin' me. We have been through {miles} miles together.",
     "I been on the {route} so long the white lines started lookin' like "
     "somethin' I was supposed to read.",

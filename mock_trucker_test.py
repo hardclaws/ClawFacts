@@ -99,6 +99,31 @@ def test_no_template_puts_a_preposition_before_a_preposition():
     print("[PASS] no template puts a preposition in front of one")
 
 
+_ARTICLES = ("a", "an", "the")
+_ARTICLE_BEFORE_SLOT = re.compile(r"\b(a|an|the)\s+\{(\w+)\}", re.I)
+
+
+def test_no_template_puts_an_article_before_one():
+    """SIGHTINGS entries carry their own article, so a template must not add
+    another. 'There is a {sighting}' produced 'There is a a parking lot
+    haulin' empty'.
+
+    Checked on the templates rather than on samples, so it fails the moment
+    anyone writes one this way - a sample test only catches the draws where
+    the bad combination happened to come up.
+    """
+    for name, templates in trucker.REGISTERS.items():
+        for template in templates:
+            for m in _ARTICLE_BEFORE_SLOT.finditer(template):
+                article, slot = m.group(1).lower(), m.group(2)
+                for value in trucker._POOLS[slot]:
+                    first = value.split()[0].lower().rstrip(",")
+                    assert first not in _ARTICLES, (
+                        f"{name}: '{article} {{{slot}}}' in {template!r} reads "
+                        f"'{article} {value}'")
+    print("[PASS] no template puts an article in front of one")
+
+
 def test_no_lowercase_after_a_full_stop():
     """Pools are lowercase so they read mid-sentence; the filler must
     capitalise any that land at the start of one."""
@@ -523,6 +548,7 @@ def main():
         test_every_slot_has_a_pool,
         test_no_line_is_left_partially_filled,
         test_no_template_puts_a_preposition_before_a_preposition,
+        test_no_template_puts_an_article_before_one,
         test_no_lowercase_after_a_full_stop,
         test_lines_fit_one_irc_message,
         test_the_space_is_actually_large,
