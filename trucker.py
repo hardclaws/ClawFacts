@@ -24,8 +24,10 @@ timed out.
 
 import random
 import re
+from typing import NamedTuple
 
-__all__ = ["ramble", "combination_count", "registers", "REGISTERS"]
+__all__ = ["ramble", "combination_count", "registers", "REGISTERS", "LABELS",
+           "Post"]
 
 # --------------------------------------------------------------------------
 # Vocabulary. Each entry is real CB/trucker slang.
@@ -161,6 +163,59 @@ BEHIND = (
     "Kojak with a Kodak", "three four-wheelers racin'", "a bear in the air",
 )
 
+#: Opening bellow. Short and all-caps so the line reads as shouting without
+#: the whole message being caps - Twitch automod treats walls of caps badly.
+SHOUTS = (
+    "HEY", "OI", "SOMEBODY", "EXCUSE ME", "PAL", "CHIEF", "BUDDY", "HEY NOW",
+    "OI OI", "SAY",
+)
+
+#: What he is yelling at. Truckers call cars four-wheelers.
+VEHICLES = (
+    "that minivan", "that sedan", "that hatchback", "that crossover",
+    "that convertible", "that pickup with nothin' in the bed",
+    "that silver sedan", "that blue hatchback", "that little red car",
+    "that SUV with the roof box", "that four-wheeler", "that estate",
+)
+
+#: What they did. Always mid-sentence, always lowercase: it follows "just"
+#: or a subject in every template.
+OFFENCES = (
+    "cut across three lanes with no signal",
+    "merged like the mirrors were decorative",
+    "braked for absolutely no reason",
+    "sat in the fast lane at 55",
+    "sped up while I was passin' him",
+    "turned left out of the right lane",
+    "drifted over the line twice",
+    "rolled through that stop sign like it was a suggestion",
+    "pulled out in front of eighty thousand pounds",
+    "hit the brakes on a green light",
+    "took the exit from the middle lane",
+    "texted all the way up the on-ramp",
+    "waved me on and then went himself",
+    "found the middle of the road and stayed there",
+)
+
+#: The follow-up. Exasperated, never a threat - the joke is that he is
+#: furious and completely powerless to do anything about it.
+QUIPS = (
+    "The signal lever is on the left. It does somethin'.",
+    "I got eighty thousand pounds and you got a latte. Pick one.",
+    "Two little red lights. That's all I'm askin' for.",
+    "I have seen better lane discipline from a shopping trolley.",
+    "Mirrors are not decoration, pal.",
+    "Somewhere a drivin' instructor is sittin' down.",
+    "That's a whole personality right there.",
+    "The granny lane is free. It is empty. It is right there.",
+    "I don't get paid for this and I don't get paid at all.",
+    "Somebody out here is havin' a worse day than me.",
+    "My reefer drives straighter than that.",
+    "Who taught you that? Was it a shopping car park?",
+)
+
+ORDINALS = ("second", "third", "fourth", "fifth", "sixth")
+
 FREIGHT = (
     "swingin' meat", "a skateboard load", "chicken lights and hope",
     "nothin' but air and a deadline", "doubles that won't track straight",
@@ -202,6 +257,11 @@ _POOLS = {
     "sight2": SIGHTINGS,
     "grumble": GRUMBLES,
     "behind": BEHIND,
+    "shout": SHOUTS,
+    "vehicle": VEHICLES,
+    "offence": OFFENCES,
+    "quip": QUIPS,
+    "ordinal": ORDINALS,
 }
 
 # --------------------------------------------------------------------------
@@ -249,13 +309,44 @@ RAMBLE_TEMPLATES = (
     "{ramble} {condition}. {signoff}",
 )
 
-#: The three voices, keyed by the names `ramble(register=...)` accepts.
+YELL_TEMPLATES = (
+    "{shout} - {vehicle} just {offence}. {quip}",
+    "{shout}! {vehicle} {offence} like the road was his driveway. {quip}",
+    "{shout} - {vehicle} {offence}. {quip}",
+    "I got {miles} miles left and {vehicle} just {offence}. {quip}",
+    "{shout}, {vehicle} - {quip}",
+    # VEHICLES entries begin with "that" and OFFENCES are past tense, so this
+    # reads "{vehicle} {offence}. That's the third one..." rather than
+    # "the third that minivan to cut across", which is neither.
+    "{shout}! {vehicle} {offence}. That's the {ordinal} one since the "
+    "{yardstick}. {quip}",
+    "{shout} - {vehicle} {offence}, and I'm a very patient man. {quip}",
+    "{shout}! {vehicle} {offence}. {quip} {signoff}",
+)
+
+#: The four voices, keyed by the names `ramble(register=...)` accepts.
 REGISTERS = {"road": ROAD_TEMPLATES,
              "grizzled": GRIZZLED_TEMPLATES,
-             "ramble": RAMBLE_TEMPLATES}
+             "ramble": RAMBLE_TEMPLATES,
+             "yell": YELL_TEMPLATES}
+
+#: What chat sees in front of the line, so it is never ambiguous whether the
+#: bot is on the radio or hanging out of the window at a car.
+LABELS = {"road": "CB", "grizzled": "CB", "ramble": "CB", "yell": "WINDOW"}
 
 _SLOT_RE = re.compile(r"\{(\w+)\}")
-_SENTENCE_START = re.compile(r"(?<=\. )[a-z]")
+_SENTENCE_START = re.compile(r"(?<=[.!?] )[a-z]")
+
+class Post(NamedTuple):
+    """One line plus the label that says what kind of line it is.
+
+    Returned together so a caller cannot post a WINDOW line under a CB label
+    by re-deriving the register and getting a different draw.
+    """
+
+    label: str
+    text: str
+
 
 # Recent-line memory, so an ambient post never repeats itself back to back.
 _HISTORY: list[str] = []
@@ -322,21 +413,29 @@ def combination_count() -> int:
     return sum(_ways(t) for ts in REGISTERS.values() for t in ts)
 
 
-def ramble(register: str | None = None) -> str:
-    """One line of trucker chatter.
+def ramble(register: str | None = None,
+           exclude: tuple[str, ...] = ()) -> Post:
+    """One line of trucker chatter, plus the label it should be posted under.
 
-    ``register`` picks a specific voice; the default chooses between the three
-    at random, so chat cannot predict the tone any more than the timing.
+    ``register`` picks a specific voice. Without it the voice is chosen at
+    random, so chat cannot predict the tone any more than the timing.
+    ``exclude`` drops voices the current config does not want - the car
+    yelling has its own switch, independent of the CB chatter.
     """
-    names = REGISTERS if register is None else [register]
-    if register is not None and register not in REGISTERS:
-        raise ValueError(f"unknown register {register!r}")
+    if register is not None:
+        if register not in REGISTERS:
+            raise ValueError(f"unknown register {register!r}")
+        names = [register]
+    else:
+        names = [n for n in REGISTERS if n not in exclude]
+        if not names:
+            raise ValueError("every register was excluded")
     for _ in range(12):
-        key = random.choice(list(names))
+        key = random.choice(names)
         line = _fill(random.choice(REGISTERS[key])).strip()
         if line not in _HISTORY:
             break
     _HISTORY.append(line)
     if len(_HISTORY) > _HISTORY_MAX:
         del _HISTORY[0]
-    return line
+    return Post(LABELS[key], line)

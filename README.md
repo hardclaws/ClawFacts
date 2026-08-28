@@ -208,7 +208,7 @@ Quick-and-dirty local alternatives:
 | `!haul`               | What the truck is hauling right now.                          |
 | `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
 | `!twitch hardclaws`   | Who that Twitch channel is.                                   |
-| `!cb`                 | The bot talks on the radio. No argument (also `!radio`).      |
+| `!cb`                 | The bot talks on the radio, or yells at a car (also `!radio`).|
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
@@ -1037,15 +1037,34 @@ needed.
 The bot can mutter to itself on the CB while you stream. Three voices, picked
 at random each time so chat cannot learn the tone either:
 
+Every line is prefixed with which mode the bot is in, so it is never ambiguous
+whether this is radio traffic or somebody hanging out of the window at a car:
+
 ```
-[21:04:12] Breaker one-nine, we got a bear in the bushes at the 42 yardstick. Ease off the loud pedal.
-[21:37:55] Heater's a-glowin', manners are showin', and I still can't get the travel agent on the box. Catch you on the flip flop.
-[22:05:41] Somethin' else - I just got passed by a cheese wagon at the 96 and I have never felt more seen.
+[21:04:12] CB | Breaker one-nine, we got a bear in the bushes at the 42 yardstick. Ease off the loud pedal.
+[21:37:55] CB | Heater's a-glowin', manners are showin', and I still can't get the travel agent on the box. Catch you on the flip flop.
+[22:05:41] WINDOW | HEY! That minivan took the exit from the middle lane. Two little red lights. That's all I'm askin' for.
+[22:19:03] WINDOW | OI - that crossover texted all the way up the on-ramp, and I'm a very patient man.
 ```
 
-* **road** — dry channel-19 traffic report. What CB actually sounds like.
-* **grizzled** — an old-timer grumbling to himself.
-* **ramble** — the weird one.
+Four voices, picked at random per post:
+
+| Label | Voice | Sounds like |
+| --- | --- | --- |
+| `CB \|` | **road** | Dry channel-19 traffic report. What CB actually sounds like. |
+| `CB \|` | **grizzled** | An old-timer grumbling to himself. |
+| `CB \|` | **ramble** | The weird one. |
+| `WINDOW \|` | **yell** | Yelling out the window at a four-wheeler that just did something wrong. |
+
+The label comes out of the same draw as the text, so a `WINDOW` line can never
+go out under a `CB` label by being re-rolled on the way to the socket.
+
+**The yelling is exasperated, never threatening.** Every template names a
+vehicle (`that minivan`, `that crossover`) rather than a person, so nothing can
+read as aimed at a real viewer, and a test fails if any of a dozen violent
+terms is ever added to a pool. The bellow is in capitals — `HEY!`, `OI OI!` —
+but the rest of the line is not, because Twitch automod reads a wall of caps
+as spam.
 
 `!cb` (or `!radio`, `!breaker`) asks for one on demand. It is a local
 generator, so it costs nothing and never waits on the network, and it answers
@@ -1055,7 +1074,8 @@ without an `@` mention — the bot is on the radio, not replying to a question.
 "cb_chatter_enabled": true,
 "cb_chatter_minutes": 25,
 "cb_command_enabled": true,
-"cb_command_access": "everyone"
+"cb_command_access": "everyone",
+"cb_yell_enabled": true
 ```
 
 ### Turning parts of it off
@@ -1069,6 +1089,7 @@ without the other:
 | Only on demand, never unprompted | `"cb_chatter_enabled": false` |
 | Only mods (and the broadcaster) may ask for one | `"cb_command_access": "moderator"` |
 | Only the broadcaster may ask for one | `"cb_command_access": "broadcaster"` |
+| CB chatter only, no yelling at cars | `"cb_yell_enabled": false` |
 
 A misspelt `cb_command_access` is treated as `"moderator"`, not `"everyone"` —
 an access setting should fail closed. When the command is switched off it also

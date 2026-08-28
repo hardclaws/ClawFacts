@@ -287,6 +287,13 @@ def main() -> int:
          pathlib.Path("bot.py").read_text(encoding="utf-8")),
         ("a moderator can switch the random chatter from chat",
          hasattr(__import__("bot").TwitchBot, "_cb_switch")),
+        ("CB lines are labelled, so chat can tell the modes apart",
+         hasattr(__import__("trucker"), "LABELS")
+         and set(__import__("trucker").LABELS.values()) == {"CB", "WINDOW"}),
+        ("the bot can yell out the window at a car",
+         "yell" in __import__("trucker").REGISTERS
+         and "cb_yell_enabled" in
+         pathlib.Path("bot.py").read_text(encoding="utf-8")),
         ("state files are written atomically",
          __import__("storage").save_json(
              __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),

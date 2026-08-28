@@ -126,6 +126,9 @@ DEFAULTS = {
     # broadcaster) or "broadcaster". Anything unrecognised is treated as
     # "moderator" - an access setting should fail closed, not open.
     "cb_command_access": "everyone",
+    # The car yelling is the loudest thing the bot does, so it gets its own
+    # switch. False leaves the three CB voices and drops the WINDOW one.
+    "cb_yell_enabled": True,
     # !smk draws from a seed pool plus Wikipedia category listings fetched in
     # the background. Turn this off and the seed pool (a few hundred names)
     # carries the game on its own - it never depends on the network.
@@ -849,6 +852,14 @@ class TwitchBot:
     def _mention(nick: str) -> str:
         return f"@{nick} " if nick else ""
 
+    def _cb_excluded(self) -> tuple:
+        """Voices the current config does not want.
+
+        Passed to the generator rather than filtered afterwards, so a dropped
+        voice is never drawn in the first place.
+        """
+        return () if self.cfg.get("cb_yell_enabled", True) else ("yell",)
+
     def _cb_allowed(self, badges: str) -> bool:
         """Whether these badges may run !cb on demand.
 
@@ -927,9 +938,10 @@ class TwitchBot:
                       f"cb_command_access is "
                       f"{self.cfg.get('cb_command_access', 'everyone')!r}")
             return
-        line = trucker_mod.ramble()
-        self._say(self._fit("", line))
-        self._log(f"cb ramble for {nick or 'chat'}: {line[:60]}")
+        post = trucker_mod.ramble(exclude=self._cb_excluded())
+        self._say(self._fit(f"{post.label} | ", post.text))
+        self._log(f"{post.label} ramble for {nick or 'chat'}: "
+                  f"{post.text[:60]}")
 
     def _cb_next_delay(self) -> float:
         """Seconds until the next ambient ramble. Re-rolled every time.
@@ -978,11 +990,11 @@ class TwitchBot:
             self._cb_next = now + 45.0
             return None
 
-        line = trucker_mod.ramble()
+        post = trucker_mod.ramble(exclude=self._cb_excluded())
         self._cb_next = now + self._cb_next_delay()
-        self._say(self._fit("", line))
-        self._log(f"cb ramble: {line[:60]}")
-        return line
+        self._say(self._fit(f"{post.label} | ", post.text))
+        self._log(f"{post.label} ramble: {post.text[:60]}")
+        return post
 
     def _cb_chatter_keeper(self) -> None:
         # A long first wait: this is flavour, and nobody joining the stream
@@ -1223,7 +1235,7 @@ class TwitchBot:
             f"{prefix}haul - what the truck is hauling right now",
             f"{prefix}whois <name> - who that person is",
             f"{prefix}twitch <name> - who that Twitch channel is",
-            f"{prefix}cb - the bot talks on the radio"
+            f"{prefix}cb - the bot talks on the radio, or yells at a car"
             if self.cfg.get("cb_command_enabled", True) else None,
         ]
         self._say(f"@{nick} commands: " + " | ".join(l for l in lines if l))

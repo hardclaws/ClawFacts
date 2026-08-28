@@ -17,7 +17,7 @@ import trucker
 BANNED = ("lot lizard", "sleeper creeper", "male buffalo", "pickle park")
 
 SLOT_RE = re.compile(r"\{(\w+)\}")
-LOWERCASE_AFTER_STOP = re.compile(r"(?<=\. )[a-z]")
+LOWERCASE_AFTER_STOP = re.compile(r"(?<=[.!?] )[a-z]")
 
 IRC_CAP = 450
 T = 1_000_000.0
@@ -65,7 +65,7 @@ def test_every_slot_has_a_pool():
 
 
 def test_no_line_is_left_partially_filled():
-    lines = [trucker.ramble() for _ in range(20000)]
+    lines = [trucker.ramble().text for _ in range(20000)]
     broken = [ln for ln in lines if "{" in ln or "}" in ln]
     assert not broken, broken[:3]
     print("[PASS] 20000 lines, none left with an unfilled slot")
@@ -102,14 +102,14 @@ def test_no_template_puts_a_preposition_before_a_preposition():
 def test_no_lowercase_after_a_full_stop():
     """Pools are lowercase so they read mid-sentence; the filler must
     capitalise any that land at the start of one."""
-    lines = [trucker.ramble() for _ in range(20000)]
+    lines = [trucker.ramble().text for _ in range(20000)]
     bad = [ln for ln in lines if LOWERCASE_AFTER_STOP.search(ln)]
     assert not bad, bad[:3]
     print("[PASS] no line starts a sentence with a lowercase letter")
 
 
 def test_lines_fit_one_irc_message():
-    lines = [trucker.ramble() for _ in range(20000)]
+    lines = [trucker.ramble().text for _ in range(20000)]
     longest = max(lines, key=len)
     assert len(longest) <= IRC_CAP, (len(longest), longest)
     print(f"[PASS] longest of 20000 is {len(longest)} chars (cap {IRC_CAP})")
@@ -121,7 +121,7 @@ def test_the_space_is_actually_large():
     big but unreachable would pass the first and fail the second."""
     count = trucker.combination_count()
     assert count > 1_000_000, count
-    draws = [trucker.ramble() for _ in range(20000)]
+    draws = [trucker.ramble().text for _ in range(20000)]
     distinct = len(set(draws))
     # The arithmetic alone can lie: a total of 10M means nothing if most of it
     # sits in two templates. 20000 draws must therefore land almost entirely
@@ -167,10 +167,10 @@ def test_pools_are_non_empty():
 
 
 def test_three_registers_and_invalid_rejected():
-    assert set(trucker.registers()) == {"road", "grizzled", "ramble"}, \
-        trucker.registers()
+    assert set(trucker.registers()) == {"road", "grizzled", "ramble",
+                                        "yell"}, trucker.registers()
     for name in trucker.registers():
-        assert trucker.ramble(name), name
+        assert trucker.ramble(name).text, name
     try:
         trucker.ramble("nope")
         raise AssertionError("invalid register did not raise")
@@ -180,7 +180,7 @@ def test_three_registers_and_invalid_rejected():
 
 
 def test_it_does_not_repeat_itself_back_to_back():
-    lines = [trucker.ramble() for _ in range(2000)]
+    lines = [trucker.ramble().text for _ in range(2000)]
     repeats = sum(a == b for a, b in zip(lines, lines[1:]))
     assert repeats == 0, repeats
     print("[PASS] 2000 consecutive lines, no immediate repeat")
@@ -191,7 +191,7 @@ def test_on_my_donkey_only_takes_things_that_can_be_behind_you():
     template draws from a narrower BEHIND pool."""
     assert "a lumper arguin' over two boxes" not in trucker.BEHIND
     assert "a bear" in trucker.BEHIND
-    bad = [ln for ln in (trucker.ramble() for _ in range(20000))
+    bad = [ln for ln in (trucker.ramble().text for _ in range(20000))
            if "arguin" in ln and "on my donkey" in ln]
     assert not bad, bad[:2]
     print("[PASS] 'on my donkey' never takes a noun that cannot be behind you")
@@ -271,11 +271,13 @@ def test_it_posts_when_due_and_reschedules():
     b, said = _bot()
     b._cb_next = 0.0
     b._last_chat = T - 3600.0
-    line = b._cb_chatter_tick(now=T)
-    assert line and said == [line], (line, said)
+    post = b._cb_chatter_tick(now=T)
+    assert post.text and said == [f"{post.label} | {post.text}"], (post, said)
     assert T < b._cb_next <= T + 2.0 * 25 * 60.0, b._cb_next
-    assert not line.startswith("@"), "ambient chatter must not @mention"
-    print(f"[PASS] when due it posts and reschedules: {line[:50]}...")
+    assert not said[0].startswith("@"), "ambient chatter must not @mention"
+    # The whole point of the label: chat can tell the modes apart.
+    assert said[0].split(" | ", 1)[0] in ("CB", "WINDOW"), said[0]
+    print(f"[PASS] when due it posts labelled and reschedules: {said[0][:46]}...")
 
 
 def test_command_reply_posts_without_a_mention():
@@ -419,6 +421,103 @@ def test_help_omits_a_command_that_is_switched_off():
     print("[PASS] !help only advertises !cb when the command is on")
 
 
+# --- labels and the WINDOW voice -----------------------------------------
+
+def test_every_line_carries_the_label_for_its_voice():
+    """The label is derived inside ramble(), from the same draw that produced
+    the text - so a WINDOW line can never go out under a CB label."""
+    seen = {}
+    for _ in range(20000):
+        post = trucker.ramble()
+        seen.setdefault(post.label, 0)
+        seen[post.label] += 1
+    assert set(seen) == {"CB", "WINDOW"}, seen
+    for name in trucker.registers():
+        want = trucker.LABELS[name]
+        for _ in range(200):
+            assert trucker.ramble(name).label == want, (name, want)
+    print(f"[PASS] both labels appear, and each voice keeps its own "
+          f"({ {k: v for k, v in sorted(seen.items())} })")
+
+
+def test_the_window_voice_targets_cars_not_people():
+    """Yelling out the window, not at a named person: every template names a
+    vehicle, so nothing can read as aimed at a real viewer."""
+    for template in trucker.YELL_TEMPLATES:
+        assert "{vehicle}" in template, template
+    for vehicle in trucker.VEHICLES:
+        assert vehicle.startswith("that "), vehicle
+    print("[PASS] every yell names a vehicle, and always as 'that <vehicle>'")
+
+
+def test_the_yelling_is_never_a_threat():
+    """Exasperated and powerless is funny; anything implying violence is a
+    moderation problem in a live channel."""
+    banned = ("ram", "kill", "crash", "wreck", "punch", "shoot", "die",
+              "brake check", "run you", "hit you", "road rage", "fight")
+    pats = [re.compile(r"\b" + re.escape(w) + r"\b") for w in banned]
+    for text in _all_strings():
+        low = text.lower()
+        for word, pat in zip(banned, pats):
+            assert not pat.search(low), (word, text)
+    print(f"[PASS] none of {len(banned)} violent terms appears in the generator")
+
+
+def test_a_shout_is_capped_but_the_line_is_not():
+    """Twitch automod treats a wall of capitals as spam. The bellow is caps,
+    the rest is not."""
+    acronyms = {"SUV", "CB", "DOT", "GPS"}
+    for _ in range(20000):
+        post = trucker.ramble("yell")
+        caps = [w.strip(".,!?") for w in post.text.split()]
+        caps = [w for w in caps
+                if w.isupper() and len(w) > 1 and w not in acronyms]
+        assert post.text != post.text.upper(), post.text
+        assert len(caps) <= 2, (caps, post.text)
+    print("[PASS] at most the bellow is in capitals, never the whole line")
+
+
+def test_a_voice_can_be_dropped_without_losing_the_others():
+    b, _ = _bot(cb_yell_enabled=False)
+    assert b._cb_excluded() == ("yell",)
+    labels = {trucker.ramble(exclude=b._cb_excluded()).label
+              for _ in range(3000)}
+    assert labels == {"CB"}, labels
+    b, _ = _bot()
+    assert b._cb_excluded() == ()
+    labels = {trucker.ramble(exclude=()).label for _ in range(3000)}
+    assert labels == {"CB", "WINDOW"}, labels
+    print("[PASS] cb_yell_enabled=false drops WINDOW and keeps all three CB "
+          "voices")
+
+
+def test_excluding_everything_is_an_error_not_silence():
+    try:
+        trucker.ramble(exclude=tuple(trucker.registers()))
+        raise AssertionError("excluding everything did not raise")
+    except ValueError:
+        pass
+    print("[PASS] excluding every voice raises rather than posting nothing")
+
+
+def test_the_yelling_is_grammatical():
+    """Two real defects this catches: a past-tense offence after 'to', and a
+    'that'-prefixed vehicle dropped in after an ordinal."""
+    import re
+    ordinal_that = re.compile(
+        r"the (second|third|fourth|fifth|sixth) that")
+    bad = []
+    for _ in range(30000):
+        text = trucker.ramble("yell").text
+        if ordinal_that.search(text):
+            bad.append(text)
+        if any(f" to {offence}" in text for offence in trucker.OFFENCES):
+            bad.append(text)
+    assert not bad, bad[:2]
+    print("[PASS] 30000 yells, no 'to <past tense>' and no ordinal before a "
+          "vehicle")
+
+
 def main():
     tests = [
         test_every_slot_has_a_pool,
@@ -453,6 +552,13 @@ def main():
         test_status_reports_the_real_state,
         test_on_names_the_config_setting_when_config_has_it_off,
         test_help_omits_a_command_that_is_switched_off,
+        test_every_line_carries_the_label_for_its_voice,
+        test_the_window_voice_targets_cars_not_people,
+        test_the_yelling_is_never_a_threat,
+        test_a_shout_is_capped_but_the_line_is_not,
+        test_a_voice_can_be_dropped_without_losing_the_others,
+        test_excluding_everything_is_an_error_not_silence,
+        test_the_yelling_is_grammatical,
     ]
     failed = 0
     for test in tests:

@@ -41,6 +41,7 @@
   "cb_chatter_minutes": 25,
   "cb_command_enabled": true,
   "cb_command_access": "everyone",
+  "cb_yell_enabled": true,
   "names_topup_enabled": true,
   "names_topup_hours": 12
 }

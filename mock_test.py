@@ -70,8 +70,10 @@ bot_mod.whois.twitch_lookup = _fake_twitch_lookup
 # !cb is a local generator, so the end-to-end run stubs the line it returns
 # and asserts that line actually reached the socket. The generator's own
 # variety is covered by mock_trucker_test.py.
-CB_SENTINEL = "Breaker one-nine, this is the test rig. 10-4, driver."
-bot_mod.trucker_mod.ramble = lambda register=None: CB_SENTINEL
+CB_SENTINEL = bot_mod.trucker_mod.Post(
+    "CB", "Breaker one-nine, this is the test rig. 10-4, driver.")
+CB_LINE = f"{CB_SENTINEL.label} | {CB_SENTINEL.text}"
+bot_mod.trucker_mod.ramble = lambda register=None, exclude=(): CB_SENTINEL
 
 HOST, PORT = "127.0.0.1", 6667
 
@@ -403,12 +405,12 @@ def main():
 
     # !cb: reached the socket, twice (!cb and its !radio alias), with no
     # @mention on it - the bot is on the radio, not answering a question.
-    cb_lines = [l for l in bot_lines if CB_SENTINEL in l]
+    cb_lines = [l for l in bot_lines if CB_LINE in l]
     if len(cb_lines) != 2:
         print(f"FAIL: expected !cb and !radio to each answer once, got "
               f"{len(cb_lines)}: {cb_lines}")
         return 1
-    elif any(f"@viewer20 {CB_SENTINEL}" in l or f"@viewer21 {CB_SENTINEL}" in l
+    elif any(f"@viewer20 {CB_LINE}" in l or f"@viewer21 {CB_LINE}" in l
              for l in cb_lines):
         print(f"FAIL: !cb posted with an @mention: {cb_lines}")
         return 1
@@ -416,8 +418,13 @@ def main():
         print("FAIL: !cb exceeded Twitch's 500-character limit")
         return 1
     else:
-        print("[PASS] !cb and !radio each answered once, unmentioned, and "
-              "inside Twitch's limit")
+        # The label has to be on the wire, or chat cannot tell the CB voice
+        # from the one yelling at a car.
+        if not all("PRIVMSG #test :CB | " in l for l in cb_lines):
+            print(f"FAIL: !cb was posted without its CB | label: {cb_lines}")
+            return 1
+        print("[PASS] !cb and !radio each answered once, labelled 'CB |', "
+              "unmentioned, inside Twitch's limit")
 
     # !cb off/on/status: a viewer is ignored silently, a moderator is answered.
     if any("viewer22" in l for l in bot_lines):
