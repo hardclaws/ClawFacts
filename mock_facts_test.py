@@ -3,6 +3,7 @@
 Run:  python3 mock_facts_test.py
 """
 
+import io
 import time
 
 import json
@@ -1870,6 +1871,60 @@ def test_no_model_means_no_answer_rather_than_a_guess():
     print("[PASS] no model configured means no answer, not an unsourced guess")
 
 
+def test_a_fact_may_not_just_restate_the_question():
+    """'!funfact twitch degenerates' answered 'twitch degenerates.'
+
+    A search snippet that is the query echoed back, with a full stop added,
+    gets past the fragment check (it has a full stop, and 'degenerates' is a
+    verb) and past the attribution check (it names the subject, because it IS
+    the subject). What it lacks is a single word the asker did not type.
+    """
+    for echo, subject in (("twitch degenerates.", "twitch degenerates"),
+                          ("twitch degenerates", "twitch degenerates"),
+                          ("Trail mix.", "trail mix"),
+                          ("Illinois.", "illinois")):
+        assert funfacts._is_echo(echo, subject), (echo, subject)
+        assert funfacts._ranked_facts([echo], subject=subject,
+                                     require_subject=True) == [], echo
+    # A fact adds something the asker did not already say.
+    for fact, subject in (
+            ("The dew point is the temperature to which air must be cooled.",
+             "temperature condensation"),
+            ("Illinois was admitted as a state in 1818.", "illinois"),
+            ("Trail mix is a snack of dried fruit, nuts and chocolate.",
+             "trail mix")):
+        assert not funfacts._is_echo(fact, subject), (fact, subject)
+        assert funfacts._ranked_facts([fact], subject=subject,
+                                     require_subject=True), fact
+    # No subject means no opinion.
+    assert not funfacts._is_echo("Anything at all.", "")
+    print("[PASS] an echoed question is not accepted as a fact")
+
+
+def test_no_model_says_why_rather_than_failing_silently():
+    """The reason a question went unanswered has to be visible. Without a log
+    line, a missing API key is indistinguishable from a search that found
+    nothing, and it reads as a bug in the lookup."""
+    import contextlib
+    import llm
+
+    buf = io.StringIO()
+    orig = llm.is_configured
+    llm.is_configured = lambda o: False
+    try:
+        funfacts._log_once.discard("no_llm")
+        with contextlib.redirect_stdout(buf):
+            assert funfacts._answer_question("why is the sky blue", {},
+                                             200) is None
+    finally:
+        llm.is_configured = orig
+        funfacts._log_once.discard("no_llm")
+    out = buf.getvalue()
+    assert "no LLM is configured" in out, out
+    assert "llm_api_key" in out, out
+    print("[PASS] an unanswerable question names the reason in the log")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -1940,6 +1995,8 @@ def main():
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()
+    test_a_fact_may_not_just_restate_the_question()
+    test_no_model_says_why_rather_than_failing_silently()
     print("\nALL PASSED ✔")
     return 0
 

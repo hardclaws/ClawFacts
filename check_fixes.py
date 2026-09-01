@@ -258,6 +258,17 @@ def main() -> int:
              _llm.answer_question) = orig
         return True
 
+    def _an_echo_is_not_a_fact():
+        """'!funfact twitch degenerates' must not answer 'twitch degenerates.'"""
+        if not funfacts._is_echo("twitch degenerates.", "twitch degenerates"):
+            return False
+        if funfacts._ranked_facts(["twitch degenerates."],
+                                  subject="twitch degenerates",
+                                  require_subject=True):
+            return False
+        return not funfacts._is_echo(
+            "Illinois was admitted as a state in 1818.", "illinois")
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -575,6 +586,8 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("an echoed question is never posted back as the fact",
+         hasattr(funfacts, "_is_echo") and _an_echo_is_not_a_fact()),
         ("a free-form question is answered, but only from its sources",
          hasattr(funfacts, "_answer_question")
          and hasattr(funfacts, "_question_sources")

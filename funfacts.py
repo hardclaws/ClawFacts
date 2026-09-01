@@ -679,6 +679,23 @@ def _names_subject(sentence: str, subject: str) -> bool:
     return len(head) >= 5 and head[:-1] in low
 
 
+def _is_echo(sentence: str, subject: str) -> bool:
+    """True when the "fact" only restates what was already typed.
+
+    "!funfact twitch degenerates" answered "twitch degenerates." A search
+    snippet that is the query echoed back, with a full stop, gets past the
+    fragment check (it has a full stop and 'degenerates' is a verb) and past
+    the attribution check (it names the subject, because it *is* the subject).
+    What it lacks is a single word the asker did not already type.
+    """
+    if not subject:
+        return False
+    fact_words = set(_topic_words(sentence))
+    if not fact_words:
+        return True
+    return fact_words <= set(_topic_words(subject))
+
+
 def _ranked_facts(sentences: list, spice: bool = False,
                   limit: int = 200, count: int = 6,
                   subject: str = "", require_subject: bool = False) -> list:
@@ -706,6 +723,8 @@ def _ranked_facts(sentences: list, spice: bool = False,
         # whole basis for the answer. So these must name the subject, or the
         # source is asked to say nothing at all.
         if require_subject and subject and not _names_subject(s, subject):
+            continue
+        if _is_echo(s, subject):
             continue
         if sc < 2 and out:
             break
@@ -2589,9 +2608,18 @@ def _answer_question(question: str, opts: dict, limit: int):
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return None
     if not llm.is_configured(opts):
+        if "no_llm" not in _log_once:
+            _log_once.add("no_llm")
+            print("[funfacts] cannot answer free-form questions: no LLM is "
+                  "configured. Set llm_api_key (or GROQ_API_KEY / "
+                  "OPENROUTER_API_KEY), or point llm_base_url at a local "
+                  "Ollama. Until then !funfact only answers things with a "
+                  "Wikipedia article.", flush=True)
         return None
     sources = _question_sources(question, opts)
     if not sources:
+        print(f"[funfacts] no usable source lines for the question: "
+              f"{question[:60]}", flush=True)
         return None
     try:
         text = llm.answer_question(question, sources, opts)
@@ -2610,6 +2638,8 @@ def _answer_question(question: str, opts: dict, limit: int):
         if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
             continue
         if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
+            continue
+        if _is_echo(ln, question):
             continue
         fact = _trim(ln, limit)
         if fact:
