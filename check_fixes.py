@@ -127,6 +127,43 @@ def main() -> int:
                 return False
         return True
 
+    def _facts_stand_alone():
+        """The eight real defects from the #hardclaws transcript stay blocked,
+        and the facts worth posting still get through."""
+        import funfacts as _ff
+
+        bad = (
+            "But in that same year, the Latter Day Saint movement founder, "
+            "Joseph Smith, was killed in the Carthage Jail, about 30 miles "
+            "away from Nauvoo.",
+            "Of the fifty U.S. states, Illinois has the fifth-largest gross "
+            "domestic product (GDP), the sixth-largest population, and the "
+            "25th-most land area.",
+            "In 1840, one hundred of those residents who did not have "
+            "passports were arrested, leading to the Graham Affair.",
+            "What did Grima do?",
+            "Previously the Portswood Hotel, it was named after J. R. R. "
+            "Tolkien's book The Hobbit in 1989.",
+            "The National Register of Historic Places is the official list of "
+            "the Nation's historic places worthy of preservation.",
+            "Historic Landmark plaque.",
+            "Seeds, such as pumpkin seeds or sunflower seeds",
+        )
+        good = (
+            "One of the oldest remaining buildings in Girard, the Henry "
+            "Barnhisel House, shares tales of community and family history.",
+            "Jerome was originally called Fremont Town, and under the latter "
+            "name was platted in 1867 when the railroad was extended.",
+            "Cuba, Missouri is home to the world's largest rocking chair.",
+        )
+        for sentence in bad:
+            if _ff._ranked_facts([sentence], limit=200):
+                return False
+        for sentence in good:
+            if not _ff._ranked_facts([sentence], limit=200):
+                return False
+        return True
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -444,6 +481,11 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("a harvested fun fact can stand on its own (8 real defects)",
+         hasattr(funfacts, "_is_dangling")
+         and hasattr(funfacts, "_is_fragment")
+         and hasattr(funfacts, "_is_boring")
+         and _facts_stand_alone()),
         ("'last seen playing' is sourced from Get Channel Information",
          hasattr(__import__("access").Helix("c", "t", "1"), "channel_info")
          and _last_seen_is_sourced()),

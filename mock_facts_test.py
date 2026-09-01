@@ -1529,6 +1529,94 @@ def test_location_line_never_outranks_history():
         ["Joe Girard, Guinness Book of World Records winning American salesman"],
         spice=True, limit=200) == []
 
+# Every string below is a line the bot actually posted in #hardclaws. They are
+# kept verbatim because paraphrasing them is how a regression test stops
+# matching the thing it was written for.
+_REAL_BAD_FACTS = (
+    ("But in that same year, the Latter Day Saint movement founder, Joseph "
+     "Smith, was killed in the Carthage Jail, about 30 miles away from "
+     "Nauvoo.", "dangling"),
+    ("Of the fifty U.S. states, Illinois has the fifth-largest gross domestic "
+     "product (GDP), the sixth-largest population, and the 25th-most land "
+     "area.", "boring"),
+    ("In 1840, one hundred of those residents who did not have passports were "
+     "arrested, leading to the Graham Affair, which was resolved in part with "
+     "the intercession of Royal Navy officials.", "dangling"),
+    ("What did Grima do?", "fragment"),
+    ("Previously the Portswood Hotel, it was named after J. R. R. Tolkien's "
+     "book The Hobbit in 1989.", "dangling"),
+    ("The National Register of Historic Places is the official list of the "
+     "Nation's historic places worthy of preservation.", "boring"),
+    ("Historic Landmark plaque.", "fragment"),
+    ("Seeds, such as pumpkin seeds or sunflower seeds", "fragment"),
+)
+
+
+def test_harvested_facts_must_stand_alone():
+    """A fact is posted alone in chat, with no article around it.
+
+    All eight of these reached chat and passed every filter that existed,
+    because those filters were written for small-town census boilerplate. The
+    complaint was 'they arent facts or they are just boring', and these are
+    the two halves of it: fragments and questions are not facts, and a ranking
+    table in prose form or a sentence that opens with 'But in that same year'
+    is not readable on its own.
+    """
+    checks = {"dangling": funfacts._is_dangling,
+              "fragment": funfacts._is_fragment,
+              "boring": funfacts._is_boring}
+    for sentence, why in _REAL_BAD_FACTS:
+        assert checks[why](sentence), (why, sentence)
+        # And through the funnel they actually travel, not just the predicate.
+        assert funfacts._ranked_facts([sentence], limit=200) == [], sentence
+
+
+def test_real_facts_survive_the_stand_alone_gate():
+    """The other half: the gate must not eat the facts worth posting.
+
+    Two of these were dropped by the first draft - 'the latter' was treated as
+    an unresolvable reference when the antecedent is in the same sentence, and
+    a missing present-tense verb pattern made a 122-character sentence look
+    like a fragment. Both are real facts about real places.
+    """
+    good = (
+        "One of the oldest remaining buildings in Girard, the Henry Barnhisel "
+        "House, shares tales of community and family history.",
+        "Jerome was originally called \"Fremont Town\", and under the latter "
+        "name was platted in 1867 when the railroad was extended.",
+        "Leap-The-Dips in Lakemont is the oldest operating roller coaster in "
+        "the world.",
+        "Cuba, Missouri is home to the world's largest rocking chair.",
+        "It was platted in 1867 as Fremont Town.",
+        "The arcade boasts 600 pinball machines, some dating back almost a "
+        "century and others just released.",
+        "Bette Davis and Amelia Earhart both visited the town in 1937.",
+    )
+    for sentence in good:
+        assert not funfacts._is_dangling(sentence), sentence
+        assert not funfacts._is_fragment(sentence), sentence
+        assert not funfacts._is_boring(sentence), sentence
+        assert funfacts._ranked_facts([sentence], limit=200), sentence
+
+
+def test_facts_are_ranked_by_relevance_to_what_was_asked():
+    """'!funfact huorns' and '!funfact trail mix' both answered with
+    sentences that had nothing to do with the query.
+
+    This is a ranking bonus, not a hard drop: a stub article whose only usable
+    sentence does not repeat the name must still produce an answer.
+    """
+    about = "Trail mix is a snack of dried fruit, nuts and sometimes chocolate."
+    unrelated = ("The National Register of Historic Places is a federal list "
+                 "of districts, sites and structures worthy of preservation.")
+    out = funfacts._ranked_facts([unrelated, about], limit=200,
+                                 subject="trail mix")
+    assert out and "Trail mix" in out[0], out
+    # With no subject given, nothing is penalised and nothing is invented.
+    assert funfacts._ranked_facts([unrelated, about], limit=200), "still answers"
+    print("[PASS] the fact that names the subject outranks one that does not")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -1587,6 +1675,9 @@ def main():
     test_work_titles_not_harvested()
     test_html_entities_unescaped()
     test_wiki_cooldown()
+    test_harvested_facts_must_stand_alone()
+    test_real_facts_survive_the_stand_alone_gate()
+    test_facts_are_ranked_by_relevance_to_what_was_asked()
     print("\nALL PASSED ✔")
     return 0
 

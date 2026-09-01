@@ -209,6 +209,132 @@ def _is_person_stub(sentence: str) -> bool:
     return bool(_STUB_EPITHET.search(t))
 
 
+# ---------------------------------------------------------------------------
+# Sentences that cannot stand on their own.
+#
+# A harvested fact is posted alone in chat with no article around it, so any
+# sentence that leans on the paragraph it was cut from reads as nonsense. Four
+# kinds reached chat and every one of them passed the existing filters, which
+# were written for small-town census boilerplate rather than for this:
+#
+#   "But in that same year, the Latter Day Saint movement founder..."
+#   "In 1840, one hundred of those residents who did not have passports..."
+#   "Previously the Portswood Hotel, it was named after..."
+#   "What did Grima do?"
+#   "Historic Landmark plaque."
+#   "Seeds, such as pumpkin seeds or sunflower seeds"
+# ---------------------------------------------------------------------------
+
+#: Opens by pointing at something the reader has not been shown.
+_DANGLE_START = re.compile(
+    r"^\s*(?:but|however|nevertheless|nonetheless|yet|thus|therefore|hence|"
+    r"meanwhile|subsequently|afterwards?|later|additionally|moreover|"
+    r"furthermore|also|likewise|similarly|consequently|instead|otherwise|"
+    r"although|though|whereas|previously|thereafter)\b|"
+    r"^\s*(?:by then|since then|that same year|in that year|"
+    r"in the same year|at that time|at the time|following this|after this|"
+    r"during this|around this time|in the following)\b",
+    re.IGNORECASE,
+)
+
+#: Refers back to an antecedent that was in the article, not the message.
+_ANAPHOR = re.compile(
+    r"\b(?:those|these|such|both|many|several|all)\s+(?:of\s+)?(?:the\s+)?"
+    r"(?:residents|people|men|women|children|families|settlers|workers|"
+    r"soldiers|individuals|immigrants|slaves|prisoners|patients|students|"
+    r"cases|instances|buildings|houses|structures|streets|roads|areas|"
+    r"places|things|events|years|months|numbers|figures|changes|efforts|"
+    r"plans|problems|issues|rules|laws|records|documents|groups|companies|"
+    r"schools|churches|teams|players|artists|authors|films|books|songs|"
+    r"species|varieties|types|kinds|forms)\b|"
+    # Only the forms whose antecedent is always outside the sentence.
+    # "the latter" / "the former" / "the same" usually resolve in-sentence
+    # ("called 'Fremont Town', and under the latter name was platted in 1867")
+    # and dropping them cost a real fact in the Jerome MO regression test.
+    r"\bthe\s+(?:above|aforementioned|said)\b",
+    re.IGNORECASE,
+)
+
+_TERMINAL = re.compile(r"[.!?]\s*$")
+
+#: Presence of a finite verb. Deliberately over-inclusive: a false positive
+#: keeps a fragment, a false negative drops a real fact.
+_HAS_VERB = re.compile(
+    r"\b(?:is|are|was|were|be|been|being|has|have|had|does|did|do|can|could|"
+    r"will|would|shall|should|may|might|must|became|becomes|become|"
+    r"contains?|contained|includes?|included|lies|lay|stood|stands?|"
+    r"opened|opens?|closed|built|founded|established|named|renamed|serves?|"
+    r"served|held|holds?|won|began|begins?|ended|ends?|reached|reaches?|"
+    r"killed|died|born|lived|worked|played|led|produced|produces?|received|"
+    r"gave|made|took|found|created|used|known|called|shown|seen|taken|"
+    r"written|given|set|put|let|said|told|brought|bought|taught|"
+    r"thought|sought|fought|caught|shares?|boasts?|hosts?|sits?|marks?|"
+    r"spans?|covers?|keeps?|offers?|features?|consists?|comprises?|dates?|"
+    r"runs?|leads?|adds?|gives?|takes?|sees?|says?|shows?|tells?|notes?|"
+    r"lists?|means?|seems?|looks?|feels?|carries?|matches?|"
+    r"[a-z]{4,}ed|[a-z]{4,}es|[a-z]{3,}ies)\b",
+    re.IGNORECASE,
+)
+
+#: A sentence that only enumerates rankings. Scores high, because every ordinal
+#: is a strong word, and is the least interesting thing an article can say:
+#: "Illinois has the fifth-largest GDP, the sixth-largest population, and the
+#: 25th-most land area."
+_ORDINAL_RANK = re.compile(
+    r"\b(?:\d+(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|"
+    r"eighth|ninth|tenth|eleventh|twelfth|twentieth|thirtieth|[a-z]{4,}th)[- ]?"
+    r"(?:largest|smallest|biggest|longest|shortest|highest|lowest|most|least|"
+    r"richest|oldest|youngest|busiest|densest|populous|deadliest)\b",
+    re.IGNORECASE,
+)
+
+#: Defines a concept rather than saying something about the subject: "The
+#: National Register of Historic Places is the official list of the Nation's
+#: historic places worthy of preservation."
+_CONCEPT_DEF = re.compile(
+    r"^\s*the\s+[\w\s'\u2019-]{3,70}?\s+is\s+(?:the\s+)?(?:official|a|an)\s+"
+    r"(?:list|register|term|name|act|law|award|designation|standard|agency|"
+    r"organisation|organization|system|method|process|practice|body|group|"
+    r"set of)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_dangling(sentence: str) -> bool:
+    """True when the sentence leans on the paragraph it was cut from."""
+    return bool(_DANGLE_START.match(sentence) or _ANAPHOR.search(sentence))
+
+
+def _is_fragment(sentence: str) -> bool:
+    """True for a heading, a list item or a question - none of which is a fact.
+
+    "Historic Landmark plaque." and "Seeds, such as pumpkin seeds or sunflower
+    seeds" both reached chat as facts. Neither is a sentence.
+    """
+    t = (sentence or "").strip()
+    if not t:
+        return True
+    if not _TERMINAL.search(t):
+        # A list item cut out of a bulleted list. Never a sentence.
+        return True
+    if t.endswith("?"):
+        return True
+    # A short run of words with no verb in it is a caption, not a sentence:
+    # "Historic Landmark plaque." The verb check is only trusted on short
+    # strings, because the verb list has false negatives and a long sentence
+    # that survives every other check is more likely real than fragmentary -
+    # it cost "the Henry Barnhisel House shares tales of..." when it applied
+    # to sentences of any length.
+    return len(t) < 60 and not bool(_HAS_VERB.search(t))
+
+
+def _is_boring(sentence: str) -> bool:
+    """True for ranking enumerations and concept definitions."""
+    if len(_ORDINAL_RANK.findall(sentence)) >= 2:
+        return True
+    return bool(_CONCEPT_DEF.match(sentence))
+
+
 def _is_filler(sentence: str) -> bool:
     """True for census/location boilerplate that is never a fun fact.
 
@@ -496,15 +622,35 @@ def _overlap(a: str, b: str) -> float:
     return len(sa & sb) / min(len(sa), len(sb))
 
 
+def _subject_score(sentence: str, subject: str) -> int:
+    """Bonus for facts that actually name what was asked about.
+
+    "!funfact huorns" returned a definition of the National Register of
+    Historic Places, and "!funfact trail mix" returned "Seeds, such as pumpkin
+    seeds" - both technically sentences, neither about the thing asked for.
+    This is a ranking bonus rather than a hard drop so a stub article with one
+    usable sentence still produces an answer.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", (subject or "").lower())
+             if len(w) >= 4]
+    if not words:
+        return 0
+    low = sentence.lower()
+    hit = sum(1 for w in words if w in low)
+    return 4 * hit if hit else -6
+
+
 def _ranked_facts(sentences: list, spice: bool = False,
-                  limit: int = 200, count: int = 6) -> list:
+                  limit: int = 200, count: int = 6,
+                  subject: str = "") -> list:
     """Rank sentences and return up to `count` distinct, trimmed facts.
 
     The top sentence is always kept (so every place gets an answer), but
     lower-ranked sentences are only kept if they're interesting (score >= 2) —
     this filters out dull "population was..." / "incorporated in..." filler.
     """
-    ranked = sorted(((s, _score(s, spice)) for s in sentences),
+    ranked = sorted(((s, _score(s, spice) + _subject_score(s, subject))
+                     for s in sentences),
                     key=lambda p: (-p[1], len(p[0])))
     out, seen_norm = [], []
     for s, sc in ranked:
@@ -513,7 +659,8 @@ def _ranked_facts(sentences: list, spice: bool = False,
         # source (or a related article) instead of posting a census line, a
         # "it is located near..." line, SEO boilerplate or a namesake person.
         if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
-                or _LOCATION_ONLY.match(s)):
+                or _LOCATION_ONLY.match(s) or _is_dangling(s)
+                or _is_fragment(s) or _is_boring(s)):
             continue
         if sc < 2 and out:
             break
@@ -977,7 +1124,8 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             if _text_names_other_region(extract[:250], region):
                 continue
             facts = _ranked_facts(_filter_definitions(_sentences(extract)),
-                                  spice=spice, limit=limit, count=8)
+                                  spice=spice, limit=limit, count=8,
+                                  subject=core or full)
             for f in facts:
                 # Sentences from an article that merely shares a word with the
                 # place ("Avon Lake, Ohio" / "Lake County, Ohio" both score 128
