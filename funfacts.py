@@ -2406,6 +2406,16 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
         return curated or _give_up(location)
 
     canonical = ", ".join(x for x in (geo["name"], geo["state"] or geo["country"]) if x)
+    # The geocoder may resolve a query to somewhere else entirely: "stinker"
+    # came back as Lermoos in the Austrian Tyrol, and the bot then answered
+    # "Lermoos is a municipality in the district of Reutte" under the heading
+    # Lermoos. Nobody asked about Lermoos. Only follow the geocoder when the
+    # place it found is a variant of the name that was typed.
+    if canonical and not _names_subject(canonical, location):
+        print(f"[funfacts] geocoder resolved {location!r} to {canonical!r}, "
+              f"which is not the same name - not answering about it",
+              flush=True)
+        return curated or _give_up(location)
     if canonical and _norm(canonical) != _norm(location):
         result = _try_sources(canonical, spicy, limit, options)
         if result:
@@ -2425,6 +2435,12 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
         return curated or _give_up(location)
 
     target = _title_tokens(geo["name"]) if geo["name"] else ""
+    # Same guard as above: "just outside town" only means anything if the
+    # thing asked for is a town.
+    if not _names_subject(geo.get("name") or "", location):
+        print(f"[funfacts] no place matches {location!r}; nearest notable "
+              f"place is not an answer to it", flush=True)
+        return curated or _give_up(location)
     ordered = sorted(
         nearby,
         key=lambda n: (not (target and target in _title_tokens(n["title"])),
@@ -2727,7 +2743,13 @@ def get_funfact(location: str, options=None):
         # 4. Not a place and not a thing with an article - a question. Answer
         #    it from the search results, grounded in them, rather than saying
         #    nothing. Skipped in spicy mode, which has its own path.
-        if (not spicy and opts.get("answer_questions", True)
+        # Deliberately not gated on spice. This ran only in clean mode, and
+        # "spice": "spicy" is a common setting - so on exactly the channels
+        # most likely to ask odd questions, the question path never executed
+        # at all and every one of them got "couldn't find any fun facts".
+        # An answer to a factual question needs no adult flavour, and when
+        # _lookup_all found nothing there is nothing to flavour anyway.
+        if (opts.get("answer_questions", True)
                 and (result is None or not result.get("facts"))):
             answered = _answer_question(location.strip(), opts, limit)
             if answered:

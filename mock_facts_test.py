@@ -1966,6 +1966,94 @@ def test_tavily_supplies_the_sources_a_question_needs():
     print("[PASS] Tavily supplies real source text for a free-form question")
 
 
+def test_spicy_mode_still_answers_questions():
+    """A config value silently disabled the whole question path.
+
+    It was gated on `not spicy`, and "spice": "spicy" is a normal setting - so
+    on the channels most likely to ask odd questions, every question returned
+    "couldn't find any fun facts" and nothing was logged. Two wrong diagnoses
+    were given before the gate was found, which is what a test is for.
+    """
+    import json as _json
+    import urllib.request as _ur
+
+    payload = {"results": [{"title": "Dew point", "content":
+                            "The dew point is the temperature to which air "
+                            "must be cooled to become saturated with water "
+                            "vapour.", "url": "https://example.org/dew"}]}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps(payload).encode()
+
+    import llm
+    orig = (_ur.urlopen, llm.is_configured, llm.answer_question)
+    _ur.urlopen = lambda req, timeout=10: _Resp()
+    llm.is_configured = lambda o: True
+    llm.answer_question = lambda q, src, cfg: (
+        "Condensation stops once the windshield warms above the dew point.")
+    try:
+        for spice in ("spicy", "clean"):
+            funfacts._cache.clear()
+            got = funfacts.get_funfact(
+                "what temperature does condensation stop occuring on a "
+                "windshield?",
+                {"spice": spice, "llm_api_key": "k", "tavily_api_key": "tvly",
+                 "max_fact_chars": 200})
+            assert got and got["fact"], (spice, got)
+            assert "dew point" in got["fact"].lower(), (spice, got["fact"])
+    finally:
+        (_ur.urlopen, llm.is_configured, llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] spicy mode answers questions too")
+
+
+def test_the_geocoder_may_not_substitute_a_different_place():
+    """'!funfact stinker' answered 'FunFact | Lermoos: Lermoos is a
+    municipality in the district of Reutte in the Austrian state of Tyrol.'
+
+    The geocoder resolved a word that is not a place to somewhere in the
+    Tyrol, and the bot then answered about that place under its own heading.
+    Nobody asked about Lermoos. Only follow the geocoder when what it found is
+    a variant of the name that was typed.
+    """
+    orig = funfacts._osm_geocode
+    funfacts._osm_geocode = lambda q: {"name": "Lermoos", "state": "Tyrol",
+                                       "country": "Austria", "lat": 47.4,
+                                       "lon": 10.9, "county": "Reutte"}
+    try:
+        got = funfacts._lookup_all("stinker", {}, False, 200)
+        assert not (got and got.get("facts")), got
+        if got:
+            assert not any("Lermoos" in f for f in got["facts"]), got
+    finally:
+        funfacts._osm_geocode = orig
+
+    # A real place whose canonical form differs still works.
+    saved = (funfacts._osm_geocode, funfacts._try_sources)
+    funfacts._osm_geocode = lambda q: {"name": "Lakemont",
+                                       "state": "Pennsylvania",
+                                       "country": "United States",
+                                       "lat": 40.6, "lon": -78.3,
+                                       "county": "Blair"}
+    funfacts._try_sources = lambda q, sp, lim, o=None: (
+        {"place": "Lakemont, Pennsylvania",
+         "facts": ["It was first settled in 1800."]}
+        if "Lakemont" in q else None)
+    try:
+        got = funfacts._lookup_all("lakemont pa", {}, False, 200)
+        assert got and got["facts"], got
+    finally:
+        (funfacts._osm_geocode, funfacts._try_sources) = saved
+    print("[PASS] the geocoder cannot substitute a different place")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -2039,6 +2127,8 @@ def main():
     test_a_fact_may_not_just_restate_the_question()
     test_no_model_says_why_rather_than_failing_silently()
     test_tavily_supplies_the_sources_a_question_needs()
+    test_spicy_mode_still_answers_questions()
+    test_the_geocoder_may_not_substitute_a_different_place()
     print("\nALL PASSED ✔")
     return 0
 
