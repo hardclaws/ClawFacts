@@ -226,6 +226,38 @@ def main() -> int:
         return funfacts._names_subject("A Huorn is a tree-like being.", "huorns")
 
 
+    def _questions_are_answered_from_sources():
+        """A free-form question is answered from search results, and the
+        answer may not contain anything the sources do not."""
+        import llm as _llm
+
+        ddg = {"AbstractText": "", "RelatedTopics": [
+            {"Text": "The dew point is the temperature to which air must be "
+                     "cooled to become saturated with water vapour."},
+            {"Text": "Why Does My Car Have Condensation Inside?"}]}
+        orig = (funfacts._http_get_json, _llm.is_configured,
+                _llm.answer_question)
+        funfacts._http_get_json = lambda u, p, timeout=8.0: ddg
+        _llm.is_configured = lambda o: True
+        try:
+            sources = funfacts._question_sources("dew point", {})
+            if any(src.endswith("?") for src in sources):
+                return False
+            _llm.answer_question = lambda q, src, cfg: (
+                "Condensation stops once the glass warms above the dew point.")
+            if funfacts._answer_question("dew point", {"llm_api_key": "k"},
+                                         200) is None:
+                return False
+            _llm.answer_question = lambda q, src, cfg: (
+                "Condensation stops at 41 degrees Fahrenheit.")
+            if funfacts._answer_question("dew point", {"llm_api_key": "k"},
+                                         200) is not None:
+                return False
+        finally:
+            (funfacts._http_get_json, _llm.is_configured,
+             _llm.answer_question) = orig
+        return True
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -543,6 +575,11 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("a free-form question is answered, but only from its sources",
+         hasattr(funfacts, "_answer_question")
+         and hasattr(funfacts, "_question_sources")
+         and hasattr(__import__("llm"), "answer_question")
+         and _questions_are_answered_from_sources()),
         ("a search snippet about something else is never the answer",
          hasattr(funfacts, "_names_subject")
          and _snippet_must_be_about_the_subject()),

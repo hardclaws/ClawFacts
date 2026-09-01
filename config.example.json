@@ -10,6 +10,7 @@
   "spice": "spicy",
   "max_fact_chars": 200,
   "fact_source": "sources",
+  "answer_questions": true,
   "_fact_source": "'sources' (default): find real facts on Wikipedia/web, then rewrite them. 'llm': skip retrieval and ask the model for facts from its own knowledge - simpler and often better for famous places, but nothing is verified, so it can invent.",
   "max_message_chars": 450,
   "fact_prefix": "FunFact",

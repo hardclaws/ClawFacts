@@ -343,6 +343,54 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
     return None
 
 
+ANSWER_SYSTEM = (
+    "You answer one question in one line for a Twitch chat bot.\n"
+    "Rules, and they are absolute:\n"
+    "- Answer ONLY from the sources supplied. Do not add a name, a number, a\n"
+    "  date, a unit or a place that is not in them, even if you are sure.\n"
+    "- If the sources do not actually answer the question, reply with exactly\n"
+    "  NOTHING RELIABLE and nothing else.\n"
+    "- Never name a person, channel or thing the sources do not name.\n"
+    "- One line, no numbering, no preamble, no 'according to'.\n"
+)
+
+
+def answer_question(question: str, sources: list, cfg: dict) -> str | None:
+    """One answer line drawn only from `sources`, or None.
+
+    The difference between this and freeform_facts is the whole point: that
+    one asks the model what it knows, which is how the bot came to post that
+    Stinker was the world's most famous landmark according to Explore
+    magazine. This one gives it text and asks it to use nothing else, and the
+    caller then checks the answer against that same text.
+    """
+    if not is_configured(cfg) or _unavailable() or not sources:
+        return None
+    key = (cfg.get("llm_api_key") or "").strip()
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    model = cfg.get("llm_model") or (
+        OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+
+    try:
+        max_chars = int(cfg.get("max_fact_chars") or 200)
+    except (TypeError, ValueError):
+        max_chars = 200
+    max_chars = max(60, min(max_chars, 480))
+
+    user = (
+        f"Question: {question}\n"
+        f"Answer in at most {max_chars} characters, using only the sources "
+        f"below.\n\nSources:\n"
+    )
+    user += "\n".join(f"- {s}" for s in sources[:8])
+
+    if cfg.get("debug"):
+        print(f"[llm] POST {base}/chat/completions  model={model}", flush=True)
+        print(f"[llm] ---- answer prompt ----\n{user}", flush=True)
+
+    return _complete(base, model, key, user, cfg, tag="", system=ANSWER_SYSTEM)
+
+
 FREEFORM_SYSTEM = (
     "You write short, TRUE fun facts about places for a Twitch chat. Accuracy "
     "matters more than entertainment: a viewer will look these up.\n\n"

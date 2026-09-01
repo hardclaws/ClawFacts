@@ -1779,6 +1779,97 @@ def test_the_subject_check_allows_normal_variants():
     print("[PASS] singular/plural and accents still count as naming it")
 
 
+_QUESTION = "what temperature does condensation stop occuring on a windshield?"
+_QUESTION_DDG = {"AbstractText": "", "RelatedTopics": [
+    {"Text": "The dew point is the temperature to which air must be cooled to "
+             "become saturated with water vapour."},
+    {"Text": "When the glass is colder than the dew point, water condenses on "
+             "the windshield."},
+    # A page title. This is what the old version posted as the fact.
+    {"Text": "Why Does My Car Have Condensation Inside?"},
+]}
+
+
+def test_a_question_is_answered_from_what_a_search_returned():
+    """Refusing is better than posting a page title, but it is still not an
+    answer. The search results go to the model with one instruction - use only
+    this - and the reply is then checked against that same text."""
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "Condensation stops once the windshield warms above the dew point, "
+            "the temperature at which air becomes saturated with water vapour.")
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(_QUESTION,
+                                   {"llm_api_key": "k", "max_fact_chars": 200})
+        assert got and got["fact"], got
+        assert "dew point" in got["fact"], got["fact"]
+        assert len(got["fact"]) <= 200, len(got["fact"])
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] a free-form question gets an answer, from the sources")
+
+
+def test_an_answer_may_not_add_what_the_sources_do_not_say():
+    """The whole point of the search step. A plausible number that appears in
+    no source is the classic failure, and it reads better than the truth."""
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "Condensation stops at 41 degrees Fahrenheit, which is the dew "
+            "point for most cars.")
+        assert funfacts._answer_question(_QUESTION, {"llm_api_key": "k"},
+                                         200) is None, "invented number posted"
+        # And a model that declines is not turned into an answer.
+        llm.answer_question = lambda q, src, cfg: "NOTHING RELIABLE"
+        assert funfacts._answer_question(_QUESTION, {"llm_api_key": "k"},
+                                         200) is None
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+    print("[PASS] an answer cannot add a number no source contains")
+
+
+def test_a_page_title_is_not_a_source():
+    """The original defect, one level down. The old version posted 'Why Does
+    My Car Have Condensation Inside?' as the fact, because a search-result
+    title was treated as a sentence. It must not even reach the model."""
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    try:
+        sources = funfacts._question_sources(_QUESTION, {})
+        assert sources, "no sources at all"
+        for src in sources:
+            assert not src.endswith("?"), src
+            assert "Why Does My Car" not in src, src
+    finally:
+        funfacts._http_get_json = orig
+    print("[PASS] a search-result title is never treated as a source")
+
+
+def test_no_model_means_no_answer_rather_than_a_guess():
+    """Without a model there is no way to turn snippets into an answer, so the
+    bot says it could not find one. It does not fall back to freeform_facts,
+    which is the unsourced mode that produced the Stinker line."""
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    llm.is_configured = lambda o: False
+    try:
+        assert funfacts._answer_question(_QUESTION, {}, 200) is None
+    finally:
+        (funfacts._http_get_json, llm.is_configured) = orig
+    print("[PASS] no model configured means no answer, not an unsourced guess")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -1845,6 +1936,10 @@ def main():
     test_topic_lookup_says_nothing_rather_than_guessing()
     test_a_search_snippet_must_be_about_the_thing_asked()
     test_the_subject_check_allows_normal_variants()
+    test_a_question_is_answered_from_what_a_search_returned()
+    test_an_answer_may_not_add_what_the_sources_do_not_say()
+    test_a_page_title_is_not_a_source()
+    test_no_model_means_no_answer_rather_than_a_guess()
     print("\nALL PASSED ✔")
     return 0
 

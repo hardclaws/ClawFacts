@@ -281,7 +281,7 @@ _HAS_VERB = re.compile(
     r"spans?|covers?|keeps?|offers?|features?|consists?|comprises?|dates?|"
     r"runs?|leads?|adds?|gives?|takes?|sees?|says?|shows?|tells?|notes?|"
     r"lists?|means?|seems?|looks?|feels?|carries?|matches?|"
-    r"[a-z]{4,}ed|[a-z]{4,}es|[a-z]{3,}ies)\b",
+    r"[a-z]{4,}ed|[a-z]{4,}es|[a-z]{3,}ies|[a-z]{3,}s)\b",
     re.IGNORECASE,
 )
 
@@ -1910,7 +1910,8 @@ _VAGUE = re.compile(
 )
 
 
-def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -> list:
+def _grounded_filter(lines: list, place: str, location: str, seed_facts: list,
+                     paraphrase: bool = False) -> list:
     """Drop LLM lines that claim something the seed facts don't support.
 
     Three checks, in order of how often they fire:
@@ -1944,7 +1945,15 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
         for yy in _SHORT_YEAR.findall(line):
             if not any(y.endswith(yy) for y in years):
                 return False
-        for cap in _CAP_WORD.findall(line):
+        # Capitalised words are treated as proper nouns that must be attested
+        # - except the first one, which is capitalised because it starts the
+        # sentence. Without that exception "Condensation stops once the glass
+        # warms above the dew point." was rejected for the word it opens with,
+        # while an invented name mid-sentence is still caught.
+        for pos, cap in ((m.start(), m.group())
+                         for m in _CAP_WORD.finditer(line)):
+            if pos == 0:
+                continue
             w = cap.lower()
             if w in _GROUNDED_STOP:
                 continue
@@ -1957,7 +1966,12 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
             return False
         # 1a-2. neither is editorialising. A rewrite may re-word a little, but
         #       not bring in a run of content words the seeds never used.
-        if _too_invented(line, source_stems):
+        #       Skipped when paraphrase=True: answering a question is
+        #       re-wording by definition, and "Condensation stops once the
+        #       glass warms above the dew point" shares almost no words with
+        #       the source sentence it comes from. Everything else still
+        #       applies - years, proper nouns, claims and praise.
+        if not paraphrase and _too_invented(line, source_stems):
             return False
         # 1b. a residence claim needs a seed that places someone in the town.
         if _RESIDENCE.search(line) and not _RESIDENCE.search(corpus):
@@ -2231,9 +2245,18 @@ def _give_up(location: str):
 # This is the same Wikipedia search with the place assumptions taken out.
 # ---------------------------------------------------------------------------
 
+# Question words and auxiliaries are not the subject. Without these, the
+# leading word of "what temperature does condensation stop occurring on a
+# windshield?" is "what", and since no article sentence contains "what" the
+# attribution check rejected every possible answer - including the one
+# sentence that actually answers it.
 _TOPIC_STOP = frozenset("""
-the a an of and or for in on at by to from with is are was were
+the a an of and or for in on at by to from with is are was were be been being
 la le les der die das del von van da di
+what when where why how who whom whose which whether
+does did do doing done can could will would should shall may might must
+has have had having that this these those there here it its their his her our
+my your me him them you not no so if as than then too very just also
 """.split())
 
 
@@ -2482,6 +2505,128 @@ def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
     return lines[:10]
 
 
+# ---------------------------------------------------------------------------
+# Free-form questions.
+#
+# "!funfact what temperature does condensation stop occurring on a windshield?"
+# has no article, and before this the bot answered by posting a page title it
+# had mistaken for a sentence. Refusing is better than that, but it is still
+# not an answer - so the search results are handed to the model with one
+# instruction (use only this) and the reply is then checked the same way every
+# other fact is.
+#
+# This needs a model. There is no way to turn snippets into an answer without
+# one, and without it configured the bot says it could not find the answer
+# rather than guessing.
+# ---------------------------------------------------------------------------
+
+def _question_sources(question: str, options: dict) -> list:
+    """Sentences from a web search for the question, fit to be shown.
+
+    Deliberately does NOT apply require_subject: the leading word of a
+    question is a subject like "temperature", and the sentence that actually
+    answers it may be phrased entirely differently. What is still dropped is
+    anything that is not a sentence - a page title is not a source, and
+    treating one as a source is how "Why Does My Car Have Condensation
+    Inside?" got posted as a fact.
+    """
+    out, seen = [], set()
+
+    def take(texts):
+        for text in texts:
+            for sentence in _sentences(text or ""):
+                sentence = " ".join(sentence.split())
+                if not sentence or sentence.lower() in seen:
+                    continue
+                if (_is_junk_seed(sentence) or _is_dangling(sentence)
+                        or _is_fragment(sentence) or _is_boring(sentence)):
+                    continue
+                seen.add(sentence.lower())
+                out.append(sentence)
+
+    try:
+        data = _http_get_json(DDG_API, {"q": question, "format": "json",
+                                        "no_html": 1, "skip_disambig": 1})
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            ValueError) as exc:
+        print(f"[funfacts] question search failed: {exc!r}", flush=True)
+    else:
+        take([data.get("AbstractText") or "", data.get("Answer") or ""])
+        for topic in (data.get("RelatedTopics") or [])[:6]:
+            if isinstance(topic, dict):
+                take([topic.get("Text") or ""])
+
+    key = (options.get("serper_api_key") or "").strip()
+    if key and len(out) < 4:
+        req = urllib.request.Request(
+            SERPER_API,
+            data=json.dumps({"q": question, "num": 8}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-API-KEY": key,
+                     "User-Agent": USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError) as exc:
+            print(f"[funfacts] question serper failed: {exc!r}", flush=True)
+        else:
+            for item in (data.get("organic") or [])[:8]:
+                take([item.get("snippet") or ""])
+    return out[:8]
+
+
+def _answer_question(question: str, opts: dict, limit: int):
+    """Answer a question from what a search actually returned.
+
+    Returns None rather than a guess: no model configured, nothing found, the
+    model declining, or the answer failing the same checks every other fact
+    has to pass.
+    """
+    try:
+        import llm
+    except Exception as exc:
+        print(f"[funfacts] llm import error: {exc!r}", flush=True)
+        return None
+    if not llm.is_configured(opts):
+        return None
+    sources = _question_sources(question, opts)
+    if not sources:
+        return None
+    try:
+        text = llm.answer_question(question, sources, opts)
+    except Exception as exc:
+        print(f"[funfacts] answer error: {exc!r}", flush=True)
+        return None
+    if not text or "NOTHING RELIABLE" in text.upper():
+        return None
+    lines = []
+    for ln in text.splitlines():
+        ln = ln.strip().strip('"\u201c\u201d')
+        ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
+        ln = ln.replace("**", "").replace("`", "").strip()
+        if not ln or _META_LINE.match(ln):
+            continue
+        if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
+            continue
+        if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
+            continue
+        fact = _trim(ln, limit)
+        if fact:
+            lines.append(fact)
+    # Grounded against the very text the model was given: no year, proper
+    # noun or claim appears in the answer unless it appeared in a source.
+    lines = _grounded_filter(lines, question, question, sources,
+                             paraphrase=True)
+    if not lines:
+        return None
+    words = _topic_words(question)
+    topic = words[0].capitalize() if words else "Answer"
+    print(f"[funfacts] answered a question from {len(sources)} source "
+          f"line(s): {question[:60]}", flush=True)
+    return {"place": topic, "facts": lines[:4]}
+
+
 def get_funfact(location: str, options=None):
     """Look up a fun fact for `location`.
 
@@ -2515,6 +2660,14 @@ def get_funfact(location: str, options=None):
                 result = _lookup_all(location.strip(), opts, spicy, limit)
         if result is None:
             result = _lookup_all(location.strip(), opts, spicy, limit)
+        # 4. Not a place and not a thing with an article - a question. Answer
+        #    it from the search results, grounded in them, rather than saying
+        #    nothing. Skipped in spicy mode, which has its own path.
+        if (not spicy and opts.get("answer_questions", True)
+                and (result is None or not result.get("facts"))):
+            answered = _answer_question(location.strip(), opts, limit)
+            if answered:
+                result = answered
         with _cache_lock:
             if result and result.get("unavailable"):
                 # Sources are rate-limited right now — retry soon instead of
