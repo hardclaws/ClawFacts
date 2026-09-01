@@ -907,7 +907,15 @@ class TwitchBot:
     # Relative gaps between a story's five lines: headline, act 1, act 2,
     # act 3, verdict. Growing, because a story should tighten as it goes, and
     # the pause before the winner is announced is the whole point.
-    _BEEF_GAPS = (0.75, 1.0, 1.25, 1.5)
+    # Seconds between one part of a beef story and the next - a plain,
+    # predictable interval. It used to grow (0.75x..1.5x of the config),
+    # which made "beef_act_delay: 10" produce a 7.5s first gap and read as
+    # broken on stream; the knob now means exactly what it says.
+    def _beef_gap(self) -> float:
+        try:
+            return max(0.0, float(self.cfg.get("beef_act_delay", 4.0) or 0.0))
+        except (TypeError, ValueError):
+            return 4.0
 
     def _tell_beef(self, result: dict) -> None:
         """Post a feud's story: the headline NOW, the body drip-fed.
@@ -926,10 +934,7 @@ class TwitchBot:
         lines = result["lines"]
         self._queue_fitted(head, lines[0])
         body = lines[1:]
-        try:
-            delay = float(self.cfg.get("beef_act_delay", 4.0) or 0.0)
-        except (TypeError, ValueError):
-            delay = 4.0
+        delay = self._beef_gap()
         # Burst mode (delay 0) has no gap to write in - the template lines
         # are queued immediately, so there is nothing for the model to fill.
         if delay > 0 and beefllm.available(self.cfg):
@@ -944,7 +949,7 @@ class TwitchBot:
         self._schedule_beef_rest(head, body, delay)
 
     def _schedule_beef_rest(self, head: str, body: list, delay: float) -> None:
-        """Drip the body of a beef story out with pauses between the acts.
+        """Drip the body of a beef story out, `delay` seconds apart.
 
         Five messages at once is a wall - chat reads the ending before the
         middle, and there is nowhere for anyone to react. The acts go out on
@@ -952,17 +957,17 @@ class TwitchBot:
         thread stays free for other commands while the story breathes, and
         every send still passes through the queue's pacing.
 
-        `delay` is beef_act_delay seconds; 0 sends the rest at once (the
-        tests rely on that for determinism).
+        `delay` is beef_act_delay seconds - the same gap every time, so the
+        config knob behaves exactly as it reads. 0 sends the rest at once
+        (the tests rely on that for determinism).
         """
         if delay <= 0.0:
             for line in body:
                 self._queue_fitted(head, line)
             return
-        wait = 0.0
-        for line, gap in zip(body, self._BEEF_GAPS):
-            wait += gap * delay
-            t = threading.Timer(wait, self._queue_fitted, args=(head, line))
+        for i, line in enumerate(body, 1):
+            t = threading.Timer(i * delay, self._queue_fitted,
+                                args=(head, line))
             t.daemon = True
             t.start()
 
@@ -1330,7 +1335,12 @@ class TwitchBot:
             src = ("LLM when the model delivers, templates otherwise"
                    if beefllm.available(self.cfg)
                    else "templates (no LLM in use)")
-            msg += f" Stories: {src}."
+            # Pacing too, so "did my config take effect?" is one command
+            # instead of a guess. Config is read at startup - a config.json
+            # edit does nothing until the bot restarts.
+            msg += (f" Stories: {src}. "
+                    f"Acts every {self._beef_gap():g}s "
+                    f"(beef_act_delay; restart after editing config.json).")
         self._say(msg)
         return True
 
@@ -1367,13 +1377,24 @@ class TwitchBot:
             self._say(f"@{nick} usage: !beef <name> [genre] - e.g. !beef "
                       f"Hardclaws zwift, or !beef random for a surprise one")
             return
-        rival, _, genre = args.partition(" ")
+        rival, _, rest = args.partition(" ")
         rival = rival.strip()
-        if not genre and rival.lower() in beef_mod.GENRES:
+        if not rest.strip() and rival.lower() in beef_mod.GENRES:
             # "!beef zwift" means a beef set in Zwift, not a feud against
             # somebody called zwift.
-            rival, genre = "", rival
-        result = beef_mod.feud(nick, rival, genre,
+            rival, rest = "", rival
+        genre, theme = "", ""
+        rest = rest.strip()
+        if rest:
+            genre = beef_mod.match_genre(rest)
+            if not genre:
+                # Freeform theme: "!beef @W_E_S_T_Y Eating Tacos" is a taco
+                # feud. The words headline the story as typed and go to the
+                # LLM pass; template acts (no model) come from a random
+                # genre under that headline. Silently randomising the genre
+                # - the old behaviour - threw the player's words away.
+                theme = rest
+        result = beef_mod.feud(nick, rival, genre, theme=theme,
                                tag=bool(self._beef_tag_target(rival)))
         if not result:
             self._say(f"@{nick} I could not build a beef from that - try "
@@ -1383,8 +1404,10 @@ class TwitchBot:
         # Scored after the lines are queued, so a scoring hiccup can never
         # cost chat the story - and because the story is the point.
         self.beef_state.record(nick, result["rival"], result["genre"],
-                               result["issuer_won"])
-        self._log(f"!beef {nick} vs {result['rival']} ({result['genre']}) - "
+                               result["issuer_won"],
+                               theme=result.get("theme", ""))
+        self._log(f"!beef {nick} vs {result['rival']} "
+                  f"({result['theme'] or result['genre']}) - "
                   f"winner {result['winner']}")
 
     def _reply_revenge(self, nick: str) -> None:
@@ -1407,7 +1430,7 @@ class TwitchBot:
                       f"{prefix}revenge it.")
             return
         result = beef_mod.feud(nick, window["rival"], window["genre"],
-                               revenge=True,
+                               revenge=True, theme=window.get("theme", ""),
                                tag=bool(self._beef_tag_target(window["rival"])))
         if not result:
             self._say(f"@{nick} that rematch fell apart - try !beef "
@@ -1415,7 +1438,8 @@ class TwitchBot:
             return
         self._tell_beef(result)
         self.beef_state.record(nick, result["rival"], result["genre"],
-                               result["issuer_won"], revenge=True)
+                               result["issuer_won"], revenge=True,
+                               theme=result.get("theme", ""))
         self._log(f"!revenge {nick} vs {result['rival']} "
                   f"({result['genre']}) - winner {result['winner']}")
 

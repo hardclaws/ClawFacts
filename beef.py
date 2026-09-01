@@ -40,8 +40,8 @@ import random
 import re
 from collections import deque
 
-__all__ = ["beef", "feud", "GENRES", "combination_count", "genre_for", "LABEL",
-           "REMATCH_SPARKS", "FATES", "STAKES"]
+__all__ = ["beef", "feud", "GENRES", "combination_count", "genre_for",
+           "match_genre", "LABEL", "REMATCH_SPARKS", "FATES", "STAKES"]
 
 LABEL = "BEEF"
 
@@ -472,17 +472,27 @@ def _pick(pool, pool_id: str):
     return choice
 
 
-def genre_for(text: str) -> str:
-    """Map a typed genre to one we have, defaulting to a random one."""
+def match_genre(text: str):
+    """The genre `text` names, or None when it names nothing we have.
+
+    The distinction matters: "!beef @friend Eating Tacos" is not a genre
+    mismatch to be silently randomised away - it is a freeform theme the
+    player typed on purpose, and the caller keeps it (see feud(theme=...)).
+    """
     t = " ".join((text or "").split()).lower().strip()
     if not t:
-        return random.choice(sorted(GENRES))
+        return None
     if t in GENRES:
         return t
     for genre, words in _ALIASES.items():
         if t in words or any(w in t for w in words):
             return genre
-    return random.choice(sorted(GENRES))
+    return None
+
+
+def genre_for(text: str) -> str:
+    """Map a typed genre to one we have, defaulting to a random one."""
+    return match_genre(text) or random.choice(sorted(GENRES))
 
 
 def _poss(name: str) -> str:
@@ -515,7 +525,7 @@ def combination_count() -> int:
 
 
 def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
-         tag: bool = False) -> dict | None:
+         tag: bool = False, theme: str = "") -> dict | None:
     """Tell one feud and report what happened, or None if names are unusable.
 
     This is the engine behind beef(): same templates, same winner-first roll,
@@ -534,6 +544,13 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
 
     tag=True renders the rival as @name in the headline only. The caller
     decides who deserves a ping; this module just formats it.
+
+    theme is freeform words the player typed after the rival ("Eating
+    Tacos"). It is not a genre and must not be discarded: it headlines the
+    story as typed, travels to the LLM pass so the acts are written inside
+    it, and is remembered in the result so a !revenge rematch stays on
+    theme. The template acts still come from a genre - arbitrary themes are
+    the one thing templates honestly cannot do, and the model's job.
     """
     issuer = (issuer or "").strip()
     if not _valid(issuer):
@@ -575,8 +592,14 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     key = "rematch" if revenge else genre_key
     head_rival = f"@{rival}" if tag else rival
 
+    theme = " ".join((theme or "").split())
+    if theme:
+        setting = theme            # the player's own words, not discarded
+    else:
+        setting = _pick(pools["settings"], ("setting", key))
+
     head = (f"\U0001f525 {label}: {issuer} vs. {head_rival} \u2014 "
-            f"{_pick(pools['settings'], ('setting', key))} \U0001f525")
+            f"{setting} \U0001f525")
     if random.random() < 0.55:
         head += f" {fill(_pick(STAKES, ('stakes', key)))}"
 
@@ -611,6 +634,7 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
         "issuer": issuer,
         "rival": rival,
         "genre": genre_key,
+        "theme": theme,
         "winner": winner,
         "loser": loser,
         "issuer_won": issuer_wins,

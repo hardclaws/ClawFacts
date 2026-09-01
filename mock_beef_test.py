@@ -235,7 +235,7 @@ def test_the_acts_are_spaced_out_not_fired_as_one_burst():
     immediate = _drain(b)
     assert 1 <= len(immediate) < 5, immediate      # headline only, no wall
     assert immediate[0].startswith("BEEF | \U0001f525"), immediate[0]
-    time.sleep(0.05 * sum(b._BEEF_GAPS) + 0.6)     # let the timers fire
+    time.sleep(0.05 * 4 + 0.6)     # let the timers fire
     rest = _drain(b)
     assert len(immediate) + len(rest) == 5, (immediate, rest)
     assert "WINNER:" in rest[-1], rest[-1]         # the verdict arrives last
@@ -272,6 +272,28 @@ def test_an_at_prefixed_rival_is_still_the_rival():
     print("[PASS] !beef @Name feud is against Name, not a random character")
 
 
+def test_a_freeform_theme_is_honoured_not_discarded():
+    """'!beef @W_E_S_T_Y Eating Tacos' is a taco feud. The words used to be
+    silently swapped for a random genre - Watopia by dice roll - and the
+    model was never told about them either."""
+    assert beef.match_genre("zwift") == "zwift"
+    assert beef.match_genre("zwifting") == "zwift"
+    assert beef.match_genre("eating tacos") is None
+
+    res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="Eating Tacos")
+    assert res is not None and res["theme"] == "Eating Tacos", res
+    assert "Eating Tacos" in res["lines"][0], res["lines"][0]
+    assert res["genre"] in beef.GENRES      # template acts still come from a genre
+    assert len(res["lines"]) == 5
+
+    b, said = _bot()
+    b._reply_beef("Hardclaws", "@W_E_S_T_Y Eating Tacos")
+    out = _drain(b)
+    assert len(out) == 5, out
+    assert "Eating Tacos" in out[0] and "vs. W_E_S_T_Y" in out[0], out[0]
+    print("[PASS] a freeform theme headlines the story, words intact")
+
+
 def test_the_acts_carry_two_beats_and_a_loser_fate():
     """A bare sentence per act was a summary, not a story: the acts now mix
     in quotes and crowd reactions, and the loser's exit is drawn from a pool
@@ -304,6 +326,7 @@ def main():
     test_the_acts_are_spaced_out_not_fired_as_one_burst()
     test_consecutive_stories_stop_echoing_each_other()
     test_an_at_prefixed_rival_is_still_the_rival()
+    test_a_freeform_theme_is_honoured_not_discarded()
     test_the_acts_carry_two_beats_and_a_loser_fate()
     print("\nALL PASSED \u2714")
     return 0

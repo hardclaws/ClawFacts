@@ -88,26 +88,32 @@ def _deadline(cfg: dict) -> float:
         delay = float(cfg.get("beef_act_delay", 4.0) or 0.0)
     except (TypeError, ValueError):
         delay = 4.0
-    first_gap = 0.75 * delay if delay > 0 else 0.0
-    return max(1.0, min(timeout, first_gap or timeout))
+    return max(1.0, min(timeout, delay if delay > 0 else timeout))
 
 
 def _prompt(result: dict) -> str:
+    theme = " ".join((result.get("theme") or "").split())
+    if theme:
+        setting = (f"Theme: {theme}. The players chose this theme - the "
+                   f"whole story happens inside it. Ignore the subject "
+                   f"matter of the tone examples below; keep only their "
+                   f"energy.")
+    else:
+        setting = (f"Setting: "
+                   f"{random.choice(beef.GENRES[result['genre']]['settings'])}.")
     pools = beef.GENRES[result["genre"]]
     examples = random.sample(list(pools["sparks"]) + list(pools["climaxes"]),
                              min(2, len(pools["sparks"]) + len(pools["climaxes"])))
     ex = "\n".join("- " + e.format(a=result["issuer"], b=result["rival"],
                                    w=result["winner"], l=result["loser"])
                    for e in examples)
-    setting = random.choice(beef.GENRES[result["genre"]]["settings"])
     return (
-        f"Setting: {setting}.\n"
+        f"{setting}\n"
         f"Player A: {result['issuer']}\n"
         f"Player B: {result['rival']}\n"
         f"WINNER (fixed, do not change): {result['winner']}\n"
         f"LOSER (fixed, do not change): {result['loser']}\n"
-        f"\nTone examples from this genre - match the energy, do not copy the "
-        f"lines:\n{ex}\n"
+        f"\nTone examples - match the energy, do not copy the lines:\n{ex}\n"
     )
 
 

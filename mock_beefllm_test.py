@@ -225,7 +225,7 @@ def test_the_bot_uses_model_lines_and_always_keeps_the_headline():
         assert immediate and immediate[0].startswith(
             "BEEF | \U0001f525 BEEF: Hardclaws vs. Rival_Rob"), immediate
         import time
-        time.sleep(0.05 * sum(b._BEEF_GAPS) + 0.6)
+        time.sleep(0.05 * 4 + 0.6)
         rest = _drain(b)
         assert any("mild arson" in ln for ln in rest), rest   # the model's acts
         assert any("\U0001f3c6 WINNER:" in ln for ln in rest), rest
@@ -244,7 +244,7 @@ def test_fallback_lines_are_the_templates_and_scoring_follows_the_roll():
         beefllm.write_story = lambda result, cfg: None
         b._tell_beef(res)
         import time
-        time.sleep(0.05 * sum(b._BEEF_GAPS) + 0.6)
+        time.sleep(0.05 * 4 + 0.6)
         out = _drain(b)
         assert len(out) == 5, out
         assert out[0] == f"BEEF | {res['lines'][0]}", out[0]
@@ -277,7 +277,7 @@ def test_the_game_still_runs_with_the_llm_dead():
         assert not beefllm.available(b.cfg)
         b._reply_beef("Hardclaws", "Rival_Rob zwift")
         import time
-        time.sleep(0.05 * sum(b._BEEF_GAPS) + 0.6)
+        time.sleep(0.05 * 4 + 0.6)
         out = _drain(b)
         assert len(out) == 5, out
         assert b.beef_state.is_player("Hardclaws")
@@ -286,10 +286,25 @@ def test_the_game_still_runs_with_the_llm_dead():
     print("[PASS] LLM dead and unconfigured: five template lines, game scored")
 
 
+def test_a_freeform_theme_reaches_the_model():
+    """'Eating Tacos' must be in the prompt, not re-genred to Watopia."""
+    res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="Eating Tacos")
+    server, base = _serve("good")
+    try:
+        lines = beefllm.write_story(res, _cfg(llm_base_url=base))
+        assert lines, "a themed story should still validate"
+        assert "Theme: Eating Tacos" in _FakeAPI.log[-1], _FakeAPI.log[-1]
+        assert "W_E_S_T_Y" in _FakeAPI.log[-1]
+    finally:
+        server.shutdown()
+    print("[PASS] the model is told the theme and both players verbatim")
+
+
 def main():
     test_validate_accepts_a_conforming_story()
     test_validate_rejects_every_rule_break()
     test_write_story_over_real_http()
+    test_a_freeform_theme_reaches_the_model()
     test_unreachable_or_unconfigured_means_templates()
     test_the_bot_uses_model_lines_and_always_keeps_the_headline()
     test_fallback_lines_are_the_templates_and_scoring_follows_the_roll()

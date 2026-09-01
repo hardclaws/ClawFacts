@@ -116,7 +116,14 @@ def test_a_window_opens_only_on_a_loss_and_closes_on_a_win():
     t[0] += 5
     st.record("Hardclaws", "Diesel Dan", "trucking", True)
     assert st.window_for("Hardclaws") is None
-    print("[PASS] the window opens on a loss, expires in 60s, closes on a win")
+    # A loss on a freeform theme arms the window WITH the theme, so the
+    # rematch is still a taco feud.
+    st.record("Hardclaws", "Rival_Rob", "trucking", False,
+              theme="Eating Tacos")
+    w = st.window_for("Hardclaws")
+    assert w and w["theme"] == "Eating Tacos", w
+    print("[PASS] the window opens on a loss, expires in 60s, closes on a "
+          "win, keeps the theme")
 
 
 def test_scoring_counts_what_actually_happened():

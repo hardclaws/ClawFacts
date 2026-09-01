@@ -372,6 +372,26 @@ def main() -> int:
             return False                      # shape must be exactly four
         return hasattr(_bot.TwitchBot, "_tell_beef")
 
+    def _beef_freeform_theme_is_kept():
+        """'!beef @W_E_S_T_Y Eating Tacos' must stay a taco feud: the words
+        headline the story and travel to the LLM - never silently re-genred
+        to a random setting."""
+        import beef as _beef
+        if _beef.match_genre("eating tacos") is not None:
+            return False
+        if _beef.match_genre("zwift") != "zwift":
+            return False
+        res = _beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="Eating Tacos")
+        return bool(res) and "Eating Tacos" in res["lines"][0] \
+            and res.get("theme") == "Eating Tacos"
+
+    def _beef_gap_is_literal():
+        """beef_act_delay is THE gap, in seconds, between every part - the
+        growing-multiplier design made '10' produce a 7.5s first gap and
+        read as broken on stream."""
+        return getattr(_bot.TwitchBot, "_BEEF_GAPS", None) is None \
+            and hasattr(_bot.TwitchBot, "_beef_gap")
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -707,6 +727,10 @@ def main() -> int:
          _beef_game_is_self_contained()),
         ("the beef LLM pass validates or falls back (never breaks the game)",
          _beef_llm_never_breaks_the_game()),
+        ("a freeform theme is kept, not silently re-genred",
+         _beef_freeform_theme_is_kept()),
+        ("beef_act_delay is the literal gap (no multipliers)",
+         _beef_gap_is_literal()),
         ("an echoed question is never posted back as the fact",
          hasattr(funfacts, "_is_echo") and _an_echo_is_not_a_fact()),
         ("a free-form question is answered, but only from its sources",

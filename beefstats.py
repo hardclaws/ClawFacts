@@ -135,7 +135,7 @@ class BeefState:
     # ---- the game --------------------------------------------------------
 
     def record(self, issuer: str, rival: str, genre: str, issuer_won: bool,
-               revenge: bool = False) -> dict | None:
+               revenge: bool = False, theme: str = "") -> dict | None:
         """Score one feud for whoever started it, and arm or clear their
         revenge window. Returns the updated row, or None for a bad name.
 
@@ -172,7 +172,9 @@ class BeefState:
             self.windows.pop(login, None)
         else:
             self.windows[login] = {"rival": (rival or "").strip(),
-                                   "genre": genre or "", "ts": self.clock()}
+                                   "genre": genre or "",
+                                   "theme": " ".join((theme or "").split()),
+                                   "ts": self.clock()}
         self.save()
         return row
 
@@ -191,7 +193,7 @@ class BeefState:
         if left <= 0:
             return None
         return {"rival": w.get("rival") or "", "genre": w.get("genre") or "",
-                "seconds_left": int(left)}
+                "theme": w.get("theme") or "", "seconds_left": int(left)}
 
     def is_player(self, name: str) -> bool:
         """True if this name has played - i.e. typed a beef command itself.
