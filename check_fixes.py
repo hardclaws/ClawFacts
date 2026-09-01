@@ -196,6 +196,36 @@ def main() -> int:
             funfacts._wiki_search_extracts = saved
         return True
 
+    def _snippet_must_be_about_the_subject():
+        """A search snippet about something else is not an answer.
+
+        DuckDuckGo labels its answer with the query rather than the article it
+        found, which is how the bot posted 'Stinker claims to be the world's
+        most famous landmark, according to Explore magazine and U.S. News
+        Travel.' Every word was real; only the subject had changed.
+        """
+        landmark = ("The Eiffel Tower claims to be the world's most famous "
+                    "landmark, according to Explore magazine and U.S. News "
+                    "Travel.")
+        real = ("Trail mix is a snack of dried fruit, nuts and sometimes "
+                "chocolate, developed to be taken along on hikes.")
+        saved = funfacts._http_get_json
+        funfacts._http_get_json = (
+            lambda url, params, timeout=8.0:
+            {"Heading": "", "AbstractText": landmark})
+        try:
+            if funfacts._duckduckgo("stinker") is not None:
+                return False
+            funfacts._http_get_json = (
+                lambda url, params, timeout=8.0:
+                {"Heading": "Trail mix", "AbstractText": real})
+            if not funfacts._duckduckgo("trail mix"):
+                return False
+        finally:
+            funfacts._http_get_json = saved
+        return funfacts._names_subject("A Huorn is a tree-like being.", "huorns")
+
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -513,6 +543,9 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("a search snippet about something else is never the answer",
+         hasattr(funfacts, "_names_subject")
+         and _snippet_must_be_about_the_subject()),
         ("!funfact answers anything with an article, or says it cannot",
          hasattr(funfacts, "_wikipedia_topic")
          and hasattr(funfacts, "_topic_match")

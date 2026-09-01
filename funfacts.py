@@ -649,9 +649,39 @@ def _subject_score(sentence: str, subject: str) -> int:
     return 4 * hit if hit else -6
 
 
+def _names_subject(sentence: str, subject: str) -> bool:
+    """Does this retrieved sentence actually mention what was asked for?
+
+    This is the check a search step needs and vocabulary grounding cannot
+    supply. Take a true sentence about one thing, swap in the name someone
+    typed, and every capitalised word in it is still attested - which is how
+    the bot came to post:
+
+        Stinker claims to be "the world's most famous landmark," according to
+        Explore magazine and U.S. News Travel.
+
+    A search for "stinker" returned a sentence about a real landmark. Nothing
+    was invented word by word; only the subject had been changed, and no check
+    was asking whether the sentence was about the thing asked for.
+    """
+    words = _topic_words(subject)
+    if not words:
+        return False
+    low = _fold(sentence)
+    # The leading word, not any word. "low watts" shares "watts" with an
+    # article about the Watts Towers in Los Angeles, and any-word matching
+    # posted that; the thing asked about is the first word, the same rule
+    # _topic_match uses when it picks an article.
+    head = words[0]
+    if head in low:
+        return True
+    # huorns/Huorn, Wormtongue/Wormtongues.
+    return len(head) >= 5 and head[:-1] in low
+
+
 def _ranked_facts(sentences: list, spice: bool = False,
                   limit: int = 200, count: int = 6,
-                  subject: str = "") -> list:
+                  subject: str = "", require_subject: bool = False) -> list:
     """Rank sentences and return up to `count` distinct, trimmed facts.
 
     The top sentence is always kept (so every place gets an answer), but
@@ -670,6 +700,12 @@ def _ranked_facts(sentences: list, spice: bool = False,
         if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
                 or _LOCATION_ONLY.match(s) or _is_dangling(s)
                 or _is_fragment(s) or _is_boring(s)):
+            continue
+        # Search snippets have no title gate: unlike the Wikipedia path, which
+        # picks an article by title first, whatever the engine returned is the
+        # whole basis for the answer. So these must name the subject, or the
+        # source is asked to say nothing at all.
+        if require_subject and subject and not _names_subject(s, subject):
             continue
         if sc < 2 and out:
             break
@@ -1174,7 +1210,8 @@ def _duckduckgo(query: str, spice: bool = False, limit: int = 200):
     heading = (data.get("Heading") or "").strip()
     if abstract:
         facts = _ranked_facts(_filter_definitions(_sentences(abstract)),
-                              spice=spice, limit=limit)
+                              spice=spice, limit=limit, subject=query,
+                              require_subject=True)
         if facts:
             return {"place": heading or query, "facts": facts}
     return None
@@ -1278,7 +1315,8 @@ def _serper_search(query: str, spice: bool, limit: int, options: dict):
         sentences = [t for t in (it.get("snippet") or "" for it in items)
                      if len(t.strip()) >= 12]
 
-    facts = _ranked_facts(sentences, spice=spice, limit=limit, count=4)
+    facts = _ranked_facts(sentences, spice=spice, limit=limit, count=4,
+                          subject=query, require_subject=True)
     if not facts:
         return None
     return {"place": query, "facts": facts}
@@ -1929,6 +1967,15 @@ def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -
         #     invented framing, not a rewrite of the supplied fact.
         if _REPUTATION.search(line) and not _REPUTATION.search(corpus):
             return False
+        # NOTE: there is deliberately no "a seed must name the subject" rule
+        # here. This filter serves the Wikipedia and topic paths, whose seeds
+        # come from an article already chosen by title, so provenance is
+        # settled upstream and a seed legitimately need not repeat the place
+        # name - "Leap-The-Dips is the world's oldest roller coaster" never
+        # says "Lakemont", and Sandy Beach never says "Indian Lake". Requiring
+        # it here cost a real fact in test_reputation_claims_need_a_source.
+        # The sources with no title gate - the search-snippet ones - carry the
+        # attribution check instead, as require_subject in _ranked_facts.
         # 2. every claim the line makes must be a claim the seeds make.
         line_claims = _claims(line)
         if line_claims - corpus_claims:
@@ -2419,6 +2466,13 @@ def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
             continue
         if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
             continue
+        # No seeds means nothing to ground against, so what is left to check
+        # is whether this is a sentence at all and whether it can stand on its
+        # own. Requiring it to repeat the place name is not one of those
+        # checks: "Past Times Arcade there holds the Guinness record..." is
+        # ordinary prose about the place and would be rejected for using the
+        # word "there". This mode stays opt-in and unsourced - the guarded
+        # path is fact_source="sources", which is the default.
         fact = _trim(ln, limit)
         if fact:
             lines.append(fact)

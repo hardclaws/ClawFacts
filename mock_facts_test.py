@@ -1721,6 +1721,64 @@ def test_topic_lookup_says_nothing_rather_than_guessing():
     print("[PASS] no article means no answer, not the nearest shared word")
 
 
+def test_a_search_snippet_must_be_about_the_thing_asked():
+    """The mechanism behind 'FunFact | stinker: Stinker claims to be the
+    world's most famous landmark, according to Explore magazine'.
+
+    DuckDuckGo labels its answer with the QUERY, not with the article it
+    actually found. So a search that resolves to some landmark produced text
+    about that landmark under the heading 'stinker', and nothing anywhere was
+    asking whether the sentence mentioned the thing asked for. The snippet
+    sources have no title gate - unlike the Wikipedia path, which chooses an
+    article by title first - so the check has to be here.
+    """
+    landmark = ("The Eiffel Tower claims to be the world's most famous "
+                "landmark, according to Explore magazine and U.S. News Travel.")
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = (
+        lambda url, params, timeout=8.0:
+        {"Heading": "", "AbstractText": landmark})
+    try:
+        assert funfacts._duckduckgo("stinker") is None, "wrong subject posted"
+        # Prove the guard is what changed it, not some other filter: the same
+        # sentence, ranked without require_subject, comes straight through.
+        assert funfacts._ranked_facts([landmark], subject="stinker"), \
+            "the sentence itself is fine; only the attribution is wrong"
+        # And a snippet that IS about the subject still gets posted.
+        funfacts._http_get_json = (
+            lambda url, params, timeout=8.0:
+            {"Heading": "Trail mix", "AbstractText":
+             "Trail mix is a snack of dried fruit, nuts and sometimes "
+             "chocolate, developed to be taken along on hikes."})
+        got = funfacts._duckduckgo("trail mix")
+        assert got and got["facts"], "real answer was dropped too"
+    finally:
+        funfacts._http_get_json = orig
+    print("[PASS] a snippet about something else is not posted as an answer")
+
+
+def test_the_subject_check_allows_normal_variants():
+    """Requiring an exact name match would be too strict: chat asks in the
+    plural and Wikipedia titles are singular, and accented titles are typed
+    without the accent."""
+    pairs = (("huorns", "A Huorn is a tree-like being in Middle-earth."),
+             ("grima wormtongue", "Grima Wormtongue is a fictional character."),
+             ("trail mix", "Trail mix is a snack of dried fruit and nuts."),
+             ("lord of the rings",
+              "The Lord of the Rings is an epic high-fantasy novel."))
+    for subject, sentence in pairs:
+        assert funfacts._names_subject(sentence, subject), (subject, sentence)
+    for subject, sentence in (("stinker", "The Eiffel Tower is in Paris."),
+                              ("low watts",
+                               "The Watts Towers are in Los Angeles."),
+                              ("trail mix", "Granola is a breakfast food.")):
+        assert not funfacts._names_subject(sentence, subject), (subject,
+                                                               sentence)
+    # No subject at all means no opinion, not a rejection.
+    assert not funfacts._names_subject("Anything at all.", "")
+    print("[PASS] singular/plural and accents still count as naming it")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -1785,6 +1843,8 @@ def main():
     test_topic_lookup_answers_anything_with_an_article()
     test_topic_lookup_prefers_the_article_actually_asked_for()
     test_topic_lookup_says_nothing_rather_than_guessing()
+    test_a_search_snippet_must_be_about_the_thing_asked()
+    test_the_subject_check_allows_normal_variants()
     print("\nALL PASSED ✔")
     return 0
 
