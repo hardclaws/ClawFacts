@@ -1925,6 +1925,47 @@ def test_no_model_says_why_rather_than_failing_silently():
     print("[PASS] an unanswerable question names the reason in the log")
 
 
+def test_tavily_supplies_the_sources_a_question_needs():
+    """DuckDuckGo's Instant Answer returns an empty abstract for most
+    free-form questions, which left the question path with nothing to ground
+    an answer in. Tavily exists for exactly this - retrieve text for a model
+    to read - so it is tried first when a key is present."""
+    import json as _json
+    import urllib.request as _ur
+
+    payload = {"results": [
+        {"title": "Dew point", "content":
+         "The dew point is the temperature to which air must be cooled to "
+         "become saturated with water vapour. Condensation stops once the "
+         "surface warms above it.", "url": "https://example.org/dew"},
+        {"title": "Not a sentence", "content": "car condensation tips"},
+    ]}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps(payload).encode()
+
+    orig = _ur.urlopen
+    _ur.urlopen = lambda req, timeout=10: _Resp()
+    try:
+        got = funfacts._question_sources(
+            "what temperature does condensation stop occuring on a windshield?",
+            {"tavily_api_key": "tvly-KEY"})
+    finally:
+        _ur.urlopen = orig
+    assert got, "Tavily results produced no sources"
+    assert any("dew point" in g.lower() for g in got), got
+    # The title fragment is not a sentence and must not be a source.
+    assert not any(g.strip() == "car condensation tips" for g in got), got
+    print("[PASS] Tavily supplies real source text for a free-form question")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -1997,6 +2038,7 @@ def main():
     test_no_model_means_no_answer_rather_than_a_guess()
     test_a_fact_may_not_just_restate_the_question()
     test_no_model_says_why_rather_than_failing_silently()
+    test_tavily_supplies_the_sources_a_question_needs()
     print("\nALL PASSED ✔")
     return 0
 

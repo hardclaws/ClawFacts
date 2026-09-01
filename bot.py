@@ -340,6 +340,10 @@ class TwitchBot:
             "google_api_key": cfg.get("google_api_key", ""),
             "google_cx": cfg.get("google_cx", ""),
             "serper_api_key": cfg.get("serper_api_key", ""),
+        "tavily_api_key": cfg.get("tavily_api_key", "")
+        or os.environ.get("TAVILY_API_KEY", ""),
+            "tavily_api_key": cfg.get("tavily_api_key", "")
+            or os.environ.get("TAVILY_API_KEY", ""),
             "debug": bool(cfg.get("debug")),
         }
 
@@ -1804,6 +1808,8 @@ def run_selftest(cfg: dict) -> int:
         "google_api_key": cfg.get("google_api_key", ""),
         "google_cx": cfg.get("google_cx", ""),
         "serper_api_key": cfg.get("serper_api_key", ""),
+        "tavily_api_key": cfg.get("tavily_api_key", "")
+        or os.environ.get("TAVILY_API_KEY", ""),
         "debug": bool(cfg.get("debug")),
     }
     spice = str(opts["spice"]).lower()

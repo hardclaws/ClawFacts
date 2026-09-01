@@ -49,6 +49,7 @@ DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
+TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
 SPICY_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "spicy_facts.json"
 )
@@ -2563,6 +2564,29 @@ def _question_sources(question: str, options: dict) -> list:
                 seen.add(sentence.lower())
                 out.append(sentence)
 
+    # Tavily first. It exists for exactly this - retrieve text for a model to
+    # read - and DuckDuckGo's Instant Answer returns an empty abstract for most
+    # free-form questions, which left this path with nothing to work from.
+    tkey = (options.get("tavily_api_key") or "").strip()
+    if tkey:
+        req = urllib.request.Request(
+            TAVILY_API,
+            data=json.dumps({"query": question, "max_results": 5,
+                             "search_depth": "basic"}).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {tkey}",
+                     "User-Agent": USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError) as exc:
+            print(f"[funfacts] question tavily failed: {exc!r}", flush=True)
+        else:
+            for item in (data.get("results") or [])[:5]:
+                take([item.get("content") or ""])
+
     try:
         data = _http_get_json(DDG_API, {"q": question, "format": "json",
                                         "no_html": 1, "skip_disambig": 1})
@@ -2626,7 +2650,14 @@ def _answer_question(question: str, opts: dict, limit: int):
     except Exception as exc:
         print(f"[funfacts] answer error: {exc!r}", flush=True)
         return None
-    if not text or "NOTHING RELIABLE" in text.upper():
+    if not text:
+        print("[funfacts] the LLM returned nothing - check the [llm] lines "
+              "above for a rejected key (401/403) or no credits (402).",
+              flush=True)
+        return None
+    if "NOTHING RELIABLE" in text.upper():
+        print(f"[funfacts] the model declined to answer from its sources: "
+              f"{question[:60]}", flush=True)
         return None
     lines = []
     for ln in text.splitlines():
@@ -2649,6 +2680,9 @@ def _answer_question(question: str, opts: dict, limit: int):
     lines = _grounded_filter(lines, question, question, sources,
                              paraphrase=True)
     if not lines:
+        print(f"[funfacts] the answer did not survive grounding against its "
+              f"{len(sources)} source line(s) - posting nothing rather than "
+              f"something unsupported: {question[:60]}", flush=True)
         return None
     words = _topic_words(question)
     topic = words[0].capitalize() if words else "Answer"
