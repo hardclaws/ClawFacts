@@ -110,16 +110,18 @@ Edit `config.json`:
 | `nick`             | The bot account's username (lowercase).                        |
 | `oauth_token`      | Leave blank — the bot fills this in automatically after login. |
 | `client_id`        | Client ID from step 2.                                         |
-| `client_secret`    | Optional; only needed to revoke the login later.               |
+| `client_secret`    | **Needed to stay logged in** unless your app is a Public client. |
 | `channel`          | Channel to join, e.g. `#your_channel`.                         |
 | `prefix`           | Command prefix (default `!`).                                  |
 | `cooldown_seconds` | Minimum seconds between lookups (default 5).                   |
 | `spice`            | `"clean"` or `"spicy"` — adult-rated facts (default `clean`).  |
 | `max_fact_chars`   | Max length of the fact itself (default 200).                   |
+| `fact_source`      | `"sources"` (default) or `"llm"` — see [Where facts come from](#where-facts-come-from). |
 | `llm_api_key`      | Groq/OpenRouter/OpenAI-compatible API key (leave empty for local Ollama). |
 | `llm_base_url`     | LLM API base URL (default `https://api.groq.com/openai/v1`; Ollama = `http://localhost:11434/v1`). |
 | `llm_model`        | LLM model (default `openai/gpt-oss-120b`; Ollama e.g. `llama3.1:8b`). |
-| `google_api_key`   | Optional Google Custom Search API key.                         |
+| `serper_api_key` | **Recommended.** Serper web-search key (free tier 2,500 queries). |
+| `google_api_key`   | Legacy Google Custom Search key (closed to new customers).     |
 | `google_cx`        | Optional Google search-engine ID (from programmablesearchengine.google.com). |
 | `max_message_chars`| Hard cap for a chat message (Twitch caps ~500; default 450).   |
 | `fact_prefix`      | Text before the fact, e.g. `FunFact` or `FUN FACT`.            |
@@ -196,16 +198,64 @@ Quick-and-dirty local alternatives:
 
 | Command               | Result                                                        |
 | --------------------- | ------------------------------------------------------------- |
-| `!funfact Milford, PA`| Posts a fun fact about the location.                          |
+| `!funfact Milford, PA`| Posts a fun fact about the location. `!funfacts` also works.  |
 | `!funfact` (no arg)   | Posts usage instructions.                                     |
 | `!joke`               | A random joke (free API).                                     |
 | `!randomfact`         | A random useless fact (free API).                             |
-| `!riddle`             | A riddle; the answer is posted ~45s later.                    |
+| `!riddle`             | A riddle; the answer is posted ~20s later.                    |
 | `!wouldyourather`     | A "would you rather" question (also `!wyr`).                  |
+| `!smk female`         | Shag, marry or kill — also `male` or `any` (default).         |
+| `!haul`               | What the truck is hauling right now.                          |
+| `!whois Aubrey Plaza` | Who that person is, in Wikipedia's own words.                 |
+| `!twitch hardclaws`   | Who that Twitch channel is.                                   |
+| `!cb`                 | The bot talks on the radio, or yells at a car (also `!radio`).|
+| `!so <name>`          | Shout a channel out. **Moderators only.**                     |
+| `!so off` / `!so on`  | Moderator switch for raid shoutouts.                          |
+| `!cmd add <n> <msg>`  | Create your own command. **Moderators only.**                 |
+| `!cmd list`           | The commands this channel has defined. Anyone may read it.    |
+| `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
+| `!help`               | Lists the commands and who may use them.                      |
+| `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
 
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
 keyless APIs and can be disabled with `"fun_commands": false`.
+
+## Where facts come from
+
+`"fact_source"` picks one of two engines:
+
+**`"sources"` (default)** — find real facts first, then rewrite them. Wikipedia
+(and optionally DuckDuckGo / Google / Serper) supply sentences about the place;
+the LLM only *rewords* what was found. Every line is checked before it reaches
+chat: no invented names or dates, no invented claims, no county story handed to
+the town. Downside: a small town's article is often thin, so the answer can be
+plainer than you'd like.
+
+For the place's own article the bot reads the **whole article**, not the lead.
+MediaWiki's TextExtracts API caps `exchars` at 1200 and silently clamps anything
+larger, so asking for 4000 returned the first 1200 characters — the lead and a
+little of the history. Almost everything a town is actually known for sits below
+that line: Cuba, Missouri's *World's Largest Rocking Chair*, its Bette Davis and
+Amelia Earhart visits and the Wagon Wheel Motel are all further down. A
+single-title request with no `exchars` returns the entire article, which the bot
+then trims to `_EXTRACT_CHAR_CAP` (20,000 chars) and ranks.
+
+**`"llm"`** — skip retrieval entirely and ask the model for interesting facts
+from its own knowledge, capped at `max_fact_chars`. One prompt, no sources, no
+ranking — much simpler, and for well-documented places it often produces a
+better fact than a stubby Wikipedia article.
+
+The trade-off is that in `"llm"` mode **nothing is verified**. The grounded
+filter works by comparing a line against the facts that were found, and here
+nothing was found, so there is nothing to compare against — only the
+explicit/taste filters and the character limit still apply. The prompt demands
+documented-only facts and tells the model to answer `NOTHING RELIABLE` rather
+than guess (the bot then falls back to the real sources), but that is a request,
+not a guarantee: a model with latitude is what produced *"the only place in
+Trumbull County where a hanging party went down"* for Girard, OH. Use `"llm"`
+when you'd rather have a livelier fact and accept the risk; keep `"sources"`
+when being right matters more.
 
 ## Spicy (adult) mode
 
@@ -224,13 +274,26 @@ fun facts. Three layers, in order:
    town still gets its region's claim to fame (e.g. the Poconos honeymoon
    resorts for a Pike County hamlet).
 4. **LLM writer (recommended)** — the real facts found above are handed to a
-   large language model with one prompt: *"Write up to 10 fun facts that are
-   crime, funny, bizarre, or the place's most popular claims to fame, each ≤
-   200 chars."* The model rewrites **only the supplied facts** (never invents
-   its own), returns up to 10 one-liners, and the bot serves the top one first,
-   then a random one on repeat calls. **This is what makes spicy mode actually
-   spicy** — but see the note below: for real adult output you want a **local
-   Ollama model**, because hosted models are filtered.
+   large language model with one prompt: *"Write up to 10 **interesting** true
+   facts about this place: what it is known for, its history, its oddities, and
+   any rowdy stories the supplied facts actually contain, each ≤ 200 chars."*
+   The model rewrites **only the supplied facts** (never invents its own),
+   returns up to 10 one-liners, and the bot serves the top one first, then a
+   random one on repeat calls. **This is what makes spicy mode actually spicy**
+   — but see the note below: for real adult output you want a **local Ollama
+   model**, because hosted models are filtered.
+
+**Ask for interesting, not for crime.** The web sources used to append
+`"history crime scandal"` to every spicy query. For Girard, OH that returned a
+truncated page title (*"The Only Man Ever Hanged in Trumbull County: A True
+…"*), an SEO line from a crime-stats site (*"Explore crime rates for Girard, OH
+including murder, assault, and property crime statistics."*) and one recent
+police story — thin, dark grist that the model then padded into invented dark
+history. Spicy mode now searches `<place> history facts famous landmark
+record`, and two kinds of search noise are never treated as facts: truncated
+titles/snippets (anything ending in `...`) and SEO boilerplate (crime-rate,
+"cost of living", real-estate, "is it safe" pages). Tone still comes from the
+model; the *subject matter* has to be real.
 
 **Fallback ladder** — for every lookup the bot tries, in order: ① **spicy**
 facts (brothels, crime, gambling, scandal…), then ② **weird/bizarre** facts
@@ -254,52 +317,666 @@ tacks on fake joke comments.
 sexual** — R-rated *topics* (crime, vice, gambling, scandal, dark history) told
 with barstool wit and salty language, grounded in real history. It is *not*
 explicit sexual content, porn/XXX, slurs, or hate speech — Twitch will ban a
-channel for those. Two hard output filters enforce this: any LLM line with
-explicit sexual words is dropped, and any LLM line that invents a name or date
-not in the real facts is dropped (a low-refusal model will otherwise make up a
-"Devil Jack Schramm"-style story for boring towns). Spice comes from the
-curated database and the search sources — never from the model's imagination.
+channel for those. Hard output filters enforce this:
 
-### Optional Google search (surfaces racier local news Wikipedia skips)
+- **explicit** — any LLM line with explicit sexual words is dropped.
+- **taste** — a real killing, execution or lynching is never framed as a party
+  or a good time ("a hanging party went down" is dropped even when the
+  underlying fact is true). A literal murder-*mystery* dinner is fine.
+- **grounding** — every LLM line must be traceable to the facts that were
+  actually found, in three parts: no invented **names or dates**; no invented
+  **claims** (a crime, vice, disaster, record or "only / first / largest" boast
+  that no source fact makes — these are written in lowercase, so a name-and-date
+  check alone cannot see them); and no **borrowed boasts** — a "the only … /
+  the first …" claim that is pinned on the town *and* scoped to a region ("home
+  to Trumbull County's one and only …") must be backed by a fact that names the
+  town. Facts dug out of the county or state are also prefixed `In the area:`,
+  in chat as well as for the filter. Telling a regional story *as* a regional
+  story is fine; handing it to the town is not.
 
-If you want the bot to also search Google (the sanctioned way — Google blocks
-scraping `google.com`, but offers a free API), set up **Programmable Search**:
+If a line fails any of these it is dropped, and if every line fails the bot
+posts the plain real facts instead. Spice comes from the curated database and
+the search sources — never from the model's imagination.
 
-1. Create a search engine: <https://programmablesearchengine.google.com/>
-   → name it anything → tick **"Search the entire web"** → Create → copy the
-   **Search engine ID** (that's `google_cx`).
-2. Get an API key: <https://console.cloud.google.com/apis/credentials> →
-   create an API key, and enable the **Custom Search JSON API**.
-3. Put both in `config.json`:
+Worked example — `!funfact girard, OH`. Girard's whole Wikipedia article yields
+one interesting sentence (settled 1800, grew after the Ohio and Erie Canal), so
+a low-refusal model asked for "rowdy" facts made up *"the only place in
+Trumbull County where a hanging party went down"*, *"so fast and loose with
+drugs, one local broke records as a mule"* and, later, *"home to Trumbull
+County's one and only hanging … they really dropped the axe on this one guy"*.
+None of it is true: the only hanging in Trumbull County was Ira West Gardner's
+1830s execution in Warren for the murder of his stepdaughter Maria Buel, and no
+drug-mule record exists for Girard. All three are now dropped — no source fact
+mentions a hanging in Girard, drugs, a mule or a record, and a county-wide
+"only" cannot be pinned on the town — and the bot posts the real facts instead
+(Girard is named for Stephen Girard, the Philadelphia philanthropist). Telling
+the Gardner hanging *as* a Trumbull County story is still allowed.
 
-```json
-"google_api_key": "AIza...",
-"google_cx": "abc123..."
+### Commands
+
+| Command | What it does |
+|---|---|
+| `!funfact <place>` | A real fun fact about a town. `!funfacts` is the same command |
+| `!smk female\|male\|any` | Shag, marry or kill — three names, each with their occupation |
+| `!joke` | A joke |
+| `!randomfact` | A random fact |
+| `!riddle` | A riddle; the answer follows after `riddle_answer_delay` seconds |
+| `!wyr` | A would-you-rather |
+| `!help` | Lists all of the above, plus who may use them |
+| `!bot off` / `!bot on` / `!bot status` | **Moderators only** — switch every command off and on again |
+| `!haul` | What the truck is hauling — anyone in chat can ask |
+| `!whois <name>` | Who that person is, from Twitch and Wikipedia |
+| `!haul update <cargo>` / `delete` | **Moderators only** — set or clear it |
+| `!reminder <when> <message>` | **Moderators only** — post into chat later |
+| `!reminder list` / `cancel <n>` / `cancel all` | **Moderators only** — see and clear them |
+
+`!smk` is also accepted as `!shagmarrykill` or `!marryshagkill`, and `f`/`m`
+work as shorthands for `female`/`male`. Its names come from a local pool of
+public figures — no API call, and nobody in chat gets named by accident.
+
+```
+ShagMarryKill [female] | Dolly Parton (singer), Kate McKinnon (comedian), Rihanna (singer) - shag one, marry one, kill one.
 ```
 
-The bot then queries Google with `safe=off`, which lets through the adult-rated
-local news and scandal stories that Wikipedia omits, and mines those snippets
-for facts. **Free tier = 100 queries/day**; beyond that Google charges.
+The round is posted on its own, with no one nominated to answer it — anyone in
+chat can play, not just whoever typed the command. Each name carries what that
+person is known for, so a round is playable by people who do not recognise
+every face in the pool.
 
-> Note: Google returns short search snippets, not prose — so its facts are
-> usually weaker than Wikipedia's. Its real value is (a) the `safe=off` adult
-> content and (b) coverage of places with no Wikipedia article.
+`!help` is answered before the rate limiter, so a viewer can read what the bot
+does even if they aren't allowed to run a command yet. Everything else is
+gated.
 
-### Optional Serper search (easiest fix for "wikipedia rate-limited")
+`!bot off` silences the bot completely — every command, including `!funfact`,
+is ignored rather than refused, so it does not become a spam vector. It is
+restricted to the broadcaster and moderators, and it deliberately keeps
+answering while the bot is off; otherwise switching it off would be a one-way
+trip. The state lives in memory, so a restart brings the commands back on.
 
-Wikipedia throttles anonymous API use **per IP** — on cellular/hotspot or a
-shared home connection the limit is often already half-used before the bot
-asks. The bot is frugal (batched requests, ~4/sec pacing), but the real cure
-is a **second, independent search source**. [Serper](https://serper.dev) is the
-simplest: sign up (free, no card), copy the one API key, and add:
+### Reminders
+
+A moderator can leave a note that posts into chat later. Two ways to say when:
+
+```
+!reminder 60mins Make sure you check the lights are working
+!reminder 01:30PDT Check your lights
+```
+
+```
+@amod reminder #1 set for 03:50 UTC today (in 1 hour) - Make sure you check the lights are working
+@amod reminder #2 set for 08:30 UTC today (at 08:30 PDT tomorrow) - Check your lights
+```
+
+and an hour later, unprompted:
+
+```
+Reminder | Make sure you check the lights are working  (set by @amod)
+```
+
+**Durations** — `60mins`, `60 mins`, `90s`, `1h30m`, `2d`, `1.5h`, `1 week`.
+A bare number means minutes, so `!reminder 5 do the thing` is five minutes.
+Between 10 seconds and 14 days, up to 20 pending at once.
+
+**Clock times** — `01:30PDT`, `1:30pm PDT`, `13:30`, `01:30 America/Los_Angeles`,
+`01:30 UTC-7`. An abbreviation is a *fixed* offset, so `PDT` means UTC−7
+whatever the season; an IANA name such as `America/Los_Angeles` follows DST.
+With no timezone at all it uses the machine the bot runs on. A time that has
+already passed today rolls to tomorrow, which is what "remind me at 1:30"
+means at 4pm.
+
+The confirmation always shows **both** the machine's own clock and the zone you
+asked for, so a misread timezone is obvious at a glance and can be cancelled.
+
+Managing them:
+
+```
+!reminder list          @amod reminders: #3 1 minute from now - short one | #1 1 hour from now - ...
+!reminder cancel 3      @amod reminder #3 cancelled.
+!reminder cancel all    @amod cancelled all 3 reminders.
+```
+
+`!reminders` is accepted as an alias for `!reminder`.
+
+**Reminders survive a restart.** They are written to `reminders.json` as they
+are created, so one set for tomorrow morning is not lost to an update or a
+crash overnight. One that came due while the bot was down still fires when it
+comes back up; one more than an hour overdue is dropped rather than posted out
+of the blue. While the bot is switched off with `!bot off` they are *held*, not
+dropped, and fire when it resumes.
+
+### The haul board
+
+One line of state so viewers can ask what the truck is carrying:
+
+```
+!haul update Produce        (moderator)
+@viewer2 we are transporting Produce.  (set by @amod, 4 minutes ago)
+
+!haul delete                (moderator)
+@viewer2 nothing is logged as the haul right now - a moderator can set it
+with !haul update <what we're hauling>
+```
+
+Reading it is open to everyone — it costs no API call and answers no fact
+engine — and it stays open even for viewers the fact commands are gated
+against. Only moderators can change or clear it, and a viewer who tries gets
+no reply at all. `!hauls` is an alias, and `!transporting` / `!transport`
+still work from before the rename. It is stored in `haul.json`, so what the
+truck is hauling does not reset when the bot is updated; a `transporting.json`
+left over from the older name is carried over automatically.
+
+Both state files are gitignored, like `tokens.json` and `config.json`. Keep
+them when you update the bot's files if you want reminders and the haul board
+to carry over.
+
+### !whois
+
+Two commands, because they answer two different questions and guessing
+between them produces an answer about the wrong person:
+
+```
+!whois Aubrey Plaza
+WhoIs | Aubrey Plaza (American actress): Aubrey Christina Plaza (born June 26,
+1984) is an American actress, comedian, producer, and writer. She gained
+recognition for playing April Ludgate on the NBC sitcom Parks and Recreation.
+
+!twitch hardclaws
+Twitch | Hardclaws | Twitch Partner, 45,231 followers, joined Mar 2019. "Truck driver streaming from the cab."
+```
+
+**Nothing here is written by a model.** `!whois` posts the lead of the
+person's Wikipedia article, cut to `whois_max_chars` (default 400) on a
+sentence boundary with `[1]`-style citation markers stripped. `!twitch`
+posts the channel's own bio, partner/affiliate status, follower count and join
+date. A blurb about a real person has to be something you can check.
+
+These were one command for a while. That meant `!whois Aubrey Plaza` had to
+decide whether you meant the actress or whoever owns the login `aubreyplaza` —
+and when it picked the login, it titled the answer after a stranger wearing a
+real person's name. Two commands, no guessing.
+
+`!twitch` uses `GET /helix/users` and the follower **count** from
+`GET /helix/channels/followers`. Neither needs a scope, and the count comes
+back even for a channel the bot cannot moderate — only the per-user rows need
+`moderator:read:followers`. So this works with the token you already have, no
+re-login. A Helix failure is reported as "I couldn't reach Twitch", never as
+"there is no such channel".
+
+**Names are cleaned the way chat types them.** All of these work, because
+Twitch's mention picker inserts the `@` and people paste URLs:
+
+```
+!twitch NOTTaitch
+!twitch @NOTTaitch
+!twitch #hardclaws
+!twitch https://twitch.tv/nottaitch
+```
+
+None of `@`, `#` or a URL can appear in a real login — Twitch allows only
+`[a-z0-9_]` — so stripping them can never damage a name, and the spelling the
+viewer typed is what gets echoed back. This is one helper,
+`access.clean_login`, shared by every site that normalises a login. It used to
+be two separate `lstrip("#")` calls, which is how `@name` slipped through: the
+bot answered *"there is no Twitch channel called @NOTTaitch"* for a channel
+that plainly exists. A query it cannot parse must never be reported as a
+missing channel.
+
+`!whois` costs two calls at most — the article, and Wikipedia's search when the
+name as typed is not a page title. Results are cached for six hours because
+Wikipedia rate-limits by IP.
+
+`!who` is an alias for `!whois`. `!twitch` was previously `!whotwitch`, and
+the old spellings `!whotwitch`, `!whotw` and `!twitchwho` all still work -
+only `!twitch` is advertised in `!help`, so nobody mid-conversation breaks.
+Both go through the same per-user rate limit as `!funfact`, since each makes a
+network call.
+
+### !smk — and why the name pool has two layers
+
+```
+!smk female
+ShagMarryKill [female] | Dolly Parton (singer), Kate McKinnon (comedian), Rihanna (singer) - shag one, marry one, kill one.
+```
+
+The command never names the person who asked — the round belongs to the whole
+chat, not to whoever typed it — and every name carries its occupation so the
+round is playable by people who do not recognise every face.
+
+**The pool used to be 44 names.** Draw three of those, several times a night,
+and chat sees the same faces repeatedly no matter how well it is shuffled: the
+list is simply shorter than the number of rounds people play. So:
+
+1. **A seed pool of 389 hand-picked names** (`names.py`, 185 female / 204
+   male), each with an occupation — famous enough that a round still works for
+   someone who does not follow that field. Always available, no network.
+
+2. **Wikipedia category listings, topped up in the background.** A keeper
+   thread fetches `Category:American film actresses` and 15 siblings and caches
+   whatever people it finds to `names.json`. Thousands more names, growing
+   every 12 hours (`names_topup_hours`).
+
+3. **A recency memory** of the last 240 names used, so a big pool behaves like
+   one. Without it, a 4,000-name pool still hands out the same three faces.
+
+Two things worth knowing:
+
+**The tiers are blended, not stacked.** Drawing seed-first with a recency
+window smaller than the seed pool means the harvested names are *never*
+reached, and the whole top-up does nothing. Each name in a round is drawn
+~75% from the seed pool and ~25% from the harvested tail, so new names
+actually reach chat while rounds stay recognisable.
+
+**A category listing is not a list of people.** `Category:American film
+actresses` contains `List of American film actresses`, awards pages and
+namesake pages. `person_name()` rejects those — posting one into chat as
+someone to marry is the failure mode this guards. Namesakes
+(`Jane Doe (actress)`) are skipped rather than coin-flipped, because picking
+one at random names the wrong person.
+
+The top-up is a nicety, never a dependency. Set `"names_topup_enabled": false`
+and the seed pool carries the game on its own. A Wikipedia outage, a corrupt
+`names.json` or a dead category all fall back to the seed without the command
+noticing.
+
+#### Being a polite guest on Wikipedia
+
+Wikimedia sorts API clients into two rate-limit tiers **by User-Agent**: an
+identifiable one carrying a contactable URL or email is allowed
+**200 requests per minute**; anything else is treated as unidentified and
+capped at **10**.
+
+The bot fetches 16 categories at 1.1s apart — about **55 requests per minute**.
+Against a 10/min cap that meant the first ten categories of every cycle
+succeeded and the **last six came back `429 Too Many Requests`**, every single
+cycle, forever:
+
+```
+[names] English film actors: <HTTPError 429: 'Too Many Requests'>
+[names] American male singers: <HTTPError 429: 'Too Many Requests'>
+...
+```
+
+Those are always the same six because they are always the last six. Three
+things fix it:
+
+- **A contactable User-Agent** — `ClawFacts/1.0 (+https://github.com/hardclaws/ClawFacts;
+  hobby Twitch chat bot, name pools)`. That alone moves the bot from the
+  10/min tier to the 200/min tier, where 55/min is unremarkable.
+- **`Retry-After` is honoured.** A 429 raises `RateLimited` carrying the
+  server's own header, and the pool waits that long. The server knows its
+  window and we do not, so its number always beats ours.
+- **The backoff is pool-wide and doubles.** A 429 is about *this client*, not
+  the one category that happened to trip it — the next category would have
+  been refused too. So the refusal ends the cycle immediately and every fetch
+  waits. With no `Retry-After` the wait doubles each time, to a day at most.
+
+The six lines become one:
+
+```
+[names] Wikipedia rate-limited the top-up; resuming in ~5 min.
+```
+
+Wikipedia also asks callers to back off after any request that took more than
+a second to serve; `harvest_category` sleeps five seconds when that happens,
+which is the signal that usually precedes a 429 rather than the 429 itself.
+
+### !beef — a three-act feud
+
+```
+!beef Hardclaws zwift
+!beef random
+!beef zwift            (a lone genre word is the setting, not the rival)
+```
+
+Whoever types it stars in it, against the name they give. The story is four
+queued messages — header, three acts, winner — because a feud is 600+
+characters and a Twitch message is not.
+
+```
+BEEF | 🔥 BEEF: SpeedyDave vs. Hardclaws — the virtual mountains of Watopia 🔥
+BEEF | Act 1 — SpeedyDave reported Hardclaws for a 900-watt FTP that no human
+       has ever held.
+BEEF | Act 2 — SpeedyDave started lubing the chain with something that is
+       definitely not chain lube.
+BEEF | Act 3 — The league settled it on time trial. Hardclaws by four seconds.
+       🏆 WINNER: Hardclaws. SpeedyDave has left the building.
+```
+
+**Template-driven, not a model call per command.** A round trip is seconds,
+every beef would spend OpenRouter credits, and an account with none returns
+402 and disables the LLM for an hour — which would take the fun facts down
+with it. Six genres × 6 sparks × 6 escalations × 5 climaxes × 5 rivals ×
+either winner is **10,800 stories before names go in**, and every line is one
+a person read before it shipped. A model writing fiction about two named
+people in someone's chat can produce something genuinely hurtful, and nothing
+downstream would catch it.
+
+**The winner is rolled before the text is written**, so the story lands on the
+right outcome instead of the model being asked to retrofit one.
+
+**`!beef random` randomises the genre, not the opponent.** Pulling a bystander
+out of chat into a public feud they never asked for is how a joke command
+becomes a harassment report, and their chat reads it too. The rival is a named
+character — The Watt-Bomber, Lot Lizard Larry, Buttercream Brenda — unless the
+issuer typed a real name.
+
+| control | effect |
+| ------- | ------ |
+| `!beef off` / `on` / `status` | moderators only, silent for viewers, works while the bot is off |
+| `"beef_enabled": false` | off for everyone; the bot names the key |
+
+`!beef` is reserved, so a moderator cannot shadow it with a custom command.
+
+### The other games never run dry either
+
+`!joke`, `!randomfact`, `!riddle` and `!wyr` fetch live from their own
+keyless APIs, so they are not limited by a list — but those endpoints are
+run by strangers and any of them can vanish overnight. When one does, the bot
+used to answer `couldn't fetch that right now 😕` **every single time the
+command was typed**, for as long as the endpoint stayed down.
+
+Each one now falls back to a local pool — 30 jokes, 30 facts, 25 riddles, 25
+would-you-rathers — drawn without repeating until the pool has been all the
+way round. A dead API costs variety, not the game. The fallback is logged
+**once per pool**, not once per call, so a dead endpoint does not bury the log
+that is supposed to be telling you something is wrong.
+
+So every game has a live source and a floor:
+
+| Command        | Live source                     | Floor                    |
+| -------------- | ------------------------------- | ------------------------ |
+| `!smk`         | 16 Wikipedia categories         | 389 seed names           |
+| `!joke`        | official-joke-api               | 30 jokes                 |
+| `!randomfact`  | uselessfacts.jsph.pl            | 30 facts                 |
+| `!riddle`      | riddles-api.vercel.app          | 25 riddles               |
+| `!wyr`         | api.truthordarebot.xyz          | 25 would-you-rathers     |
+| `!whois`       | Wikipedia                       | — (a miss is the answer) |
+| `!twitch`      | Twitch Helix                    | — (a miss is the answer) |
+
+### Waking up a quiet channel
+
+Ten minutes with nobody saying anything, and the bot posts one of the five
+entertainment commands at random to give chat something to react to:
+
+```
+[04:12:31] chat idle for 600s - posting !smk
+ShagMarryKill [male] | Harrison Ford (actor), Viggo Mortensen (actor), Pedro Pascal (actor) - shag one, marry one, kill one.
+```
+
+```json
+"idle_chat_enabled": true,
+"idle_chat_minutes": 10,
+"idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr"]
+```
+
+Anything **anyone** says resets the clock — not just commands, and not just
+messages the bot acts on. The clock also resets after each post, so it is one
+per quiet window rather than one every time the checker wakes up.
+
+**It only fires while the channel is actually streaming.** A bot posting jokes
+into an offline room every ten minutes is not a feature; it is a channel that
+looks broken when the streamer comes back. The live check uses
+`GET /helix/streams`, which needs no scope, so the token the bot already holds
+is enough — no extra `--login`.
+
+Where the check cannot be settled (no token, no `client_id`, Twitch
+unreachable) it posts anyway. A missed check must not silently switch the
+feature off, and "unknown" is not the same as "offline".
+
+`!bot off` silences it, as does `"fun_commands": false`. An `!riddle` posted
+this way still reveals its answer on the timer.
+
+### Rewrites cannot add character
+
+The LLM rewrite path is only allowed to re-word the facts the sources
+returned. It used to be checked for invented names, dates, claims and praise
+clichés — all of which this line cleared:
+
+```
+Aubrey Plaza: actress, comedian, producer, writer - and deadpan delivered with extra deadpan.
+```
+
+Nothing there is a name, a date, a place, an event or a claim. What it invented
+was an opinion. Rewrites are now also checked for clauses built mostly out of
+words the source never used, which drops that while still allowing a genuine
+paraphrase — synonyms and abbreviations like "Philly" for Philadelphia
+survive, because they scatter through the sentence rather than piling into a
+trailing clause.
+
+Facts are trimmed to `max_fact_chars` / `max_message_chars` on a **sentence
+boundary** where one fits, so a long fact loses its trailing sentence instead
+of ending mid-phrase:
+
+```
+before: ...contributing buildings that…
+after:  ...is listed on the National Register of Historic Places.
+```
+
+### Who can use !funfact, and how often
+
+Chat abuse is easy to stop for mods, VIPs and subs — Twitch sends their badges
+on every message, so those checks are free and instant. **Follow status is not
+in IRC at all.** The only way to get it is the Helix API:
+
+```
+GET /helix/channels/followers?broadcaster_id=<channel>&user_id=<viewer>
+```
+
+which needs the `moderator:read:followers` scope and a user token belonging to
+the broadcaster or one of the channel's moderators — the device-login token
+`auth.py` already stores.
+
+**Two things must both be true, or every follower gets turned away:**
+
+1. **The bot account must be the broadcaster or a moderator of the channel.**
+   If it is a separate account, promote it once in chat:
+   ```
+   /mod TruckingWithDocBot
+   ```
+   This is Twitch's rule, not the bot's: *"The ID in the broadcaster_id query
+   parameter must match the user ID in the access token or the user ID in the
+   access token must be a moderator for the specified broadcaster."*
+
+2. **Re-authorise once** so the token carries the new scope:
+   ```
+   python3 bot.py --login
+   ```
+
+Only three scopes are requested: `chat:read`, `chat:edit` and
+`moderator:read:followers`. Nothing else, because Twitch **rejects the entire
+device flow over one scope name it does not recognise** — the bot would print
+`invalid scope requested` and exit, unable to log in at all.
+
+> This shipped broken once. The list carried `moderation:read:moderators`,
+> which is not a Twitch scope (the real one is `moderation:read`), and login
+> failed outright. The scope was pointless even under its correct name: Get
+> Moderators requires `broadcaster_id` to equal the token's own user id, so a
+> bot account that is not the broadcaster can never read another channel's
+> moderator list. Asking for it bought nothing and cost the ability to log in.
+
+#### The bot says why, at startup
+
+Four different faults all produce the same chat message — *"could not verify
+your follow status"* — and only two of them are yours to fix. So the bot reads
+its own token back from Twitch on the way up and prints the cause rather than
+leaving you to guess:
+
+```
+[access] token account='truckingwithdocbot' scopes=chat:read,chat:edit
+[access] moderator status is read from chat on join (USERSTATE), not from the API.
+[access] PROBLEM: the token is missing the moderator:read:followers scope -
+         run 'python3 bot.py --login' to re-authorise.
+[access] until the above is fixed, followers will be told 'could not verify
+         your follow status'.
+```
+
+**Moderator status comes from chat, not the API.** When the bot joins, Twitch
+sends a `USERSTATE` line carrying the bot's *own* badges — free, no scope,
+authoritative. The bot reads it and tells you what it found:
+
+```
+[access] TruckingWithDocBot is a moderator of #hardclaws.
+```
+
+or, if it is not:
+
+```
+[access] PROBLEM: TruckingWithDocBot is NOT a moderator of #hardclaws. Run
+         /mod TruckingWithDocBot in that channel - until then !bot and
+         !reminder will refuse it.
+```
+
+That also re-reports itself if you `/mod` or `/unmod` the bot mid-stream,
+since Twitch resends `USERSTATE` after every message the bot sends.
+
+With the scope in place it says so plainly:
+
+```
+[access] token account='truckingwithdocbot' scopes=chat:read,chat:edit,moderator:read:followers
+[access] follower check OK - token may read this channel's followers (total=812).
+[access] follow checks are working.
+```
+
+Read the `scopes=` line first. If `moderator:read:followers` is not in it, no
+amount of `/mod` will help — the token simply cannot ask the question, and the
+only fix is `python3 bot.py --login`.
+
+The probe also re-runs every five minutes while it is failing, so granting the
+bot `/mod` mid-stream takes effect without a restart.
+
+> Twitch answers an unauthorised request with **200 OK, the real follower
+> total, and an empty list** — the same shape as "this user does not follow".
+> Treating those as the same thing is what made every real follower get told
+> they don't follow the channel. The bot now reports *"could not verify your
+> follow status"* in that case rather than accusing the viewer.
+
+Default schedule (`tier_cooldowns` in `config.json`):
+
+| Who | Cooldown | How it's known |
+|---|---|---|
+| Broadcaster | 30s | `broadcaster` badge |
+| Moderator | 30s | `moderator` badge (also `staff`/`admin`/`global_mod`) |
+| VIP | 60s | `vip` badge |
+| Subscriber | 60s | `subscriber` badge (`founder` counts) |
+| Follower, following > 1 day | 5 min | Helix API, cached |
+| Follower, less than 1 day | blocked | Helix API |
+| Not following | blocked | Helix API |
+
+Notes:
+
+- Cooldowns are **per user**, so one person waiting never blocks the next. The
+  old `cooldown_seconds` stays as a *per-channel* floor — that is what protects
+  Wikipedia's per-IP rate limit, and per-user limits alone would not stop twenty
+  different viewers each firing once.
+- Mods, VIPs and subs never trigger an API call. Follower lookups are cached:
+  a confirmed follow for 6 hours, a non-follow for 15 minutes.
+- `min_follow_age_seconds` (default 86400) is the 1-day rule.
+- If the follow check cannot run — no token, missing scope, API down —
+  `follower_check_failure` decides. The default `"deny"` keeps the gate honest;
+  `"allow"` falls back to badges only.
+- **The gate covers every command**, not just `!funfact`. `!joke`,
+  `!randomfact`, `!riddle` and `!wouldyourather` all draw on the same per-user
+  budget, so the free commands cannot be used to flood the channel either. A
+  sub who fires `!joke` waits the same 60s before `!funfact`.
+- Rejections are explained in chat, but at most once every 2 minutes per user —
+  otherwise refusing people becomes its own spam vector.
+- `"access_control": false` turns the whole thing off.
+
+`!riddle` reveals its answer after `riddle_answer_delay` seconds — **20** by
+default (it was a hardcoded 45).
+
+### Updating the bot's files without losing your login
+
+`auth.py` saves your Twitch login to **`tokens.json`** (chmod 600) in the bot's
+own folder, and silently reuses or refreshes it on every start — you should only
+ever run the device login once.
+
+`tokens.json` and `config.json` are **not in git** (they hold your OAuth token
+and API keys) and they are listed in `.gitignore`. So if you update by
+downloading the repo or a zip and replacing the whole folder, you delete your
+saved login and the bot asks you to authorise again. That is the usual reason a
+restart demands a fresh login — it is not the token expiring.
+
+To update safely, copy the new `.py` files, `spicy_facts.json`, `README.md` and
+`fixtures/` over the old ones and **leave `tokens.json` and `config.json`
+alone**. If you do lose the login, `python3 bot.py --login` re-runs the device
+flow once.
+
+One more thing that looks identical: `refresh_if_possible()` refuses saved
+tokens whose `client_id` differs from the one in `config.json`. Replacing
+`config.json` with `config.example.json` therefore also forces a re-login.
+
+### Source order — read this if a search key never seems to be used
+
+`_try_sources()` is a ladder that stops at the **first** source that returns
+anything usable:
+
+```
+wikipedia  ->  serper  ->  google  ->  duckduckgo
+```
+
+Wikipedia is first because it is free and usually sufficient, so a paid key is
+only spent on towns it cannot serve. DuckDuckGo is last because its Instant
+Answer is a single Wikipedia-style blurb.
+
+> It used to run `wikipedia -> duckduckgo -> google -> serper`. That was a bug:
+> one dull DuckDuckGo sentence ended the ladder, so a configured key was never
+> consulted. For `!funfact Jerome, Missouri` DDG returned "It is located on the
+> Gasconade River near Interstate 44" and the bot posted that instead of
+> searching. A configured key is now tried before DuckDuckGo.
+
+Startup prints the active ladder so you can see it immediately:
+
+```
+[info] fact sources: wikipedia -> serper -> duckduckgo (fallback)
+```
+
+### Serper search (recommended — this is the one to set up)
+
+Wikipedia throttles anonymous API use **per IP**, and plenty of towns have a
+stub article with nothing worth posting (Jerome, Missouri is 116 words). The
+cure is a **second, independent search source**. [Serper](https://serper.dev) is
+the simplest: sign up (free, no card), copy the one API key, and add:
 
 ```json
 "serper_api_key": "abc123..."
 ```
 
 (or set the `SERPER_API_KEY` environment variable.) Free tier is **2,500
-queries**; beyond that it's ~$0.50 per 1,000. When Wikipedia is down, the bot
-then answers from Serper's Google-quality results instead of giving up.
+queries**; beyond that it's ~$0.50 per 1,000. The bot asks for *interesting*
+facts — `{town} history facts famous landmark record` — and mines the ranked
+snippets, which reach local-history sites (route-66 associations, state
+historical societies) that no encyclopedia covers.
+
+Under `--debug` a missing key says so instead of failing silently:
+
+```
+[funfacts] serper source not configured (no serper_api_key)
+```
+
+### Optional Google search (legacy — closed to new customers)
+
+Google's **Custom Search JSON API** needs *two* values: an API key
+(`google_api_key`) *and* a Programmable Search engine ID (`google_cx`). Missing
+either one disables the source entirely:
+
+```
+[funfacts] google source not configured (needs BOTH google_api_key and google_cx)
+```
+
+```json
+"google_api_key": "AIza...",
+"google_cx": "abc123..."
+```
+
+**Google has closed this API to new customers** and is sunsetting it
+(1 January 2027); the free tier was 100 queries/day. Unless you already have a
+`google_cx`, use Serper — it is one key, no engine to configure, and it is what
+this bot is tested against.
+
+> Both search sources return short snippets, not prose — so their facts are
+> usually weaker than Wikipedia's. Their real value is coverage of places with
+> no usable Wikipedia article.
 
 > The bot also needs a real *model*: `openrouter/free` is OpenRouter's
 > auto-router — it picks a random free model per call (often a reasoning model
@@ -405,6 +1082,291 @@ needed.
 - Without any LLM the bot just posts the plain real facts — no fake jokes.
 - The LLM is only used in spicy mode; clean mode stays factual.
 
+
+## Truck talk on the radio
+
+The bot can mutter to itself on the CB while you stream. Three voices, picked
+at random each time so chat cannot learn the tone either:
+
+Every line is prefixed with which mode the bot is in, so it is never ambiguous
+whether this is radio traffic or somebody hanging out of the window at a car:
+
+```
+[21:04:12] CB | Breaker one-nine, we got a bear in the bushes at the 42 yardstick. Ease off the loud pedal.
+[21:37:55] CB | Heater's a-glowin', manners are showin', and I still can't get the travel agent on the box. Catch you on the flip flop.
+[22:05:41] WINDOW | HEY! That minivan took the exit from the middle lane. Two little red lights. That's all I'm askin' for.
+[22:19:03] WINDOW | OI - that crossover texted all the way up the on-ramp, and I'm a very patient man.
+```
+
+Four voices, picked at random per post:
+
+| Label | Voice | Sounds like |
+| --- | --- | --- |
+| `CB \|` | **road** | Dry channel-19 traffic report. What CB actually sounds like. |
+| `CB \|` | **grizzled** | An old-timer grumbling to himself. |
+| `CB \|` | **ramble** | The weird one. |
+| `WINDOW \|` | **yell** | Yelling out the window at a four-wheeler that just did something wrong. |
+
+The label comes out of the same draw as the text, so a `WINDOW` line can never
+go out under a `CB` label by being re-rolled on the way to the socket.
+
+**The yelling is exasperated, never threatening.** Every template names a
+vehicle (`that minivan`, `that crossover`) rather than a person, so nothing can
+read as aimed at a real viewer, and a test fails if any of a dozen violent
+terms is ever added to a pool. The bellow is in capitals — `HEY!`, `OI OI!` —
+but the rest of the line is not, because Twitch automod reads a wall of caps
+as spam.
+
+`!cb` (or `!radio`, `!breaker`) asks for one on demand. It is a local
+generator, so it costs nothing and never waits on the network, and it answers
+without an `@` mention — the bot is on the radio, not replying to a question.
+
+```json
+"cb_chatter_enabled": true,
+"cb_chatter_minutes": 25,
+"cb_command_enabled": true,
+"cb_command_access": "everyone",
+"cb_yell_enabled": true
+```
+
+### Turning parts of it off
+
+The random chatter and the command are separate switches, so you can keep one
+without the other:
+
+| You want | Set this |
+| --- | --- |
+| Only the random chatter, nobody can ask for one | `"cb_command_enabled": false` |
+| Only on demand, never unprompted | `"cb_chatter_enabled": false` |
+| Only mods (and the broadcaster) may ask for one | `"cb_command_access": "moderator"` |
+| Only the broadcaster may ask for one | `"cb_command_access": "broadcaster"` |
+| CB chatter only, no yelling at cars | `"cb_yell_enabled": false` |
+
+A misspelt `cb_command_access` is treated as `"moderator"`, not `"everyone"` —
+an access setting should fail closed. When the command is switched off it also
+disappears from `!help`.
+
+**A moderator can also switch the random chatter from chat**, without editing a
+file:
+
+```
+!cb off      - silence the random chatter (mods and broadcaster only)
+!cb on       - bring it back
+!cb status   - which state it is in
+```
+
+`!cb off` lasts until the next restart; `cb_chatter_enabled` in config.json is
+the permanent setting. That is the same split `!bot off` uses. A viewer who
+types `!cb off` gets no answer at all, so the switch cannot become a spam
+vector — and unlike `!bot off`, it does not silence anything else.
+
+**The timing is deliberately not a fixed period.** `cb_chatter_minutes` is an
+*average*: the gap before each post is re-rolled between 40% and 200% of it, so
+a 25-minute setting produces gaps anywhere from 10 to 50 minutes and chat
+cannot settle into a rhythm. The lower bound also means it can never fire twice
+in quick succession.
+
+Three things hold it back:
+
+* **The channel has to be streaming.** Same live check as the idle poster.
+* **It will not talk over an active conversation.** If anyone has spoken in
+  the last 60 seconds it waits and tries again shortly.
+* **`!bot off` silences it**, along with everything else.
+
+### Why there is no API for this
+
+There isn't one. What exists is static quote listicles — a few dozen lines,
+nearly all attributed "Unknown" — and CB slang glossaries, which are reference
+dictionaries rather than generators. The glossaries turned out to be the better
+raw material: they give an authentic vocabulary, and a slot generator built
+from real terms produces far more than any fixed list.
+
+Every term in the pools is genuine CB usage — *bear in the bushes*, *Kojak with
+a Kodak*, *chicken coop*, *alligator*, *hundred-mile coffee*, *yardstick*,
+*stay loaded*. Nothing is invented lore dressed up as trucker talk.
+
+That currently comes to **over 10 million distinct lines**, and the weakest of
+the 28 templates still produces 400+ on its own, so there is no line chat keeps
+hearing. `python3 mock_trucker_test.py` checks both numbers rather than
+asserting them.
+
+**The slang is held to "crude but never explicit."** The bot posts unprompted
+into a live channel, so the bar is higher than for a command a viewer chose to
+run. Four genuine CB terms that refer to sex work — *lot lizard*, *sleeper
+creeper*, *male buffalo*, *pickle park* — are deliberately absent, and a test
+fails if any of them is ever added to a pool.
+
+## Shoutouts on a raid
+
+When the stream gets raided the bot posts a shoutout on its own, with nothing
+to configure:
+
+```
+SO | 📣 Hammer lane for DaniLikesDonuts, they just swung off the interstate!
+42 of you came across. Live on Just Chatting as we speak, engine still warm.
+Twitch Affiliate, 1,284 followers. Go show them some love at
+twitch.tv/danilikesdonuts
+```
+
+The wording follows whatever this channel is streaming, so a truck night gets
+trucker talk and a Zwift night gets cycling talk:
+
+```
+SO | 🚴 NOTTaitch dropped in and the peloton noticed! They made the trip solo.
+Proper watts and none of the ego that usually comes with them. Go show them
+some love at twitch.tv/nottaitch
+
+SO | 🪂 Trader landed hot! They brought 7 viewers over with them. Their last
+lobby was Fortnite. Go show them some love at twitch.tv/trader
+```
+
+**A raid and a hand-picked shoutout are worded differently.** `!so <name>`
+works on any channel, and most of them did not raid — so a manual shoutout
+never says the person arrived, and never reports a viewer count, because the
+size of a raid belongs to the raid and not to the person:
+
+```
+SO | 🙌 Put CadenceKate on the list, rider to rider. They were on Zwift the
+last time anyone looked. Twitch Partner, 31,412 followers. Go show them some
+love at twitch.tv/cadencekate
+
+SO | 🎮 Give LlamaLover a look next time you're short a squad. Squad-worthy,
+and they'll tell you straight when you earned it. Go show them some love at
+twitch.tv/llamalover
+```
+
+There are 30 raid openers, 28 manual ones, 32 praise lines, and 16 each of the
+present-tense and past-tense game lines — 122 distinct pieces of copy and
+1,888 combinations before names and counts go in. The praise lines carry no
+call to action on purpose: the ask is the one line at the end, and a message
+that asks twice reads like boilerplate.
+
+`shoutout_theme` picks the flavour: `"auto"` (default) reads the channel's
+current category from Helix, or force one of `"trucking"`, `"zwift"`,
+`"fortnite"`, `"generic"`. Categories are matched by substring, so *Euro Truck
+Simulator 2*, *American Truck Simulator*, *SnowRunner* and *MudRunner* all
+reach trucking. Anything unrecognised, and any moment the channel is offline,
+falls back to generic — never to a guess.
+
+Every part of that line is read off something real. The name and the viewer
+count come from the raid notice Twitch itself sends (`USERNOTICE` with
+`msg-id=raid`). The affiliate/partner line, the follower count and the raider's
+current game come from the Helix API. The link is built from the raider's
+**login**, never their display name — display names carry capitals, spaces and
+unicode that a URL does not. If the login cannot be a Twitch login (4-25
+characters of `a-z`, `0-9` and `_`) then no link is posted at all, because a
+dead link in a shoutout is worse than no link. If nothing trustworthy can be
+said, the bot says nothing.
+
+**How the game is known, and why the tense changes.** Two endpoints, two
+different facts, and the wording tells you which one it came from:
+
+| They are | Source | Twitch's own wording for the field | The shoutout says |
+| -------- | ------ | ---------------------------------- | ----------------- |
+| live now | `GET /helix/streams` | `game_name` is "the category or game **being streamed**" | "live right now playing Fortnite" |
+| offline | `GET /helix/channels` | `game_name` is "the game that the broadcaster **is playing or last played**" | "last seen playing Fortnite" |
+| neither | — | — | no game named at all |
+
+Get Streams is the wrong tool for a channel that is not live: it returns
+`{"data": [], "pagination": {}}` for anyone offline, so it can never say what
+they were on before. Get Channel Information is the only Helix endpoint that
+publishes a *last* category, and it needs no scope, so the token the bot
+already holds can read another channel's.
+
+```
+SO | 🎮 {name} joined the squad! ... They're live on Fortnite right now, so go
+catch them before the match ends.
+
+SO | 🪂 Trader landed hot! ... Their last lobby was Fortnite.
+```
+
+`mock_shoutout_test.py` checks the two pools against each other rather than
+looking for one phrase: no past-tense line may contain "right now",
+"currently", "this minute", "as we speak" or "live on", and no present-tense
+line may contain "last", "were on", "logged off" or "signed off". Rewording
+the copy cannot quietly break that.
+
+Being live wins when both are available: the present tense is the stronger
+fact, and the stale category from Get Channel Information is dropped rather
+than printed alongside it. Neither endpoint answering, or no category ever
+set, means no game is named.
+
+**How the message is built.** Each part is a whole sentence — opener, the size
+of the raid, the praise, the Twitch facts, then the link — and the sentences are
+joined rather than slots being filled inside one sentence. That is deliberate.
+Two separate bugs came from the other approach: a template that hardcoded "a"
+in front of a slot whose values carried their own article, and a slot used
+twice that read correctly for mass nouns and wrongly for count nouns. Five more
+showed up in the first draft of these themed pools, all of them collisions
+between clauses that were each fine on their own: *"they just raided in! They
+raided in with 7 in tow"*, and a praise line ending "show them some love"
+immediately before the call to action that says it again. `mock_shoutout_test.py`
+now sweeps 6,000 mixed combinations and fails on any of them.
+
+The Helix lookup is best-effort. A raid is the worst possible moment to be
+waiting on a network call, and the token can be expired, so the name-and-count
+shoutout is always available as the floor. The bot also never claims to know
+what the raider is streaming, because the profile lookup does not fetch that.
+
+A raid is answered without checking whether the raider follows the channel.
+They usually do not, and they carry no badges in this message — running a raid
+through the normal access gate would refuse the one thing that should always be
+answered.
+
+| Switch | Effect |
+| ------ | ------ |
+| `!so off` / `!so on` / `!so status` | Moderator switch, lasts until the bot restarts. Silent for viewers. |
+| `!so <name>` | Shout a channel out by hand. **Moderators only.** |
+| `!so` (no argument) | Shows usage rather than guessing. |
+| `"shoutout_enabled": false` | Turns both paths off in `config.json`. |
+| `"shoutout_theme"` | `"auto"` (follows the current category) or `trucking` / `zwift` / `fortnite` / `generic`. |
+
+## Commands your mods write themselves
+
+A moderator can add a command in chat, with no restart and no editing files:
+
+```
+!cmd add discord Join us on Discord - discord.gg/example
+!cmd list
+!cmd edit discord New link: discord.gg/example
+!cmd delete discord
+```
+
+`!discord` then answers for anyone who passes the normal access gate. `{user}`
+is replaced with whoever asked:
+
+```
+!cmd add hi G'day {user}, welcome aboard
+```
+
+What is *not* up to the moderator:
+
+* **A custom command cannot shadow a built-in.** `!cmd add help ...` is
+  refused. If it were allowed, `!help` would still look like it worked while
+  meaning something else.
+* **The message is capped at 380 characters**, and an over-long one is refused
+  with its length named rather than cut off mid-sentence when posted.
+* **Names are 2-25 characters** of `a-z`, `0-9` and `_`, starting with a
+  letter. Upper case is folded, not refused.
+* **They still go through the access gate and the channel cooldown** — a custom
+  command is not a way around the rate limit.
+* **`!bot off` silences them**, though a moderator can still define one while
+  the bot is paused, so switching the bot off is not a one-way trip.
+
+They live in `custom_commands.json` next to the code, written atomically, so
+they survive a restart. An unreadable or wrong-shaped file is reported and
+ignored rather than stopping the bot, and a hand-edited file still cannot
+hijack a built-in name. There is a ceiling of 100 commands.
+
+`!cmd list` is readable by anyone — the commands are used in public chat, so
+there is nothing to hide. Everything else is moderator-only and **silent** for
+viewers, so it cannot be used to make the bot spam. An unknown placeholder such
+as `{usr}` is left visible rather than blanked, so a typo shows up instead of
+quietly eating text.
+
+`"custom_commands_enabled": false` in `config.json` stops them running without
+deleting them, and `!cmd list` names that as the reason.
+
 ## Testing without Twitch
 
 - **Full self-test** (recommended): runs the login check + sample fact lookups
@@ -419,6 +1381,33 @@ needed.
   python3 funfacts.py "Milford, PA"
   python3 funfacts.py --spicy "Las Vegas, NV"   # adult mode
   ```
+- **Check which fixes the copy you are running actually has** — after
+  downloading a zip or applying a patch, this removes all guesswork:
+  ```
+  python3 check_fixes.py
+  ```
+  It prints one line per fix (`[x]` present, `[ ]` missing) and exits non-zero
+  if anything is absent.
+- **Trace retrieval, not just the LLM**: `--debug` (or `TWITCH_DEBUG=1`) also
+  prints which source answered and the exact seed pool handed to the model,
+  so a wrong fact can be traced to its source instead of guessed at:
+  ```
+  [funfacts] source=duckduckgo place='Girard, Ohio' facts=3
+  [funfacts]   seed 1: It is believed that Girard takes its name from Stephen Girard…
+  ```
+- **Replay a real lookup with no network** (for CI, or any machine that can't
+  reach Wikipedia):
+  ```
+  python3 mock_live_test.py
+  ```
+  `fixtures/wiki_girard.json` holds the MediaWiki responses recorded for
+  `!funfact girard, OH`. The harness swaps out `_http_get_json` only, so the
+  real `_wiki_search_extracts → _wikipedia → _ranked_facts → get_funfact` chain
+  runs end to end — including the two bugs that made Girard answer with
+  invented crime: plain-text extracts are capped at **one page per request**
+  (the API returns a `continue` token, which must be followed), and
+  `"United States"` in a lead sentence is *not* another region (matching it
+  discarded the town's own article and pushed the lookup onto web search).
 - **See exactly what's sent to the AI**: run with `--debug` (or set
   `TWITCH_DEBUG=1` / `"debug": true` in config.json). Every LLM call prints
   the full system prompt, user prompt (including the real facts found), model,
@@ -439,6 +1428,76 @@ needed.
   ```
   python3 mock_extras_test.py
   ```
+
+## Troubleshooting: `HTTPError 401` in the access log
+
+```
+[access] helix users lookup failed for 'someone': <HTTPError 401: 'Unauthorized'>
+[access] funfact denied for someone: could not verify your follow status (tier=unknown)
+```
+
+A 401 means **Twitch rejected the bot's access token**. It is not about the
+viewer, and it is not about the name in the log line. It also explains why it
+seems intermittent: the token is valid for about four hours, so everything
+works after a login or a restart and then starts failing.
+
+Two independent causes, and the first is the common one:
+
+**Run this first:**
+
+```
+python3 bot.py --doctor
+```
+
+It reads your actual `config.json` and `tokens.json` and prints the reason,
+including the two that leave no trace in the log — a `tokens.json` saved for a
+different `client_id`, and a missing refresh token. It never prints a secret,
+only whether one is present. It also attempts a real renewal so you can see
+whether one can happen at all.
+
+**1. There is no `client_secret` in config.json.** A Confidential app (the Dev
+Console default) cannot renew a token without one, so when the four hours run
+out the login simply dies and stays dead. The bot says so at startup:
+
+```
+[auth] no client_secret in config.json - if your app is a Confidential client
+the login expires in about 4 hours and will need 'python3 bot.py --login'
+again. Set the app's client type to Public, or add the secret.
+```
+
+Fix it once: Dev Console → your app → **New Secret**, put it in config.json as
+`"client_secret": "..."`, then run `python3 bot.py --login`. Alternatively set
+the app's **client type to Public**, which needs no secret. Either way the bot
+then renews itself indefinitely.
+
+**2. The token expired before the keeper got to it.** Fixed in
+`auth.REFRESH_MARGIN` (one hour). The token keeper wakes every 30 minutes but
+the old code only renewed within 120 seconds of expiry — so the keeper kept
+finding a token that was still good for another half hour, reusing it, and
+never refreshing at all. The token was only renewed *after* it had died, which
+produced up to 30 minutes of 401s every four hours **even with a valid
+secret**.
+
+**3. `tokens.json` was saved for a different app.** If `client_id` in
+config.json is not the one in `tokens.json`, the saved login can never be
+renewed. This used to fail completely silently — the bot ran fine for four
+hours and then every Helix call 401s, with nothing in the log to say why. It
+now says so once, at the first failure:
+
+```
+[auth] tokens.json was saved for client_id 'OTHER-APP' but config.json has
+'abc123'. They must match, or the saved login can never be renewed.
+```
+
+`tokens.json` lives next to `bot.py`, not in the working directory.
+
+Either way, a 401 now recovers on its own: the client asks for a fresh token
+and retries the request once. Before that, a single 401 was terminal — it was
+logged and every follow check stayed dead until the process was restarted.
+
+If it still fails, the log now names the cause rather than leaving you to
+guess, and chat is told the bot's login expired rather than being accused of
+not following.
 
 ## Troubleshooting: "the facts aren't adult"
 
@@ -499,11 +1558,34 @@ appends fake joke comments.
 | `auth.py`            | Twitch login (device-code flow) + auto-refresh. |
 | `funfacts.py`        | Fact lookup + ranking, spice, rotation, caching.|
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
+| `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
+| `haul.py`            | The `!haul` board.                              |
+| `customcmds.py`      | `!cmd` - moderator-defined commands.            |
+| `shoutout.py`        | The raid shoutout wording.                      |
+| `trucker.py`         | The `!cb` radio chatter generator.              |
+| `access.py`          | Who may use a command, and how often.           |
+| `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
+| `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
+| `storage.py`         | Atomic JSON writes for the bot's state files.   |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
 | `config.example.json`| Sample configuration.                           |
 | `mock_test.py`       | Offline end-to-end bot test.                    |
 | `mock_auth_test.py`  | Offline login-flow test.                        |
 | `mock_facts_test.py` | Offline fact-logic tests.                       |
+| `mock_live_test.py`  | End-to-end lookup replayed from recorded API responses. |
+| `fixtures/`          | Recorded MediaWiki responses for the replay.    |
+| `check_fixes.py`     | Prints which fixes are present in the copy you're running. |
 | `mock_extras_test.py`| Offline extra-command tests.                    |
+| `mock_reminders_test.py` | Offline reminder and haul tests.          |
+| `mock_whois_test.py` | Offline `!whois` / `!twitch` tests.             |
+| `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
+| `mock_idle_test.py`  | Offline idle-chat tests.                        |
+| `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
+| `mock_shoutout_test.py` | Offline raid-shoutout tests.                 |
+| `mock_customcmds_test.py` | Offline `!cmd` tests.                      |
 | `tokens.json`        | Created on first login; holds the saved login.  |
+| `reminders.json`     | Pending reminders; written at runtime.          |
+| `haul.json`          | The current haul; written at runtime.           |
+| `custom_commands.json` | Mod-defined commands; written at runtime.     |
+| `names.json`         | Harvested `!smk` names; written at runtime.     |

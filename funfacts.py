@@ -21,23 +21,35 @@ place rotate through them, so you don't get the same answer twice in a row.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import random
 import re
 import socket
+import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 
-USER_AGENT = "TwitchFunFactBot/1.0 (hobby Twitch chat bot)"
+# Wikimedia's rate-limit policy keys off this string: a UA of the form
+# "<tool>/<version> (<contact URL or email>)" gets 200 requests/minute, while
+# one with no contact address counts as unidentified and gets 10/minute - and
+# returns 403 rather than 429 if it is missing or generic. Ten a minute is
+# reached by a single busy channel asking random questions, so the contact
+# address is not optional politeness here.
+USER_AGENT = ("ClawFacts/1.0 "
+              "(+https://github.com/hardclaws/ClawFacts; hobby Twitch chat "
+              "bot, Wikipedia fun facts)")
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
+TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
 SPICY_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "spicy_facts.json"
 )
@@ -45,14 +57,24 @@ SPICY_DB_PATH = os.path.join(
 # Words that make a sentence sound like a "fun fact" (higher score = better).
 # "Trucker-flavoured" words are included since the bot targets a trucking stream.
 _STRONG = re.compile(
-    r"\b(oldest|youngest|first|second|largest|smallest|tallest|longest|"
+    r"\b(visited|visits|emergency landing|rocking chair|"
+    r"originally called|originally named|formerly known as|formerly called|renamed|"
+    r"oldest|youngest|first|second|largest|smallest|tallest|longest|"
     r"shortest|deepest|highest|lowest|only|last|birthplace|famous|"
     r"known for|best known|home of|named after|named for|world|"
     r"national|record|haunted|legend|rare|unique|"
     r"truck stops?|interstates?|highways?|railroads?|railways?|junctions?|"
     r"crossroads|bridges?|tunnels?|turnpikes?|freeways?|freight|"
     r"mile markers?|rest stops?|route 66|museum|landmark|monument|memorial|"
-    r"president|civil war|battle|national register|artifact|relic)\b",
+    r"president|civil war|battle|national register|artifact|relic|"
+    r"takes its name|takes their name|named for|namesake|eponym|eponymous|"
+    r"philanthropist|billionaire|richest|"
+    # Things a town is actually known for. Without these, the best fact about a
+    # place ("600 pinball machines", "a state championship") scored 0 and was
+    # cut by the "score < 2" tail-trim, while a census stub survived.
+    r"arcade|pinball|amusement|roller coaster|roadside attraction|attraction|"
+    r"hall of fame|championship|tavern|covered bridge|lighthouse|waterfall|"
+    r"cave|hot springs|festival|collection)\b",
     re.IGNORECASE,
 )
 _WEAK = re.compile(
@@ -123,6 +145,206 @@ _FILLER = re.compile(
 )
 
 
+# Search snippets and page titles are not facts. These two kinds were reaching
+# the LLM as "ground truth": truncated page titles ("The Only Man Ever Hanged
+# in Trumbull County: A True ...") and SEO boilerplate from crime-stats and
+# real-estate pages ("Explore crime rates for Girard, OH including murder,
+# assault, and property crime statistics."). A model asked to be witty about
+# that will invent the rest.
+_JUNK_SEED = re.compile(
+    r"(\.\.\.|\u2026)\s*$|"
+    r"\b(explore|view|browse|check out|see|compare|read|search|find)\b[^.]{0,40}"
+    r"\b(crime rates?|crime grade|statistics|stats|data|reviews?|photos?)\b|"
+    r"\bcrime (rates?|grade|statistics|stats)\b|"
+    r"\bis it safe\b|\bsafest (places|cities|towns)\b|"
+    r"\bbest places to live\b|\bcost of living\b|"
+    r"\bhomes for sale\b|\breal estate\b|\bapartments?\b|\bzillow\b|"
+    r"\brentals?\b|\bweather (forecast|today)\b|"
+    # The standard NRHP boilerplate is a list of buildings, not a fact, and it
+    # scored 5 for 'national register' — outranking Cuba MO's World's Largest
+    # Rocking Chair and its Bette Davis / Amelia Earhart visits.
+    r"\bare listed on the national register\b",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_seed(sentence: str) -> bool:
+    """True for search-result noise that must never be treated as a fact."""
+    return bool(_JUNK_SEED.search(sentence))
+
+
+# A bare "Name, epithet, epithet" stub is a Wikipedia *title*, not a fact about
+# the town — and when the person merely shares the town's name it is actively
+# dangerous. DuckDuckGo's results for "girard, OH" led with "Joe Girard,
+# Guinness Book of World Records winning American salesman" (born Detroit, 1928)
+# and "Hugo Girard, Canadian Strongman, former World Champion", and the model
+# turned the first into "Joe Girard called Girard home". Neither stub names the
+# town, states a date, or contains a verb — so they are dropped, while real
+# sentences ("It is believed that Girard takes its name from...") are untouched.
+_STUB_EPITHET = re.compile(
+    r"\b(former|current|retired|american|canadian|british|australian|world|"
+    r"national|professional|record|champion\w*|salesman|actor|actress|"
+    r"politician|senator|governor|mayor|musician|singer|songwriter|composer|"
+    r"player|coach|pitcher|quarterback|boxer|wrestler|strongman|driver|racer|"
+    r"author|writer|poet|artist|painter|inventor|scientist|engineer|general|"
+    r"businessman|entrepreneur|philanthropist|priest|bishop|outlaw|gangster)\b",
+    re.IGNORECASE,
+)
+_STUB_NAME = re.compile(r"^[A-Z][\w'.-]*(?:\s+[A-Z][\w'.-]*){0,3}$")
+_STUB_VERB = re.compile(
+    r"\b(is|are|was|were|be|been|being|has|have|had|became|becomes|serves?|"
+    r"served|founded|opened|built|established|born|died|lived|located|stands?|"
+    r"holds?|hosted|won|named|settled|incorporated)\b", re.IGNORECASE)
+
+
+# "It is located on the Gasconade River near Interstate 44, and is approximately
+# ten miles west of Rolla" is where-a-place-is, not a fun fact — but it scored 6
+# because 'interstate' is a _STRONG word, which also suppressed the filler check,
+# so it outranked Jerome MO's only piece of history (platted 1867 as Fremont
+# Town) and reached the model as the sole seed.
+_LOCATION_ONLY = re.compile(
+    r"^\s*(?:it|there|the\s+(?:community|town|city|village|cdp|hamlet))\s+"
+    r"(?:is\s+|was\s+)?(?:located|situated|lies|sits)\b", re.IGNORECASE)
+
+
+def _is_person_stub(sentence: str) -> bool:
+    """True for a bare "Firstname Lastname, epithet, epithet" title stub."""
+    t = sentence.strip()
+    if not t or len(t) > 110 or "." in t or t.count(",") < 1:
+        return False
+    if not _STUB_NAME.match(t.split(",")[0].strip()):
+        return False
+    if _STUB_VERB.search(t):
+        return False
+    return bool(_STUB_EPITHET.search(t))
+
+
+# ---------------------------------------------------------------------------
+# Sentences that cannot stand on their own.
+#
+# A harvested fact is posted alone in chat with no article around it, so any
+# sentence that leans on the paragraph it was cut from reads as nonsense. Four
+# kinds reached chat and every one of them passed the existing filters, which
+# were written for small-town census boilerplate rather than for this:
+#
+#   "But in that same year, the Latter Day Saint movement founder..."
+#   "In 1840, one hundred of those residents who did not have passports..."
+#   "Previously the Portswood Hotel, it was named after..."
+#   "What did Grima do?"
+#   "Historic Landmark plaque."
+#   "Seeds, such as pumpkin seeds or sunflower seeds"
+# ---------------------------------------------------------------------------
+
+#: Opens by pointing at something the reader has not been shown.
+_DANGLE_START = re.compile(
+    r"^\s*(?:but|however|nevertheless|nonetheless|yet|thus|therefore|hence|"
+    r"meanwhile|subsequently|afterwards?|later|additionally|moreover|"
+    r"furthermore|also|likewise|similarly|consequently|instead|otherwise|"
+    r"although|though|whereas|previously|thereafter)\b|"
+    r"^\s*(?:by then|since then|that same year|in that year|"
+    r"in the same year|at that time|at the time|following this|after this|"
+    r"during this|around this time|in the following)\b",
+    re.IGNORECASE,
+)
+
+#: Refers back to an antecedent that was in the article, not the message.
+_ANAPHOR = re.compile(
+    r"\b(?:those|these|such|both|many|several|all)\s+(?:of\s+)?(?:the\s+)?"
+    r"(?:residents|people|men|women|children|families|settlers|workers|"
+    r"soldiers|individuals|immigrants|slaves|prisoners|patients|students|"
+    r"cases|instances|buildings|houses|structures|streets|roads|areas|"
+    r"places|things|events|years|months|numbers|figures|changes|efforts|"
+    r"plans|problems|issues|rules|laws|records|documents|groups|companies|"
+    r"schools|churches|teams|players|artists|authors|films|books|songs|"
+    r"species|varieties|types|kinds|forms)\b|"
+    # Only the forms whose antecedent is always outside the sentence.
+    # "the latter" / "the former" / "the same" usually resolve in-sentence
+    # ("called 'Fremont Town', and under the latter name was platted in 1867")
+    # and dropping them cost a real fact in the Jerome MO regression test.
+    r"\bthe\s+(?:above|aforementioned|said)\b",
+    re.IGNORECASE,
+)
+
+_TERMINAL = re.compile(r"[.!?]\s*$")
+
+#: Presence of a finite verb. Deliberately over-inclusive: a false positive
+#: keeps a fragment, a false negative drops a real fact.
+_HAS_VERB = re.compile(
+    r"\b(?:is|are|was|were|be|been|being|has|have|had|does|did|do|can|could|"
+    r"will|would|shall|should|may|might|must|became|becomes|become|"
+    r"contains?|contained|includes?|included|lies|lay|stood|stands?|"
+    r"opened|opens?|closed|built|founded|established|named|renamed|serves?|"
+    r"served|held|holds?|won|began|begins?|ended|ends?|reached|reaches?|"
+    r"killed|died|born|lived|worked|played|led|produced|produces?|received|"
+    r"gave|made|took|found|created|used|known|called|shown|seen|taken|"
+    r"written|given|set|put|let|said|told|brought|bought|taught|"
+    r"thought|sought|fought|caught|shares?|boasts?|hosts?|sits?|marks?|"
+    r"spans?|covers?|keeps?|offers?|features?|consists?|comprises?|dates?|"
+    r"runs?|leads?|adds?|gives?|takes?|sees?|says?|shows?|tells?|notes?|"
+    r"lists?|means?|seems?|looks?|feels?|carries?|matches?|"
+    r"[a-z]{4,}ed|[a-z]{4,}es|[a-z]{3,}ies|[a-z]{3,}s)\b",
+    re.IGNORECASE,
+)
+
+#: A sentence that only enumerates rankings. Scores high, because every ordinal
+#: is a strong word, and is the least interesting thing an article can say:
+#: "Illinois has the fifth-largest GDP, the sixth-largest population, and the
+#: 25th-most land area."
+_ORDINAL_RANK = re.compile(
+    r"\b(?:\d+(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|"
+    r"eighth|ninth|tenth|eleventh|twelfth|twentieth|thirtieth|[a-z]{4,}th)[- ]?"
+    r"(?:largest|smallest|biggest|longest|shortest|highest|lowest|most|least|"
+    r"richest|oldest|youngest|busiest|densest|populous|deadliest)\b",
+    re.IGNORECASE,
+)
+
+#: Defines a concept rather than saying something about the subject: "The
+#: National Register of Historic Places is the official list of the Nation's
+#: historic places worthy of preservation."
+_CONCEPT_DEF = re.compile(
+    r"^\s*the\s+[\w\s'\u2019-]{3,70}?\s+is\s+(?:the\s+)?(?:official|a|an)\s+"
+    r"(?:list|register|term|name|act|law|award|designation|standard|agency|"
+    r"organisation|organization|system|method|process|practice|body|group|"
+    r"set of)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_dangling(sentence: str) -> bool:
+    """True when the sentence leans on the paragraph it was cut from."""
+    return bool(_DANGLE_START.match(sentence) or _ANAPHOR.search(sentence))
+
+
+def _is_fragment(sentence: str) -> bool:
+    """True for a heading, a list item or a question - none of which is a fact.
+
+    "Historic Landmark plaque." and "Seeds, such as pumpkin seeds or sunflower
+    seeds" both reached chat as facts. Neither is a sentence.
+    """
+    t = (sentence or "").strip()
+    if not t:
+        return True
+    if not _TERMINAL.search(t):
+        # A list item cut out of a bulleted list. Never a sentence.
+        return True
+    if t.endswith("?"):
+        return True
+    # A short run of words with no verb in it is a caption, not a sentence:
+    # "Historic Landmark plaque." The verb check is only trusted on short
+    # strings, because the verb list has false negatives and a long sentence
+    # that survives every other check is more likely real than fragmentary -
+    # it cost "the Henry Barnhisel House shares tales of..." when it applied
+    # to sentences of any length.
+    return len(t) < 60 and not bool(_HAS_VERB.search(t))
+
+
+def _is_boring(sentence: str) -> bool:
+    """True for ranking enumerations and concept definitions."""
+    if len(_ORDINAL_RANK.findall(sentence)) >= 2:
+        return True
+    return bool(_CONCEPT_DEF.match(sentence))
+
+
 def _is_filler(sentence: str) -> bool:
     """True for census/location boilerplate that is never a fun fact.
 
@@ -156,6 +378,13 @@ _wiki_lock = threading.Lock()
 _wiki_blocked_until = 0.0
 
 
+# Set True by bot.py when --debug / TWITCH_DEBUG=1 is on: prints which source
+# answered and the exact seed pool handed to the LLM, so a bad fact can be
+# traced to its source instead of guessed at.
+DEBUG = (os.environ.get("TWITCH_DEBUG", "").strip().lower()
+         in ("1", "true", "yes", "on")) or ("--debug" in sys.argv)
+
+
 def _wiki_blocked() -> bool:
     return time.time() < _wiki_blocked_until
 
@@ -176,6 +405,11 @@ def _note_wiki_429() -> None:
 # source down at once. Anonymous API use should stay well under ~1 req/s.
 _wiki_pace_lock = threading.Lock()
 _wiki_last_req = 0.0
+_EXTRACT_PAGE_CAP = 4   # follow `excontinue` at most this many pages
+# Bound on how much of a full article we keep in memory. Cuba, Missouri's is
+# ~7.6 KB; big cities run to a few hundred KB and everything past the first
+# sections is references and census tables anyway.
+_EXTRACT_CHAR_CAP = 20000
 _WIKI_PACE = 0.25
 
 
@@ -253,6 +487,9 @@ def _sentence_split(paragraph: str) -> list:
 
 def _sentences(text: str) -> list:
     """Split raw extract text into clean, readable sentences."""
+    # Search APIs hand back HTML entities ("Jan &amp; Dean"); the chat should
+    # never see them.
+    text = html.unescape(text or "")
     text = _CITE.sub("", text)
     text = _TEMPLATE.sub(" ", text)
     text = _TAG.sub(" ", text)
@@ -296,12 +533,50 @@ def _clip(text: str, cap: int) -> str:
     return text[:cap].rsplit(" ", 1)[0]
 
 
-def _trim(text: str, limit: int) -> str:
-    """Fit text to at most `limit` chars, ending at a clause boundary when
-    possible so we never chop mid-phrase ('ending a…')."""
+# End-of-sentence, except after an abbreviation: "at 6 p.m. on Thursday" is one
+# sentence, and splitting there cost the Frein fact its punchline.
+_ABBREV_END = re.compile(
+    r"(?:\b[AaPp]\.?[Mm]\.?|\b[Mm]rs?|\b[Mm]s|\b[Dd]r|\b[Ss]t|\b[Nn]o|"
+    r"\b[Vv]s|\betc|\b[JjSs]r|\b[Ii]nc|\b[Aa]ve|\b[Rr]d|\b[Uu]\.?[Ss]\.?"
+    r"|\b[Ee]\.?[Gg]|\b[Ii]\.?[Ee]|\b[Mm]t|\b[Ff]t|\b[Gg]ov)\.$")
+
+
+def _sentence_parts(text: str) -> list:
+    """Split into sentences, ignoring enders that belong to an abbreviation."""
+    parts, start = [], 0
+    for m in re.finditer(r"[.!?]\s+", text):
+        head = text[start:m.end() - 1].rstrip()
+        if _ABBREV_END.search(head):
+            continue
+        parts.append(text[start:m.end()].strip())
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def trim_to_fit(text: str, limit: int) -> str:
+    """Fit text to `limit` chars, keeping whole sentences whenever one fits.
+
+    Public so bot.py and the fact path share one implementation rather than two
+    that can drift.
+    """
     text = " ".join(text.split())
     if len(text) <= limit:
         return text
+    parts = _sentence_parts(text)
+    if len(parts) > 1:
+        kept, n = [], 0
+        for part in parts:
+            add = len(part) + (1 if kept else 0)
+            if n + add > limit:
+                break
+            kept.append(part)
+            n += add
+        if kept:
+            out = " ".join(kept)
+            return out if out.endswith((".", "!", "?")) else out + "."
     for sep in ("; ", " — ", ", "):
         head = text[:limit]
         if sep not in head:
@@ -309,8 +584,19 @@ def _trim(text: str, limit: int) -> str:
         cut = head.rsplit(sep, 1)[0].rstrip(" ,;:-—")
         if len(cut) >= int(limit * 0.55):
             return cut + "…"
-    cut = text[:limit].rsplit(" ", 1)[0]
-    return cut.rstrip(" ,;:-—") + "…"
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—") + "…"
+
+
+def _trim(text: str, limit: int) -> str:
+    """Fit text to at most `limit` chars, never mid-sentence if it can help it.
+
+    Preference order: whole sentences, then clause boundaries, then a word
+    boundary. Sarcoxie, MO posted "...contributing buildings that…" because the
+    only clause break in the first 200 chars landed at 89 characters, under the
+    keep-if-long-enough threshold, so it fell through to a word chop - even
+    though a complete 146-character sentence was sitting right there.
+    """
+    return trim_to_fit(text, limit)
 
 
 def _fit_fact(fact: str, limit: int, opts: dict) -> str:
@@ -346,19 +632,100 @@ def _overlap(a: str, b: str) -> float:
     return len(sa & sb) / min(len(sa), len(sb))
 
 
+def _subject_score(sentence: str, subject: str) -> int:
+    """Bonus for facts that actually name what was asked about.
+
+    "!funfact huorns" returned a definition of the National Register of
+    Historic Places, and "!funfact trail mix" returned "Seeds, such as pumpkin
+    seeds" - both technically sentences, neither about the thing asked for.
+    This is a ranking bonus rather than a hard drop so a stub article with one
+    usable sentence still produces an answer.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", (subject or "").lower())
+             if len(w) >= 4]
+    if not words:
+        return 0
+    low = sentence.lower()
+    hit = sum(1 for w in words if w in low)
+    return 4 * hit if hit else -6
+
+
+def _names_subject(sentence: str, subject: str) -> bool:
+    """Does this retrieved sentence actually mention what was asked for?
+
+    This is the check a search step needs and vocabulary grounding cannot
+    supply. Take a true sentence about one thing, swap in the name someone
+    typed, and every capitalised word in it is still attested - which is how
+    the bot came to post:
+
+        Stinker claims to be "the world's most famous landmark," according to
+        Explore magazine and U.S. News Travel.
+
+    A search for "stinker" returned a sentence about a real landmark. Nothing
+    was invented word by word; only the subject had been changed, and no check
+    was asking whether the sentence was about the thing asked for.
+    """
+    words = _topic_words(subject)
+    if not words:
+        return False
+    low = _fold(sentence)
+    # The leading word, not any word. "low watts" shares "watts" with an
+    # article about the Watts Towers in Los Angeles, and any-word matching
+    # posted that; the thing asked about is the first word, the same rule
+    # _topic_match uses when it picks an article.
+    head = words[0]
+    if head in low:
+        return True
+    # huorns/Huorn, Wormtongue/Wormtongues.
+    return len(head) >= 5 and head[:-1] in low
+
+
+def _is_echo(sentence: str, subject: str) -> bool:
+    """True when the "fact" only restates what was already typed.
+
+    "!funfact twitch degenerates" answered "twitch degenerates." A search
+    snippet that is the query echoed back, with a full stop, gets past the
+    fragment check (it has a full stop and 'degenerates' is a verb) and past
+    the attribution check (it names the subject, because it *is* the subject).
+    What it lacks is a single word the asker did not already type.
+    """
+    if not subject:
+        return False
+    fact_words = set(_topic_words(sentence))
+    if not fact_words:
+        return True
+    return fact_words <= set(_topic_words(subject))
+
+
 def _ranked_facts(sentences: list, spice: bool = False,
-                  limit: int = 200, count: int = 6) -> list:
+                  limit: int = 200, count: int = 6,
+                  subject: str = "", require_subject: bool = False) -> list:
     """Rank sentences and return up to `count` distinct, trimmed facts.
 
     The top sentence is always kept (so every place gets an answer), but
     lower-ranked sentences are only kept if they're interesting (score >= 2) —
     this filters out dull "population was..." / "incorporated in..." filler.
     """
-    ranked = sorted(((s, _score(s, spice)) for s in sentences),
+    ranked = sorted(((s, _score(s, spice) + _subject_score(s, subject))
+                     for s in sentences),
                     key=lambda p: (-p[1], len(p[0])))
     out, seen_norm = [], []
     for s, sc in ranked:
-        if _is_filler(s):
+        # All four of these are skipped outright, even when nothing else
+        # survives: an empty pool makes the caller fall through to the next
+        # source (or a related article) instead of posting a census line, a
+        # "it is located near..." line, SEO boilerplate or a namesake person.
+        if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
+                or _LOCATION_ONLY.match(s) or _is_dangling(s)
+                or _is_fragment(s) or _is_boring(s)):
+            continue
+        # Search snippets have no title gate: unlike the Wikipedia path, which
+        # picks an article by title first, whatever the engine returned is the
+        # whole basis for the answer. So these must name the subject, or the
+        # source is asked to say nothing at all.
+        if require_subject and subject and not _names_subject(s, subject):
+            continue
+        if _is_echo(s, subject):
             continue
         if sc < 2 and out:
             break
@@ -408,19 +775,73 @@ _COUNTRIES = {
 }
 
 
+# Region names, longest first, matched on word boundaries (see
+# _text_names_other_region for why substring matching is not safe here).
+_REGION_NAMES = sorted(set(_US_STATES.values()) | set(_CA_PROVINCES.values())
+                       | set(_COUNTRIES.values()), key=len, reverse=True)
+_REGION_NAME_RES = [(n, re.compile(r"\b" + re.escape(n) + r"\b"))
+                    for n in _REGION_NAMES]
+# The country a US state lives in — never "another region".
+_US_COUNTRY_WORDS = {"united states", "united states of america", "usa"}
+# Reverse of _US_STATES / _CA_PROVINCES: viewers type full state names
+# ('Indian Lake, Missouri'), and the checks below are keyed by abbreviation.
+_US_STATE_BY_NAME = {v: k for k, v in _US_STATES.items()}
+_CA_PROVINCE_BY_NAME = {v: k for k, v in _CA_PROVINCES.items()}
+
+
+
+# Words that are part of a place name, not a place on their own — so
+# "Kansas City" is never split into "Kansas" + "City", and "Cuba City
+# Wisconsin" keeps "Cuba City" as the town.
+_GENERIC_PLACE_WORDS = {
+    "city", "town", "township", "village", "borough", "county", "lake",
+    "lakes", "springs", "falls", "beach", "heights", "junction", "station",
+    "park", "rapids", "hill", "hills", "creek", "river", "point", "fork",
+}
+
+
+def _split_trailing_region(query: str):
+    """('Cuba Missouri' -> ('Cuba', 'missouri')); ('', '') if not applicable.
+
+    Viewers type the state without a comma. Losing the region is worse than a
+    cosmetic problem: with no region, 'Cuba, Missouri' scores 118 and the
+    island nation scores 120, so the country outranks the town, and every
+    region guard in this module switches itself off.
+    """
+    words = query.strip().split()
+    if len(words) < 2:
+        return "", ""
+    known = set(_US_STATES) | set(_US_STATE_BY_NAME) | set(_CA_PROVINCES) \
+        | set(_CA_PROVINCE_BY_NAME)
+    for n in (2, 1):                      # "north carolina" before "carolina"
+        if len(words) <= n:
+            continue
+        cand = " ".join(words[-n:]).lower().strip(".")
+        if cand not in known:
+            continue
+        rest = " ".join(words[:-n]).strip(" ,;")
+        if rest and rest.lower().strip(".") not in _GENERIC_PLACE_WORDS:
+            return rest, cand
+    return "", ""
+
+
 def _query_core(query: str) -> str:
-    """The place name with the region (after a comma) removed: 'Mount Cobb'."""
+    """The place name with the region removed: 'Mount Cobb'."""
+    if not re.search(r"[,;|]", query):
+        rest, region = _split_trailing_region(query)
+        if region:
+            query = rest
     core = re.split(r"[,;|]", query, maxsplit=1)[0]
     core = re.sub(r"[^a-z0-9\s]", " ", core.lower())
     return " ".join(core.split())
 
 
 def _query_region(query: str) -> str:
-    """The region part after the first comma, if any: 'PA', 'Iowa', ..."""
+    """The region, with or without a comma: 'PA', 'Iowa', 'missouri'."""
     parts = re.split(r"[,;|]", query, maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    return re.sub(r"[^a-z0-9\s]", " ", parts[1].lower()).strip()
+    if len(parts) >= 2:
+        return re.sub(r"[^a-z0-9\s]", " ", parts[1].lower()).strip()
+    return _split_trailing_region(query)[1]
 
 
 def _title_tokens(title: str) -> str:
@@ -447,23 +868,66 @@ def _text_names_other_region(text: str, region: str) -> bool:
     than the one requested. Used two ways: on a title, to reject same-named
     places in other states ('Lakemont, Washington' when the viewer asked for
     Lakemont, PA); and on an article's opening, to reject a bare redirect
-    title that actually points at another state's place."""
+    title that actually points at another state's place.
+
+    Two traps this has to avoid:
+
+    * "United States" is not another region — nearly every US article lead
+      reads "a city in X County, <State>, United States", and treating that as
+      a foreign mention discarded the town's own article outright, so the
+      lookup fell through to web search.
+    * Names must match on word boundaries and must not fire on a longer
+      requested name: "Arkansas" is not "Kansas", and "West Virginia" is not
+      "Virginia".
+    """
     if not region:
         return False
-    t = _title_tokens(text)
-    requested = {region, _US_STATES.get(region, ""), _CA_PROVINCES.get(region, ""),
+    text_norm = _title_tokens(text)
+    # Viewers type either form ("Girard, OH" or "Girard, Ohio"), and _US_STATES
+    # is keyed by abbreviation — so accept both, and treat the country as home
+    # for either. Getting this wrong for full state names discarded the town's
+    # own article again ("Indian Lake ... Missouri, United States"), which is
+    # exactly what left the 09:29 lookup with nothing but a song article.
+    us_abbr = region if region in _US_STATES else _US_STATE_BY_NAME.get(region, "")
+    ca_abbr = region if region in _CA_PROVINCES else _CA_PROVINCE_BY_NAME.get(region, "")
+    requested = {region, us_abbr, _US_STATES.get(us_abbr, ""),
+                 ca_abbr, _CA_PROVINCES.get(ca_abbr, ""),
                  _COUNTRIES.get(region, "")}
     requested.discard("")
-    for name in set(_US_STATES.values()) | set(_CA_PROVINCES.values()) | set(_COUNTRIES.values()):
-        if name in t and name not in requested:
+    if us_abbr:
+        requested |= _US_COUNTRY_WORDS      # "United States" == same place
+    elif ca_abbr:
+        requested.add("canada")
+    for name, rx in _REGION_NAME_RES:
+        if name in requested:
+            continue
+        # "virginia" inside a requested "west virginia" is not another region.
+        if any(name in req for req in requested):
+            continue
+        if rx.search(text_norm):
             return True
     return False
 
 
+# Works and name pages that share a place's name. "Indian Lake (song)" is the
+# 1968 Cowsills single; its Cover-versions list says "Jan & Dean included it on
+# their 1985 album Silver Summer", and that sentence was posted as a fun fact
+# about Indian Lake, Ohio and then about Indian Lake, Missouri — where "it"
+# meant the song all along. The title matches the place exactly, so neither the
+# region check nor the name-the-place check can catch it.
+_WORK_TITLE = re.compile(
+    r"\((?:song|songs|single|album|band|music|film|movie|tv series|television "
+    r"series|episode|novel|book|poem|play|musical|opera|painting|sculpture|"
+    r"video game|game|character|surname|given name|name|disambiguation|ship|"
+    r"company|brand|magazine|newspaper|award)\)", re.IGNORECASE)
+
+
 def _is_road_or_meta_title(title: str) -> bool:
-    """Road/highway/route and meta pages are never the fun fact for a town."""
+    """Road/highway/route, meta and works pages are never the fun fact."""
     t = title.lower()
     if t.startswith(("list of", "category:", "template:", "wikipedia:", "portal:", "file:")):
+        return True
+    if _WORK_TITLE.search(title):
         return True
     return any(w in t for w in (" route ", " route", "highway", "interstate",
                                 "county road", "state road", "turnpike",
@@ -504,6 +968,93 @@ def _title_relevance(title: str, core: str, region: str) -> int:
     return score
 
 
+# Harvested articles must actually be about a place. The bare-name search that
+# finds related articles ("Lakemont Park" for Lakemont, PA) also returns every
+# person who shares the town's name, and each of those titles scores 120 in
+# _title_relevance (an exact match on the core word) so they clear the >= 70
+# gate. For "Jerome, Missouri" that poured in Saint Jerome of Stridon ("He is
+# best known for his translation of the Bible into Latin"), the writer Jerome
+# K. Jerome, and Jerome Barnes the Missouri state representative.
+_BIOGRAPHICAL = re.compile(
+    # "was an early Christian priest", "is an American politician",
+    # "(2 May 1859 - 14 June 1927) was an English writer and humorist".
+    r"\b(?:was|is|were|are)\s+(?:an?\s+)?(?:early|former|late|retired|current)?\s*"
+    r"(?:american|english|british|irish|scottish|welsh|canadian|australian|"
+    r"new zealand|french|german|italian|spanish|portuguese|dutch|swedish|"
+    r"norwegian|danish|polish|russian|japanese|chinese|indian|mexican|brazilian|"
+    r"african|greek|roman|byzantine|czech|hungarian|turkish|israeli|egyptian)?\s*"
+    r"(?:christian|catholic|orthodox|protestant|jewish|muslim)?\s*"
+    r"(?:politician|actor|actress|writer|author|poet|novelist|playwright|"
+    r"screenwriter|journalist|editor|publisher|critic|singer|songwriter|"
+    r"musician|composer|conductor|pianist|guitarist|drummer|violinist|rapper|"
+    r"dancer|choreographer|priest|theologian|bishop|saint|historian|"
+    r"philosopher|scientist|physicist|chemist|mathematician|astronomer|"
+    r"biologist|geologist|doctor|physician|surgeon|nurse|professor|teacher|"
+    r"lawyer|attorney|judge|architect|engineer|inventor|artist|painter|"
+    r"sculptor|photographer|filmmaker|director|producer|animator|comedian|"
+    r"model|athlete|sportsman|coach|referee|umpire|manager|businessman|"
+    r"entrepreneur|financier|banker|diplomat|ambassador|governor|senator|"
+    r"representative|congressman|congresswoman|mayor|monarch|king|queen|"
+    r"emperor|prince|princess|duke|duchess|count|countess|baron|general|"
+    r"admiral|soldier|sailor|officer|veteran|explorer|aviator|astronaut|"
+    r"baseball|football|basketball|hockey|cricket|soccer|golf|tennis|boxing|"
+    r"racing|swimming|cyclist|serial killer|criminal|gangster|outlaw|sheriff|"
+    r"marshal|detective|spy|monk|nun|missionary|evangelist|preacher|rabbi|"
+    r"translator|confessor|historiographer)\b",
+    re.IGNORECASE,
+)
+# A lifespan in the lead is the other reliable sign of a biography:
+# "Jerome of Stridon (... c. 342-347 - 30 September 420)", "(born 16 March 1963)".
+_LIFESPAN = re.compile(
+    r"\((?:[^()]{0,80}?(?:\bb\.\s?|\bborn\b|\bd\.\s?|\bdied\b|\bc\.\s?\d|"
+    r"\b(?:1[5-9]|20)\d\d\s*[–—-]\s*(?:1[5-9]|20)\d\d|\bfl\.))[\s\S]{0,60}?\)"
+    r"|\bborn\s+in\s+(?:january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)\b",
+    re.IGNORECASE,
+)
+
+
+# Not a person either: an organisation, a work, a ship. "Conway, missouri" at
+# 10:52 posted "this town's got quite the maritime library stacked up" — two
+# sentences lifted from Conway Publishing (pageid 29203197), a British imprint
+# of Bloomsbury, thousands of miles from the Ozarks.
+_NOT_A_PLACE = re.compile(
+    r"\b(?:is|was|were|are)\s+(?:an?\s+)?(?:imprint|subsidiary|division|brand|"
+    r"label|company|corporation|firm|conglomerate|publisher|publishing house|"
+    r"newspaper|magazine|journal|periodical|broadcaster|network|charity|"
+    r"organisation|organization|nonprofit|non-profit|band|record label|"
+    r"ship|schooner|frigate|warship|vessel|aircraft|film|movie|"
+    r"television (?:series|show)|song|album|book|novel|video game|award|"
+    r"prize|competition|festival|brand name|trademark)\b|"
+    r"\bfounded in (?:1[6-9]|20)\d\d as an?\b",
+    re.IGNORECASE,
+)
+
+
+def _is_non_place_article(extract: str) -> bool:
+    """True if an article's opening describes a person, company or work rather
+    than a place.
+
+    Applied to every harvested title. Related-article harvesting is what lets a
+    tiny town borrow facts from a bigger article that shares its name — that is
+    how Lakemont, PA gets Leap-The-Dips from "Lakemont Park". But the same
+    search returns namesakes, and their sentences carry nothing tying them to
+    the town: "Barnes was born in Mississippi" (Jerome Barnes), "It is best
+    known for its publications dealing with nautical subjects" (Conway
+    Publishing). Requiring the place name instead is not an option: the
+    Leap-The-Dips sentence never says "Lakemont" either.
+    """
+    lead = " ".join((extract or "").split())[:300]
+    if not lead:
+        return False
+    return bool(_LIFESPAN.search(lead) or _BIOGRAPHICAL.search(lead)
+                or _NOT_A_PLACE.search(lead))
+
+
+# Kept so the earlier name still resolves in checks and older tests.
+_is_person_article = _is_non_place_article
+
+
 def _is_disambiguation(extract: str) -> bool:
     head = " ".join(extract.split())[:140].lower()
     return any(k in head for k in (
@@ -538,28 +1089,29 @@ def _wiki_search(query: str) -> list:
 def _wiki_extract(title: str, exchars: int = 4000) -> str:
     if _wiki_blocked():
         return ""
-    # Fetch the start of the article (lead + beginning of History etc.),
-    # not just the intro — the fun facts usually live a little deeper.
-    try:
-        data = _http_get_json(
-            WIKI_API,
-            {
+    # exchars=0 means "the whole article". MediaWiki caps exchars at 1200 and
+    # silently clamps anything larger, so asking for 4000 or 7000 returns the
+    # lead only — which is why every town's best material was invisible. Omit
+    # the parameter entirely and a single-title request returns everything.
+    params = {
                 "action": "query",
                 "prop": "extracts",
                 "explaintext": 1,
-                "exchars": exchars,
                 "titles": title,
                 "redirects": 1,
                 "format": "json",
                 "formatversion": "2",
-            },
-        )
+    }
+    if exchars:
+        params["exchars"] = exchars
+    try:
+        data = _http_get_json(WIKI_API, params)
     except (urllib.error.URLError, OSError, ValueError):
         return ""
     pages = data.get("query", {}).get("pages", [])
     if not pages:
         return ""
-    return pages[0].get("extract", "") or ""
+    return (pages[0].get("extract", "") or "")[:_EXTRACT_CHAR_CAP]
 
 
 def _wikipedia(query: str, spice: bool = False, limit: int = 200):
@@ -581,7 +1133,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             if _is_road_or_meta_title(title):
                 continue
             rel = _title_relevance(title, core, region)
-            if rel >= 70:
+            if rel >= 70 and not _is_non_place_article(it["extract"]):
                 items.append((rel, title, it["extract"]))
 
     gather(full)
@@ -615,20 +1167,38 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     place = (region_titles or core_titles or [items[0][1]])[0]
 
     extracts = {t: e for _, t, e in items}
+    # The combined search+extract call is capped at 1200 chars a page, so the
+    # place's own article arrived lead-only. Re-fetch just that one article in
+    # full: Cuba MO's World's Largest Rocking Chair, Bette Davis and Amelia
+    # Earhart all sit below character 1200.
+    if place and not _wiki_blocked():
+        full = _wiki_extract(place, exchars=0)
+        if len(full) > len(extracts.get(place, "")):
+            extracts[place] = full
     pool, pool_norm = [], []
 
-    def harvest(titles):
+    def harvest(titles, require_core=False):
         for title in titles:
             extract = extracts.get(title, "")
             if not extract or _is_disambiguation(extract):
+                continue
+            if title != place and _is_non_place_article(extract):
                 continue
             # A bare redirect title may point at another state's place — check
             # the article's opening statement names the requested region.
             if _text_names_other_region(extract[:250], region):
                 continue
             facts = _ranked_facts(_filter_definitions(_sentences(extract)),
-                                  spice=spice, limit=limit, count=8)
+                                  spice=spice, limit=limit, count=8,
+                                  subject=core or full)
             for f in facts:
+                # Sentences from an article that merely shares a word with the
+                # place ("Avon Lake, Ohio" / "Lake County, Ohio" both score 128
+                # for a query about Indian Lake, Ohio) are only usable if they
+                # actually name the place. Without this the 09:19 lookup posted
+                # "Its county seat is Painesville" — Lake County, 100 miles away.
+                if require_core and core and core not in f.lower():
+                    continue
                 fn = " ".join(re.sub(r"[^a-z0-9 ]", "", f.lower()).split())
                 if any(_overlap(fn, pn) > 0.7 for pn in pool_norm):
                     continue
@@ -643,7 +1213,7 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     if len(pool) < 3:
         harvest(same_name_titles[:3])
     if len(pool) < 3:
-        harvest(other_titles[:3])
+        harvest(other_titles[:3], require_core=True)
 
     if not pool:
         return None
@@ -660,7 +1230,8 @@ def _duckduckgo(query: str, spice: bool = False, limit: int = 200):
     heading = (data.get("Heading") or "").strip()
     if abstract:
         facts = _ranked_facts(_filter_definitions(_sentences(abstract)),
-                              spice=spice, limit=limit)
+                              spice=spice, limit=limit, subject=query,
+                              require_subject=True)
         if facts:
             return {"place": heading or query, "facts": facts}
     return None
@@ -676,11 +1247,16 @@ def _google_search(query: str, spice: bool, limit: int, options: dict):
     key = (options.get("google_api_key") or "").strip()
     cx = (options.get("google_cx") or "").strip()
     if not key or not cx:
+        if DEBUG:
+            print("[funfacts] google source not configured "
+                  "(needs BOTH google_api_key and google_cx)", flush=True)
         return None
 
-    q = query
-    if spice:
-        q = f"{query} history crime scandal"  # nudge toward the racier results
+    # Ask the web what is *interesting* about the place. Spicy mode used to
+    # append "history crime scandal", which filled the seed list with
+    # crime-stats boilerplate and one recent police story — and the model then
+    # padded that thin, dark grist into invented dark history.
+    q = query if not spice else f"{query} history facts famous landmark record"
 
     data = _http_get_json(
         GOOGLE_API,
@@ -717,9 +1293,13 @@ def _serper_search(query: str, spice: bool, limit: int, options: dict):
     """
     key = (options.get("serper_api_key") or "").strip()
     if not key:
+        if DEBUG:
+            print("[funfacts] serper source not configured (no serper_api_key)",
+                  flush=True)
         return None
 
-    q = f"{query} history crime scandal" if spice else query
+    # Same as _google_search: ask for interesting, not for crime.
+    q = query if not spice else f"{query} history facts famous landmark record"
     body = json.dumps({"q": q, "num": 8}).encode("utf-8")
     req = urllib.request.Request(
         SERPER_API,
@@ -755,7 +1335,8 @@ def _serper_search(query: str, spice: bool, limit: int, options: dict):
         sentences = [t for t in (it.get("snippet") or "" for it in items)
                      if len(t.strip()) >= 12]
 
-    facts = _ranked_facts(sentences, spice=spice, limit=limit, count=4)
+    facts = _ranked_facts(sentences, spice=spice, limit=limit, count=4,
+                          subject=query, require_subject=True)
     if not facts:
         return None
     return {"place": query, "facts": facts}
@@ -785,12 +1366,21 @@ def _load_spicy_db() -> list:
 def _spicy_db(location: str, limit: int):
     full = _norm(location)
     core = _norm(re.split(r"[,;|]", location, maxsplit=1)[0])
+    region = _query_region(location)
     for entry in _load_spicy_db():
         keys = [_norm(k) for k in entry.get("keys", [])]
-        if full in keys or core in keys:
-            facts = [f for f in (_trim(x, limit) for x in entry.get("facts", [])) if f]
-            if facts:
-                return {"place": entry.get("name") or location, "facts": facts}
+        if full not in keys and core not in keys:
+            continue
+        # A curated entry describes ONE place, but its keys are often
+        # stateless ("girard", "indian lake"). Without a region check,
+        # 'Girard, PA' was served the Girard, Ohio facts and 'Indian Lake,
+        # Missouri' the Ohio lake's — the same wrong-place error the harvest
+        # fixes were made to stop, reintroduced by the curated data.
+        if region and not _title_matches_region(entry.get("name") or "", region):
+            continue
+        facts = [f for f in (_trim(x, limit) for x in entry.get("facts", [])) if f]
+        if facts:
+            return {"place": entry.get("name") or location, "facts": facts}
     return None
 
 
@@ -809,10 +1399,12 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
     core = " ".join(re.sub(r"[^a-z0-9 ]", " ", _query_core(location).lower()).split())
     if not core or len(core) < 2:
         return []
+    region = _query_region(location)
 
     existing_norm = [" ".join(re.sub(r"[^a-z0-9 ]", "", f.lower()).split()) for f in existing]
     core_title = _title_tokens(place_title)
     found = []
+    found_norm = []
 
     for hint in _SPICY_HINTS[:3]:
         if len(found) >= max_facts or _wiki_blocked():
@@ -834,9 +1426,23 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
             extract = it["extract"]
             if not extract or _is_disambiguation(extract):
                 continue
+            # Same-name places are everywhere, and this dig searches by name
+            # alone. "Mount Vernon, MO" surfaced the Mount Vernon Place Historic
+            # District in Baltimore, Maryland - listed on the National Register
+            # 11 Nov 1971 - and posted it as one of the Missouri town's facts,
+            # because the only gate here was "the sentence contains the name".
+            # harvest() has always checked the region; this path never did.
+            if _text_names_other_region(extract[:250], region):
+                continue
+            if _is_non_place_article(extract):
+                continue
             for s in _sentences(extract):
                 s_norm = " ".join(re.sub(r"[^a-z0-9 ]", " ", s.lower()).split())
                 if core not in s_norm:
+                    continue
+                # A sentence can name the wrong state even inside a correct
+                # article, so check the sentence too.
+                if _text_names_other_region(s, region):
                     continue
                 if _score(s, spice=True) < 1:
                     continue
@@ -846,39 +1452,60 @@ def _spicy_dig(place_title: str, location: str, existing: list, limit: int,
                 fn = " ".join(re.sub(r"[^a-z0-9 ]", "", fact.lower()).split())
                 if any(_overlap(fn, e) > 0.7 for e in existing_norm):
                     continue
-                if any(_overlap(fn, f) > 0.7 for f in found):
+                # Compare normalised to normalised: `found` holds the raw
+                # clipped text, so this used to match nothing and the same
+                # sentence came back once per search hint.
+                if any(_overlap(fn, f) > 0.7 for f in found_norm):
                     continue
                 found.append(fact)
+                found_norm.append(fn)
                 if len(found) >= max_facts:
                     break
     return found
 
 
 def _wiki_extracts(titles: list, exchars: int = 4000) -> dict:
-    """Fetch the text of several articles in ONE request (title -> extract)."""
+    """Fetch the text of several articles (title -> extract).
+
+    Plain-text extracts (`explaintext=1`) are capped at **one page per
+    request** for anonymous callers: the API answers with a warning
+    ('"exlimit" was too large ... lowered to 1'), returns the first page only
+    and hands back a `continue` token. Requesting `exlimit=max` and reading the
+    reply once therefore silently yields a single extract — every other title
+    comes back empty and gets dropped, which is how a town's real claim to
+    fame (living in a *related* article) went missing. So follow the token,
+    bounded so one lookup can't turn into a dozen requests.
+
+    `exchars` is likewise capped at 1200 by the API for plain-text extracts.
+    """
     if not titles or _wiki_blocked():
         return {}
-    try:
-        data = _http_get_json(
-            WIKI_API,
-            {
-                "action": "query",
-                "titles": "|".join(titles),
-                "prop": "extracts",
-                "explaintext": 1,
-                "exchars": exchars,
-                "exlimit": "max",
-                "format": "json",
-                "formatversion": "2",
-            },
-        )
-    except (urllib.error.URLError, OSError, ValueError):
-        return {}
+    params = {
+        "action": "query",
+        "titles": "|".join(titles),
+        "prop": "extracts",
+        "explaintext": 1,
+        "exchars": min(exchars, 1200),
+        "exlimit": "max",
+        "format": "json",
+        "formatversion": "2",
+    }
     out = {}
-    for page in data.get("query", {}).get("pages", []):
-        t = page.get("title", "")
-        if t:
-            out[t] = page.get("extract", "") or ""
+    for _ in range(min(len(titles), _EXTRACT_PAGE_CAP)):
+        if _wiki_blocked():
+            break
+        try:
+            data = _http_get_json(WIKI_API, params)
+        except (urllib.error.URLError, OSError, ValueError):
+            break
+        for page in data.get("query", {}).get("pages", []):
+            t = page.get("title", "")
+            if t and page.get("extract") and t not in out:
+                out[t] = page["extract"]
+        cont = data.get("continue") or {}
+        if not cont.get("excontinue") or len(out) >= len(titles):
+            break
+        params.update(cont)  # excontinue + continue: "||"
     return out
 
 
@@ -987,6 +1614,27 @@ _EXPLICIT = re.compile(
     re.IGNORECASE,
 )
 
+# Taste backstop: turning a real killing, execution or lynching into
+# entertainment ("a hanging party went down") is never acceptable, even when
+# the underlying fact happens to be true. Matched lines are dropped like
+# explicit ones — and if everything is dropped the bot posts the plain facts.
+# A literal "murder mystery" dinner/party is a real attraction, so it is
+# excluded from the first alternative.
+_TASTELESS = re.compile(
+    r"\b(hang(?:ing|ed)?|lynch(?:ing|ed)?|noose|gallows|execution|murder|"
+    r"massacre|slaughter|suicide|corpse)\b(?:\s+(?!mystery\b)\w+){0,2}\s*"
+    r"\b(party|parties|bash|festival|hoedown|celebration|soiree|rager)\b|"
+    r"\b(party|bash|festival|hoedown|celebration)\b(?:\s+\w+){0,2}\s*"
+    r"\b(hanging|lynching|noose|gallows|murder|massacre)\b|"
+    # Flippant idiom for killing somebody: "they really dropped the axe on
+    # this one guy", "a necktie party", "took him for a ride".
+    r"\b(dropp\w+|hand\w*|serv\w+|giv\w+|took)\b(?:\s+\w+){0,3}\s*"
+    r"\b(the axe|him for a ride|a ride)\b|"
+    r"\bnecktie (party|parties|social)\b|\brope party\b|"
+    r"\bstretched (his|her|their) neck\b|\bsent (him|her|them) up the river\b",
+    re.IGNORECASE,
+)
+
 # Reasoning models (and OpenRouter's "openrouter/free" auto-router) sometimes
 # return their chain-of-thought as text before the actual facts — "Here's a
 # thinking process:", "1. Analyze the input:", "Final answer:" … These are meta
@@ -1005,7 +1653,48 @@ _META_LINE = re.compile(
 # mentions a year or a capitalized name not already present in the seed facts,
 # so the chat never gets a fabricated "Devil Jack Schramm"-style fact.
 _YEAR = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})s?\b")
+# "'04" style year references — the model's favourite way to smuggle in a date
+# that no source fact contains (the seeds said "Jan. 4", not 2004).
+_SHORT_YEAR = re.compile(r"['\u2019](\d{2})\b")
 _CAP_WORD = re.compile(r"\b[A-Z][a-z]{2,}\b")
+# Common shortenings of place names the model likes to use. Without this the
+# filter drops a TRUE line — "...bank founder from Philly" was dropped because
+# the seed said "Philadelphia" — while letting invented lines through.
+_CAP_ALIASES = {
+    "philly": "philadelphia", "phila": "philadelphia", "cincy": "cincinnati",
+    "frisco": "san francisco", "chi": "chicago", "detriot": "detroit",
+    "columbus ohio": "columbus", "kc": "kansas city", "nola": "new orleans",
+}
+# Reputation, significance and genre labels are claims too. "Surf rock legends
+# Jan & Dean ... putting this sleepy Missouri spot on the musical map" adds four
+# assertions no source made — the band's genre, that they are legends, that the
+# town is sleepy, and that the album made it famous. _claims() saw none of them
+# because they are ordinary words, so the line was posted verbatim.
+_REPUTATION = re.compile(
+    r"\bclaim(?:s|ed)?\s+to\s+fame\b|\bput(?:s|ting)?\s+.{0,40}?\bon\s+the\s+"
+    r"(?:\w+\s+)?map\b|\bmade?\s+.{0,30}?famous\b|\blegend(?:s|ary)?\b|"
+    r"\biconic\b|\bworld[- ](?:famous|renowned)\b|\bfamous(?:ly)?\b|"
+    r"\brenowned\b|\bcelebrated\b|\bnotorious(?:ly)?\b|\bhidden\s+gem\b|"
+    r"\bmust[- ]see\b|\bsleepy\b|\bquaint\b|\bcharming\b|\bidyllic\b|"
+    r"\bpicturesque\b|\btimeless\b|\bbeloved\b|\bstoried\b|"
+    r"\bthe\s+star\b|\bproud\b|\bcrown\b|\bbustling\b|\bheart\s+of\s+the\b|"
+    r"\bgem\s+of\b|\bshowpiece\b|\bboasts\b|"
+    r"\bsurf\s+rock\b|\brock\s+(?:legends?|icons?)\b|\bpunk\s+rock\b|"
+    r"\bhip\s+hop\b|\bcountry\s+music\b|\bheavy\s+metal\b",
+    re.IGNORECASE,
+)
+# A residence claim about a person is the namesake trap: "Joe Girard ... called
+# Girard home" adds a fact (that he lived there) which no source states, and
+# slips past the name check because "Girard" is already in the corpus. Such a
+# line is only allowed if some seed actually places someone in the town.
+_RESIDENCE = re.compile(
+    r"\b(?:called|made|makes|claims?|claiming|counts?)\s+\S+\s+"
+    r"(?:his|her|their)?\s*home\b|\bhometown\b|\bhome\s+town\b|"
+    r"\bhailed?\s+from\b|\bgrew\s+up\s+in\b|\bnative\s+of\b|"
+    r"\b(?:born|raised|reared)\s+in\b|"
+    r"\blived\s+in\b|\blocal\s+(?:legend|hero|boy|girl|son|daughter)\b",
+    re.IGNORECASE,
+)
 _GROUNDED_STOP = {
     # determiners / pronouns
     "the", "a", "an", "this", "that", "these", "those", "some", "many", "most",
@@ -1037,29 +1726,307 @@ _GROUNDED_STOP = {
     "fifth",
 }
 
+# Regional (county/state) dig results are marked with this prefix, both so chat
+# readers can tell the fact isn't about the town itself and so the grounding
+# filter knows not to let the LLM re-attribute it to the town.
+_AREA_PREFIX = "In the area: "
 
-def _grounded_filter(lines: list, place: str, location: str, seed_facts: list) -> list:
-    """Drop LLM lines that invent names/dates not present in the seed facts."""
+# Claim concepts: the substance of a fact. A rewrite may reword freely, but a
+# concept in this table that appears in the LLM's line and nowhere in the seed
+# facts is an invented claim — the lowercase equivalent of "Devil Jack
+# Schramm", which the capitalised-name check above cannot see.
+_CLAIM_CONCEPTS = (
+    ("hanging", r"\bhang(?:s|ing|ed)?\b|\bnoose\w*\b|\bgallows\b"),
+    ("lynching", r"\blynch\w*\b"),
+    ("killing", r"\bmurder\w*\b|\bkill\w*\b|\bslay\w*\b|\bslain\b|\bhomicide\w*\b|"
+                r"\bmanslaughter\b"),
+    ("shooting", r"\bshoot\w*\b|\bshots?\b|\bsniper\w*\b|\bgunfight\w*\b|"
+                 r"\bshootout\w*\b|\bmassacre\w*\b|\bambush\w*\b"),
+    ("robbery", r"\brobber\w*\b|\bheist\w*\b|\bburglar\w*\b|\bholdup\w*\b|"
+                r"\bstickup\w*\b"),
+    ("prison", r"\bprison\w*\b|\bjail\w*\b|\binmate\w*\b|\bpenitentiary\w*\b|"
+               r"\bexecution\w*\b|\belectric chair\b|\bdeath row\b"),
+    ("arson", r"\barson\w*\b|\bburned down\b|\bburnt down\b"),
+    ("vice", r"\bbrothel\w*\b|\bbordello\w*\b|\bprostitut\w*\b|\bred.?light\b|"
+             r"\bspeakeasy\w*\b|\bsaloon\w*\b|\bmoonshin\w*\b|\bbootleg\w*\b"),
+    ("gambling", r"\bgambl\w*\b|\bcasino\w*\b|\bslot machine\w*\b"),
+    ("drugs", r"\bdrugs?\b|\bheroin\b|\bcocaine\b|\bfentanyl\b|\bmeth\w*\b|"
+              r"\bopioid\w*\b|\bnarcotic\w*\b|\boverdose\w*\b"),
+    ("smuggling", r"\bsmuggl\w*\b|\bmules?\b|\btraffick\w*\b"),
+    ("corruption", r"\bcorrupt\w*\b|\bgraft\b|\bbribe\w*\b|\bracketeer\w*\b|"
+                   r"\bmobster\w*\b|\bgangster\w*\b|\boutlaw\w*\b"),
+    ("scandal", r"\bscandal\w*\b|\baffair\w*\b|\bmistress\w*\b"),
+    ("haunting", r"\bhaunt\w*\b|\bghost\w*\b|\bcursed?\b|\bcurses\b|\bcryptid\w*\b|"
+                 r"\bbigfoot\b|\bsasquatch\b|\bufos?\b|\bhoax\w*\b"),
+    ("disaster", r"\btornado\w*\b|\bflood\w*\b|\bhurricane\w*\b|\bexplos\w*\b|"
+                 r"\bcollapsed?\b|\bplague\b|\bepidemic\w*\b"),
+    ("unrest", r"\bstrikes?\b|\bunion\w*\b|\briots?\b"),
+    ("record", r"\brecords?\b|\bguinness\b"),
+    ("only", r"\bonly\b|\bsole\b|\bunique\b|\bone of a kind\b"),
+    ("first", r"\bfirst\b"),
+    ("largest", r"\blargest\b|\bbiggest\b"),
+    ("smallest", r"\bsmallest\b"),
+    ("oldest", r"\boldest\b"),
+    ("tallest", r"\btallest\b"),
+    ("longest", r"\blongest\b"),
+    ("deadliest", r"\bdeadliest\b"),
+    ("richest", r"\brichest\b"),
+)
+_CLAIM_RES = [(name, re.compile(pat, re.IGNORECASE))
+              for name, pat in _CLAIM_CONCEPTS]
+# The subset that makes a uniqueness boast — these also need an attribution
+# check, because a county-wide "only" is routinely rewritten as a town-wide one.
+_UNIQUE_CLAIMS = {"only", "first", "largest", "smallest", "oldest", "tallest",
+                  "longest", "deadliest", "richest", "record"}
+
+# Words that scope a boast to a region instead of to the town. A line that
+# scopes its "only/first" claim this way ("home to Trumbull County's one and
+# only hanging") must be backed by a fact that names the town — otherwise a
+# county or state story is being handed to the town as its own.
+_SCOPE_WORDS = ({"county", "counties", "parish", "state", "province", "region",
+                 "valley", "area", "district", "statewide", "countywide"}
+                | {w for v in _US_STATES.values() for w in v.split() if len(w) >= 4}
+                | {w for v in _CA_PROVINCES.values() for w in v.split() if len(w) >= 4}
+                | {w for v in _COUNTRIES.values() for w in v.split() if len(w) >= 4})
+
+
+def _claims(text: str) -> set:
+    """The claim concepts a piece of text makes ("hanging", "record", "only").
+
+    Rewording a seed fact is fine; introducing a new crime, vice, disaster,
+    record or superlative is not. Matching on concepts (not raw words) means
+    "hanged"/"hanging"/"noose" all count as one claim, so a rewrite that says
+    "hanging" is still supported by a seed that says "hanged".
+    """
+    return {name for name, rx in _CLAIM_RES if rx.search(text)}
+
+
+def _place_words(place: str, location: str) -> set:
+    """Words that identify the town itself, for attribution checks.
+
+    Two-letter state codes are skipped — "OH"/"IN"/"OR" would match ordinary
+    English and make every line look like it names the town.
+    """
+    words = set(re.findall(r"[a-z]+", f"{place} {location}".lower()))
+    return {w for w in words if len(w) >= 3} - _GROUNDED_STOP
+
+
+def _uniqueness_ok(line: str, line_claims: set, seed_facts: list,
+                   place_words: set) -> bool:
+    """Every "only / first / largest" boast must be backed by a real source
+    fact - and a boast that hands a region's story to the town must be backed
+    by a fact about the town.
+
+    "Girard, Ohio: home to Trumbull County's one and only hanging" names the
+    town AND scopes the boast to the county, so it needs a fact that makes the
+    same boast and names Girard. A line that keeps the regional framing ("In
+    the area: the only man hanged in Trumbull County ...") claims nothing for
+    the town, so an area fact is enough to back it.
+    """
+    words = set(re.findall(r"[a-z]+", line.lower()))
+    # Only a boast pinned on the town itself is held to the stricter standard.
+    strict = bool(words & _SCOPE_WORDS) and bool(place_words & words)
+    for claim in line_claims:
+        for seed in seed_facts:
+            if claim not in _claims(seed):
+                continue
+            if strict and (seed.startswith(_AREA_PREFIX) or not (
+                    place_words & set(re.findall(r"[a-z]+", seed.lower())))):
+                continue
+            break
+        else:
+            return False
+    return True
+
+
+# Unfalsifiable praise. The prompt forbids padding a bland fact with "made-up
+# puns or cute filler", and models do it anyway: Mount Vernon, MO came back as
+# "keeps its past alive through a historic downtown square and those classic
+# small-town traditions everyone loves". There is no seed fact behind any of
+# that, and no amount of grounding can check a compliment. Such a line is
+# dropped whole - a dropped line costs nothing, the plain real facts post
+# instead.
+# Words a rewrite may use freely: grammar and scaffolding, not content.
+_FREE_WORDS = frozenset("""
+a an the and or but of to in on at for with from by as is are was were be been
+being it its this that these those there here also which who whom whose she he
+her his they them their you your we our not no nor so than then thus very just
+only most more about into over under after before during between both each
+every all any some such same other others another one two three four five six
+seven eight nine ten first second third new old known known-for city town
+happened happens happen happening occurred occurs occur occurred took takes
+take taken place placed located lies sits sits stands stood made makes make
+became becomes become began begun started starts start includes include
+including included called calls called named said says seen given gave held
+holds held found finds opened opens opened closed built ran runs went goes
+came comes brought used uses using followed follows follow among within
+throughout along around across near upon down away back again always never
+often sometimes usually later earlier early soon still already once today now
+currently originally previously finally eventually mainly mostly largely
+according several many few various own part parts whole total entire
+""".split())
+
+_CONTENT_WORD = re.compile(r"[a-z]{4,}")
+_STEM = 5
+# A clause whose vocabulary is mostly new is editorialising bolted onto the
+# end, not a re-wording of the source.
+_CLAUSE_SPLIT = re.compile(r"[,;:\u2014]|\s-\s|\s\u2013\s")
+
+
+def _content_stems(text: str) -> set:
+    """The first few letters of every content word in `text`."""
+    out = set()
+    for word in _CONTENT_WORD.findall((text or "").lower()):
+        if word in _FREE_WORDS:
+            continue
+        out.add(word[:_STEM])
+    return out
+
+
+def _invented_words(line: str, stems: set) -> set:
+    """Content words in `line` that the source material never used.
+
+    A rewrite may reorder and re-word; it may not editorialise. The rewrite
+    that produced "Aubrey Plaza: actress, comedian, producer, writer - and
+    deadpan delivered with extra deadpan" invented no name, no date, no place
+    and no claim, so it cleared every other check; what it invented was
+    *character*, and that shows up as words the source does not contain.
+    """
+    return {w for w in _CONTENT_WORD.findall((line or "").lower())
+            if w not in _FREE_WORDS and w[:_STEM] not in stems}
+
+
+def _too_invented(line: str, stems: set) -> bool:
+    """True when a clause of `line` is made mostly of words the source lacks.
+
+    Counting invented words across the whole line is too crude: a faithful
+    paraphrase legitimately swaps in synonyms and abbreviations ("bank founder
+    from Philly" for "...founder of the Girard Bank ... in Philadelphia") and
+    racks up several. What distinguishes that from invention is *where* the
+    new words sit. A rewrite scatters them; editorialising appends a clause
+    built almost entirely out of them - "and deadpan delivered with extra
+    deadpan".
+    """
+    for clause in _CLAUSE_SPLIT.split(line or ""):
+        words = [w for w in _CONTENT_WORD.findall(clause.lower())
+                 if w not in _FREE_WORDS]
+        if len(words) < 2:
+            continue
+        fresh = sum(1 for w in words if w[:_STEM] not in stems)
+        if fresh * 2 > len(words):
+            return True
+    return False
+
+
+_VAGUE = re.compile(
+    r"\b(?:everyone|everybody) loves\b|\bkeeps? (?:its|their) past alive\b|"
+    r"\bsmall[- ]town (?:charm|traditions?|values|feel|vibe)\b|"
+    r"\bclassic small[- ]town\b|\bsteeped in history\b|\brich history\b|"
+    r"\bhidden gems?\b|\bmust[- ]see\b|\bworth (?:a visit|the trip)\b|"
+    r"\bquaint\b|\bpic(?:ture)?[- ]perfect\b|\bstep back in time\b|"
+    r"\boozes? (?:charm|character)\b|\bfull of character\b|"
+    r"\bstrong sense of community\b|\btreasure trove\b|\btime capsule\b",
+    re.IGNORECASE,
+)
+
+
+def _grounded_filter(lines: list, place: str, location: str, seed_facts: list,
+                     paraphrase: bool = False) -> list:
+    """Drop LLM lines that claim something the seed facts don't support.
+
+    Three checks, in order of how often they fire:
+
+      1. invented names/dates — a capitalised word or year that isn't in the
+         seed facts ("Devil Jack Schramm", "in 1912");
+      2. invented claims — a crime, vice, disaster, record or "only/first/
+         largest" boast the seeds never make, written in lowercase so it slips
+         past the name check ("a hanging party went down", "broke records as
+         a drug mule");
+      3. re-attributed boasts — a "the only / the first ..." claim pinned on
+         the town and scoped to a region ("home to Trumbull County's one and
+         only hanging") must be backed by a fact that names the town. Facts
+         dug out of the county or state arrive prefixed with `_AREA_PREFIX`
+         and may not be upgraded into a claim about the town.
+
+    A dropped line costs nothing: if every line goes, `_llm_facts` returns []
+    and the bot posts the plain real facts instead.
+    """
     corpus = " ".join([place, location] + list(seed_facts)).lower()
     years = set(_YEAR.findall(corpus))
     tokens = set(re.findall(r"[a-z]+", corpus))
+    source_stems = _content_stems(corpus)
+    corpus_claims = _claims(corpus)
+    place_words = _place_words(place, location)
 
     def _ok(line: str) -> bool:
         for y in _YEAR.findall(line):
             if y not in years:
                 return False
-        for cap in _CAP_WORD.findall(line):
+        for yy in _SHORT_YEAR.findall(line):
+            if not any(y.endswith(yy) for y in years):
+                return False
+        # Capitalised words are treated as proper nouns that must be attested
+        # - except the first one, which is capitalised because it starts the
+        # sentence. Without that exception "Condensation stops once the glass
+        # warms above the dew point." was rejected for the word it opens with,
+        # while an invented name mid-sentence is still caught.
+        for pos, cap in ((m.start(), m.group())
+                         for m in _CAP_WORD.finditer(line)):
+            if pos == 0:
+                continue
             w = cap.lower()
             if w in _GROUNDED_STOP:
                 continue
             if w not in tokens:
-                return False
+                alias = _CAP_ALIASES.get(w)
+                if not alias or not all(a in tokens for a in alias.split()):
+                    return False
+        # 1a. praise is not a fact — drop the whole line rather than post it.
+        if _VAGUE.search(line):
+            return False
+        # 1a-2. neither is editorialising. A rewrite may re-word a little, but
+        #       not bring in a run of content words the seeds never used.
+        #       Skipped when paraphrase=True: answering a question is
+        #       re-wording by definition, and "Condensation stops once the
+        #       glass warms above the dew point" shares almost no words with
+        #       the source sentence it comes from. Everything else still
+        #       applies - years, proper nouns, claims and praise.
+        if not paraphrase and _too_invented(line, source_stems):
+            return False
+        # 1b. a residence claim needs a seed that places someone in the town.
+        if _RESIDENCE.search(line) and not _RESIDENCE.search(corpus):
+            return False
+        # 1c. reputation / genre labels need the same backing — "surf rock
+        #     legends" and "put this sleepy spot on the musical map" are
+        #     invented framing, not a rewrite of the supplied fact.
+        if _REPUTATION.search(line) and not _REPUTATION.search(corpus):
+            return False
+        # NOTE: there is deliberately no "a seed must name the subject" rule
+        # here. This filter serves the Wikipedia and topic paths, whose seeds
+        # come from an article already chosen by title, so provenance is
+        # settled upstream and a seed legitimately need not repeat the place
+        # name - "Leap-The-Dips is the world's oldest roller coaster" never
+        # says "Lakemont", and Sandy Beach never says "Indian Lake". Requiring
+        # it here cost a real fact in test_reputation_claims_need_a_source.
+        # The sources with no title gate - the search-snippet ones - carry the
+        # attribution check instead, as require_subject in _ranked_facts.
+        # 2. every claim the line makes must be a claim the seeds make.
+        line_claims = _claims(line)
+        if line_claims - corpus_claims:
+            return False
+        # 3. a "the only … / the first …" boast must be backed by one of the
+        #    town's own facts, never by a county/state dig result — and a boast
+        #    scoped to a region ("the county's one and only …") must come from
+        #    a fact that names the town itself.
+        if (line_claims & _UNIQUE_CLAIMS) and not _uniqueness_ok(
+                line, line_claims & _UNIQUE_CLAIMS, seed_facts, place_words):
+            return False
         return True
 
     kept = [ln for ln in lines if _ok(ln)]
     if len(kept) != len(lines):
         print(f"[funfacts] grounded filter dropped {len(lines) - len(kept)} "
-              f"line(s) with invented names/dates", flush=True)
+              f"line(s) with invented, unsupported or padded claims", flush=True)
     return kept
 
 
@@ -1087,8 +2054,18 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         return []
     if not text:
         return []
+    # A bulleted reply usually opens with a chatty preamble ("Girard, Ohio's
+    # got some real characters for the record books... Here's the real deal:")
+    # that is not a fact at all. Once the first bullet appears, everything
+    # above it is discarded so the preamble can't be posted as fact #1.
+    raw_lines = text.splitlines()
+    first_bullet = next((i for i, ln in enumerate(raw_lines)
+                         if re.match(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)\S", ln)),
+                        None)
+    if first_bullet is not None:
+        raw_lines = raw_lines[first_bullet:]
     lines = []
-    for ln in text.splitlines():
+    for ln in raw_lines:
         ln = ln.strip().strip('"\u201c\u201d')
         # Strip "1." / "-" / "•" list prefixes and markdown the model may add.
         ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-•*]\s*)", "", ln)
@@ -1099,23 +2076,44 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         if _META_LINE.match(ln):
             continue
         lines.append(ln)
-    kept = [ln for ln in lines if not _EXPLICIT.search(ln)]
+    kept = [ln for ln in lines if not _EXPLICIT.search(ln)
+            and not _TASTELESS.search(ln)]
     if len(kept) != len(lines):
-        print(f"[funfacts] dropped {len(lines) - len(kept)} explicit LLM line(s) "
-              f"for {place}", flush=True)
+        print(f"[funfacts] dropped {len(lines) - len(kept)} explicit/tasteless "
+              f"LLM line(s) for {place}", flush=True)
     lines = _grounded_filter(kept, place, location, seed_facts)
+    # The model often restates the same fact twice in other words (the 09:19
+    # reply said the 1786 Moravian settlement twice back to back).
+    deduped, seen = [], []
+    for ln in lines:
+        ln_norm = " ".join(re.sub(r"[^a-z0-9 ]", "", ln.lower()).split())
+        if any(_overlap(ln_norm, pn) > 0.7 for pn in seen):
+            continue
+        seen.append(ln_norm)
+        deduped.append(ln)
+    lines = deduped
     if lines:
         print(f"[funfacts] llm wrote {len(lines)} facts for {place}", flush=True)
     return lines[:10]
 
 
 def _try_sources(location: str, spicy: bool, limit: int, options: dict = None):
-    """Wikipedia → DuckDuckGo → Google (if configured). Returns result or None."""
+    """Wikipedia → configured web search → DuckDuckGo. First usable pool wins.
+
+    Order matters and is not arbitrary. Wikipedia is first because it is free
+    and usually sufficient, so a paid key is only spent on towns it cannot
+    serve. A configured search key is then tried *before* DuckDuckGo: Serper and
+    Google return real ranked web results, while DDG's Instant Answer is a
+    single Wikipedia-style blurb. It used to run last, which meant one dull
+    DuckDuckGo sentence ended the ladder and the key was never consulted — for
+    "Jerome, Missouri" DDG returned "It is located on the Gasconade River near
+    Interstate 44" and the bot posted that instead of searching.
+    """
     options = options or {}
     for name, fn in (("wikipedia", lambda q: _wikipedia(q, spicy, limit)),
-                     ("duckduckgo", lambda q: _duckduckgo(q, spicy, limit)),
+                     ("serper", lambda q: _serper_search(q, spicy, limit, options)),
                      ("google", lambda q: _google_search(q, spicy, limit, options)),
-                     ("serper", lambda q: _serper_search(q, spicy, limit, options))):
+                     ("duckduckgo", lambda q: _duckduckgo(q, spicy, limit))):
         try:
             result = fn(location)
         except urllib.error.URLError as exc:
@@ -1124,7 +2122,14 @@ def _try_sources(location: str, spicy: bool, limit: int, options: dict = None):
             print(f"[funfacts] {name} error: {exc!r}", flush=True)
         else:
             if result and result.get("facts"):
+                if DEBUG:
+                    print(f"[funfacts] source={name} place={result.get('place')!r} "
+                          f"facts={len(result['facts'])}", flush=True)
+                    for i, f in enumerate(result["facts"], 1):
+                        print(f"[funfacts]   seed {i}: {f[:150]}", flush=True)
                 return result
+            if DEBUG:
+                print(f"[funfacts] source={name} -> nothing usable", flush=True)
     return None
 
 
@@ -1174,8 +2179,9 @@ _REGION_HINTS = ["murder", "crime", "scandal", "legend", "honeymoon", "resort", 
 def _region_dig(location: str, existing: list, limit: int, max_facts: int = 2) -> list:
     """When a town's own article is dry, mine its county / state for spicy or
     weird facts (e.g. the Poconos honeymoon resorts for a tiny Pike County
-    town). Only sentences that actually name the county/state are kept, so the
-    fact stays regionally honest."""
+    town). Only sentences that actually name the county/state are kept, and
+    every result is prefixed with `_AREA_PREFIX`, so a county or state story is
+    never mistaken for — or rewritten as — one about the town itself."""
     geo = _osm_geocode(location)
     if not geo:
         return []
@@ -1184,7 +2190,7 @@ def _region_dig(location: str, existing: list, limit: int, max_facts: int = 2) -
         return []
 
     existing_norm = [_norm(f) for f in existing]
-    found = []
+    found, found_norm = [], []
     for scope in scopes:
         if len(found) >= max_facts or _wiki_blocked():
             break
@@ -1221,9 +2227,13 @@ def _region_dig(location: str, existing: list, limit: int, max_facts: int = 2) -
                     fn = _norm(fact)
                     if any(_overlap(fn, e) > 0.7 for e in existing_norm):
                         continue
-                    if any(_overlap(fn, f) > 0.7 for f in found):
+                    if any(_overlap(fn, f) > 0.7 for f in found_norm):
                         continue
-                    found.append(fact)
+                    # Labelled as regional: in chat it reads honestly, and the
+                    # grounding filter won't let the LLM re-attribute a county
+                    # or state story to the town itself.
+                    found.append(_AREA_PREFIX + fact)
+                    found_norm.append(fn)
                     if len(found) >= max_facts:
                         break
     return found
@@ -1239,6 +2249,119 @@ def _give_up(location: str):
     if _wiki_blocked():
         return {"place": location, "facts": [], "unavailable": True}
     return None
+
+
+# ---------------------------------------------------------------------------
+# General topic lookup.
+#
+# Chat does not ask about places. In one #hardclaws session the queries were
+# "lord of the rings", "grima wormtongue", "hobbit", "huorns", "trail mix" and
+# "cycling sprint 15 second watts world record". The place pipeline answers
+# none of those, because _title_relevance requires the article to be about the
+# requested place: "huorns" scored 0 against the article "Huorn" (plural
+# against singular) and "grima wormtongue" scored 0 against "Grima" (the accent
+# breaks the match), so both fell through to web search and posted noise.
+#
+# This is the same Wikipedia search with the place assumptions taken out.
+# ---------------------------------------------------------------------------
+
+# Question words and auxiliaries are not the subject. Without these, the
+# leading word of "what temperature does condensation stop occurring on a
+# windshield?" is "what", and since no article sentence contains "what" the
+# attribution check rejected every possible answer - including the one
+# sentence that actually answers it.
+_TOPIC_STOP = frozenset("""
+the a an of and or for in on at by to from with is are was were be been being
+la le les der die das del von van da di
+what when where why how who whom whose which whether
+does did do doing done can could will would should shall may might must
+has have had having that this these those there here it its their his her our
+my your me him them you not no so if as than then too very just also
+""".split())
+
+
+def _fold(text: str) -> str:
+    """Lower-case and strip accents, so 'Grima' matches 'grima'.
+
+    The accented form is the article's real title and the unaccented form is
+    what a viewer types; without folding, that one character is the difference
+    between a real fact and falling through to web search.
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def _topic_words(text: str) -> list:
+    return [w for w in re.split(r"[^a-z0-9]+", _fold(text))
+            if len(w) >= 3 and w not in _TOPIC_STOP]
+
+
+def _topic_match(title: str, query: str) -> bool:
+    """Does this article answer this question?
+
+    Matches on the FIRST significant word of each, allowing singular/plural.
+    That is what separates the article you want from the namesake:
+
+        "grima wormtongue" -> "Grima"        yes (first word matches)
+        "huorns"           -> "Huorn"        yes (plural against singular)
+        "low watts"        -> "Watts Towers" no  (watts is the SECOND word)
+
+    Matching on any shared word instead would let "low watts" through to an
+    article about a neighbourhood in Los Angeles.
+    """
+    tw, qw = _topic_words(title), _topic_words(query)
+    if not tw or not qw:
+        return False
+    head_t, head_q = tw[0], qw[0]
+    if head_t == head_q:
+        return True
+    short, long_ = sorted((head_t, head_q), key=len)
+    # Huorn/Huorns, Wormtongue/Wormtongues - but not "cat"/"car".
+    return len(short) >= 5 and long_.startswith(short[:-1])
+
+
+def _wikipedia_topic(query: str, spice: bool = False, limit: int = 200):
+    """A fun fact about anything with a Wikipedia article, not just a place.
+
+    Deliberately does not apply _title_relevance, the region guards or
+    _is_non_place_article: those exist to stop a tiny town borrowing facts
+    from a namesake, and they are what make every non-place query fail. The
+    stand-alone gate in _ranked_facts still applies, so fragments, questions
+    and ranking tables are dropped here exactly as they are for places.
+
+    Returns None rather than a weak match. A lookup that cannot find the thing
+    asked about should say so, not post the nearest article that shares a word.
+    """
+    q = " ".join((query or "").split())
+    if not q:
+        return None
+    try:
+        hits = _wiki_search_extracts(q, exchars=4000, limit=6)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return None
+    qw = _topic_words(q)
+    best = None                       # (exact, extra words, search order)
+    for order, it in enumerate(hits):
+        title, extract = it["title"], it.get("extract", "")
+        if "(disambiguation)" in title.lower():
+            continue
+        if not extract or _is_disambiguation(extract):
+            continue
+        if not _topic_match(title, q):
+            continue
+        facts = _ranked_facts(_filter_definitions(_sentences(extract)),
+                              spice=spice, limit=limit, count=6, subject=q)
+        if not facts:
+            continue
+        # Closest title wins, not the highest search hit. Searching "hobbit"
+        # returns The Hobbit Inn - a pub in Southampton - ahead of Hobbit, and
+        # taking the first match posted the pub. Sorting by how many words the
+        # title carries beyond the query puts the thing asked for first.
+        key = (0 if _fold(title) == _fold(q) else 1,
+               abs(len(_topic_words(title)) - len(qw)), order)
+        if best is None or key < best[0]:
+            best = (key, title, facts)
+    return {"place": best[1], "facts": best[2]} if best else None
 
 
 def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
@@ -1261,6 +2384,19 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
             result["facts"] = result["facts"][:8]
         return _package(curated, result, location, options, spicy, limit)
 
+    # 2b. Not a place at all. Chat asks about anything - "grima wormtongue",
+    #     "trail mix", "lord of the rings" - and the geocoder below will not
+    #     find those, so the topic lookup runs before it rather than after.
+    if not spicy:
+        try:
+            topic = _wikipedia_topic(location, spicy, limit)
+        except Exception as exc:      # never let a bad source crash the bot
+            print(f"[funfacts] topic lookup error: {exc!r}", flush=True)
+        else:
+            if topic:
+                return _package(curated, topic, location, options, spicy,
+                                limit)
+
     # 3. Remote / tiny town fallback: geocode the name, retry with the
     #    canonical "Name, State", then use coordinate-based geosearch for the
     #    nearest notable place. This covers even hamlets and roadhouses that
@@ -1270,6 +2406,16 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
         return curated or _give_up(location)
 
     canonical = ", ".join(x for x in (geo["name"], geo["state"] or geo["country"]) if x)
+    # The geocoder may resolve a query to somewhere else entirely: "stinker"
+    # came back as Lermoos in the Austrian Tyrol, and the bot then answered
+    # "Lermoos is a municipality in the district of Reutte" under the heading
+    # Lermoos. Nobody asked about Lermoos. Only follow the geocoder when the
+    # place it found is a variant of the name that was typed.
+    if canonical and not _names_subject(canonical, location):
+        print(f"[funfacts] geocoder resolved {location!r} to {canonical!r}, "
+              f"which is not the same name - not answering about it",
+              flush=True)
+        return curated or _give_up(location)
     if canonical and _norm(canonical) != _norm(location):
         result = _try_sources(canonical, spicy, limit, options)
         if result:
@@ -1289,6 +2435,12 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
         return curated or _give_up(location)
 
     target = _title_tokens(geo["name"]) if geo["name"] else ""
+    # Same guard as above: "just outside town" only means anything if the
+    # thing asked for is a town.
+    if not _names_subject(geo.get("name") or "", location):
+        print(f"[funfacts] no place matches {location!r}; nearest notable "
+              f"place is not an answer to it", flush=True)
+        return curated or _give_up(location)
     ordered = sorted(
         nearby,
         key=lambda n: (not (target and target in _title_tokens(n["title"])),
@@ -1326,12 +2478,233 @@ def _norm_opts(options):
     o = options or {}
     spice = str(o.get("spice") or "").strip().lower()
     spicy = spice in ("spicy", "adult", "r", "on", "true", "1", "yes")
+    # "fact_source": "llm" skips retrieval entirely and asks the model for
+    # facts from its own knowledge. See _llm_only_facts for the trade-off.
+    source = str(o.get("fact_source") or o.get("source") or "").strip().lower()
+    llm_only = source in ("llm", "llm-only", "llmonly", "model", "ai")
     try:
         limit = int(o.get("max_fact_chars") or 200)
     except (TypeError, ValueError):
         limit = 200
     limit = max(80, min(limit, 480))
-    return spicy, limit, o
+    return spicy, limit, o, llm_only
+
+
+def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
+    """Facts straight from the model's own knowledge — no sources consulted.
+
+    This is the simple mode: one prompt, no Wikipedia, no search, no ranking.
+    It is also the mode with no safety net: the grounded filter compares a line
+    against the facts that were found, and here nothing was found, so there is
+    nothing to compare against. Only the explicit/taste filters and the
+    character limit still apply. That is why it is opt-in.
+    """
+    try:
+        import llm
+    except Exception as exc:
+        print(f"[funfacts] llm import error: {exc!r}", flush=True)
+        return []
+    if not llm.is_configured(opts):
+        print("[funfacts] fact_source='llm' but no LLM is configured — set "
+              "llm_api_key / GROQ_API_KEY / OPENROUTER_API_KEY, or a local "
+              "Ollama (llm_base_url http://localhost:11434/v1).", flush=True)
+        return []
+    try:
+        text = llm.freeform_facts(location, location, opts)
+    except Exception as exc:
+        print(f"[funfacts] llm error: {exc!r}", flush=True)
+        return []
+    if not text or "NOTHING RELIABLE" in text.upper():
+        return []
+    lines = []
+    for ln in text.splitlines():
+        ln = ln.strip().strip('"\u201c\u201d')
+        ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
+        ln = ln.replace("**", "").replace("`", "").strip()
+        if not ln or _META_LINE.match(ln):
+            continue
+        if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
+            continue
+        # No seeds means nothing to ground against, so what is left to check
+        # is whether this is a sentence at all and whether it can stand on its
+        # own. Requiring it to repeat the place name is not one of those
+        # checks: "Past Times Arcade there holds the Guinness record..." is
+        # ordinary prose about the place and would be rejected for using the
+        # word "there". This mode stays opt-in and unsourced - the guarded
+        # path is fact_source="sources", which is the default.
+        fact = _trim(ln, limit)
+        if fact:
+            lines.append(fact)
+    if lines:
+        print(f"[funfacts] llm-only wrote {len(lines)} facts for {location} "
+              f"(unsourced)", flush=True)
+    return lines[:10]
+
+
+# ---------------------------------------------------------------------------
+# Free-form questions.
+#
+# "!funfact what temperature does condensation stop occurring on a windshield?"
+# has no article, and before this the bot answered by posting a page title it
+# had mistaken for a sentence. Refusing is better than that, but it is still
+# not an answer - so the search results are handed to the model with one
+# instruction (use only this) and the reply is then checked the same way every
+# other fact is.
+#
+# This needs a model. There is no way to turn snippets into an answer without
+# one, and without it configured the bot says it could not find the answer
+# rather than guessing.
+# ---------------------------------------------------------------------------
+
+def _question_sources(question: str, options: dict) -> list:
+    """Sentences from a web search for the question, fit to be shown.
+
+    Deliberately does NOT apply require_subject: the leading word of a
+    question is a subject like "temperature", and the sentence that actually
+    answers it may be phrased entirely differently. What is still dropped is
+    anything that is not a sentence - a page title is not a source, and
+    treating one as a source is how "Why Does My Car Have Condensation
+    Inside?" got posted as a fact.
+    """
+    out, seen = [], set()
+
+    def take(texts):
+        for text in texts:
+            for sentence in _sentences(text or ""):
+                sentence = " ".join(sentence.split())
+                if not sentence or sentence.lower() in seen:
+                    continue
+                if (_is_junk_seed(sentence) or _is_dangling(sentence)
+                        or _is_fragment(sentence) or _is_boring(sentence)):
+                    continue
+                seen.add(sentence.lower())
+                out.append(sentence)
+
+    # Tavily first. It exists for exactly this - retrieve text for a model to
+    # read - and DuckDuckGo's Instant Answer returns an empty abstract for most
+    # free-form questions, which left this path with nothing to work from.
+    tkey = (options.get("tavily_api_key") or "").strip()
+    if tkey:
+        req = urllib.request.Request(
+            TAVILY_API,
+            data=json.dumps({"query": question, "max_results": 5,
+                             "search_depth": "basic"}).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {tkey}",
+                     "User-Agent": USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError) as exc:
+            print(f"[funfacts] question tavily failed: {exc!r}", flush=True)
+        else:
+            for item in (data.get("results") or [])[:5]:
+                take([item.get("content") or ""])
+
+    try:
+        data = _http_get_json(DDG_API, {"q": question, "format": "json",
+                                        "no_html": 1, "skip_disambig": 1})
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            ValueError) as exc:
+        print(f"[funfacts] question search failed: {exc!r}", flush=True)
+    else:
+        take([data.get("AbstractText") or "", data.get("Answer") or ""])
+        for topic in (data.get("RelatedTopics") or [])[:6]:
+            if isinstance(topic, dict):
+                take([topic.get("Text") or ""])
+
+    key = (options.get("serper_api_key") or "").strip()
+    if key and len(out) < 4:
+        req = urllib.request.Request(
+            SERPER_API,
+            data=json.dumps({"q": question, "num": 8}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-API-KEY": key,
+                     "User-Agent": USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError) as exc:
+            print(f"[funfacts] question serper failed: {exc!r}", flush=True)
+        else:
+            for item in (data.get("organic") or [])[:8]:
+                take([item.get("snippet") or ""])
+    return out[:8]
+
+
+def _answer_question(question: str, opts: dict, limit: int):
+    """Answer a question from what a search actually returned.
+
+    Returns None rather than a guess: no model configured, nothing found, the
+    model declining, or the answer failing the same checks every other fact
+    has to pass.
+    """
+    try:
+        import llm
+    except Exception as exc:
+        print(f"[funfacts] llm import error: {exc!r}", flush=True)
+        return None
+    if not llm.is_configured(opts):
+        if "no_llm" not in _log_once:
+            _log_once.add("no_llm")
+            print("[funfacts] cannot answer free-form questions: no LLM is "
+                  "configured. Set llm_api_key (or GROQ_API_KEY / "
+                  "OPENROUTER_API_KEY), or point llm_base_url at a local "
+                  "Ollama. Until then !funfact only answers things with a "
+                  "Wikipedia article.", flush=True)
+        return None
+    sources = _question_sources(question, opts)
+    if not sources:
+        print(f"[funfacts] no usable source lines for the question: "
+              f"{question[:60]}", flush=True)
+        return None
+    try:
+        text = llm.answer_question(question, sources, opts)
+    except Exception as exc:
+        print(f"[funfacts] answer error: {exc!r}", flush=True)
+        return None
+    if not text:
+        print("[funfacts] the LLM returned nothing - check the [llm] lines "
+              "above for a rejected key (401/403) or no credits (402).",
+              flush=True)
+        return None
+    if "NOTHING RELIABLE" in text.upper():
+        print(f"[funfacts] the model declined to answer from its sources: "
+              f"{question[:60]}", flush=True)
+        return None
+    lines = []
+    for ln in text.splitlines():
+        ln = ln.strip().strip('"\u201c\u201d')
+        ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
+        ln = ln.replace("**", "").replace("`", "").strip()
+        if not ln or _META_LINE.match(ln):
+            continue
+        if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
+            continue
+        if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
+            continue
+        if _is_echo(ln, question):
+            continue
+        fact = _trim(ln, limit)
+        if fact:
+            lines.append(fact)
+    # Grounded against the very text the model was given: no year, proper
+    # noun or claim appears in the answer unless it appeared in a source.
+    lines = _grounded_filter(lines, question, question, sources,
+                             paraphrase=True)
+    if not lines:
+        print(f"[funfacts] the answer did not survive grounding against its "
+              f"{len(sources)} source line(s) - posting nothing rather than "
+              f"something unsupported: {question[:60]}", flush=True)
+        return None
+    words = _topic_words(question)
+    topic = words[0].capitalize() if words else "Answer"
+    print(f"[funfacts] answered a question from {len(sources)} source "
+          f"line(s): {question[:60]}", flush=True)
+    return {"place": topic, "facts": lines[:4]}
 
 
 def get_funfact(location: str, options=None):
@@ -1343,8 +2716,9 @@ def get_funfact(location: str, options=None):
     `options` may include: spice ("clean"/"spicy"), max_fact_chars (int),
     llm_api_key, llm_base_url, llm_model.
     """
-    spicy, limit, opts = _norm_opts(options)
-    key = ("spicy:" if spicy else "clean:") + " ".join(location.strip().lower().split())
+    spicy, limit, opts, llm_only = _norm_opts(options)
+    key = (("llm:" if llm_only else "spicy:" if spicy else "clean:")
+           + " ".join(location.strip().lower().split()))
     now = time.time()
 
     with _cache_lock:
@@ -1355,7 +2729,31 @@ def get_funfact(location: str, options=None):
             _cache.pop(key, None)
 
     if entry is None:
-        result = _lookup_all(location.strip(), opts, spicy, limit)
+        result = None
+        if llm_only:
+            facts = _llm_only_facts(location.strip(), limit, opts)
+            if facts:
+                result = {"place": location.strip(), "facts": facts}
+            else:
+                # The model had nothing reliable: fall back to real sources
+                # rather than tell the viewer the place has no facts.
+                result = _lookup_all(location.strip(), opts, spicy, limit)
+        if result is None:
+            result = _lookup_all(location.strip(), opts, spicy, limit)
+        # 4. Not a place and not a thing with an article - a question. Answer
+        #    it from the search results, grounded in them, rather than saying
+        #    nothing. Skipped in spicy mode, which has its own path.
+        # Deliberately not gated on spice. This ran only in clean mode, and
+        # "spice": "spicy" is a common setting - so on exactly the channels
+        # most likely to ask odd questions, the question path never executed
+        # at all and every one of them got "couldn't find any fun facts".
+        # An answer to a factual question needs no adult flavour, and when
+        # _lookup_all found nothing there is nothing to flavour anyway.
+        if (opts.get("answer_questions", True)
+                and (result is None or not result.get("facts"))):
+            answered = _answer_question(location.strip(), opts, limit)
+            if answered:
+                result = answered
         with _cache_lock:
             if result and result.get("unavailable"):
                 # Sources are rate-limited right now — retry soon instead of

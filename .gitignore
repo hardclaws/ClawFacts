@@ -1,0 +1,15 @@
+# Secrets - never commit these. Keep them when you update the bot's files.
+tokens.json
+config.json
+# The bot's own state, written at runtime
+reminders.json
+haul.json
+transporting.json
+
+# Python
+__pycache__/
+*.pyc
+
+# harvested !smk name cache (rebuilt in the background, never hand-edited)
+names.json
+custom_commands.json
