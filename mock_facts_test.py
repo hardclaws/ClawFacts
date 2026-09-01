@@ -1617,6 +1617,110 @@ def test_facts_are_ranked_by_relevance_to_what_was_asked():
     print("[PASS] the fact that names the subject outranks one that does not")
 
 
+_TOPIC_ARTICLES = {
+    "grima wormtongue": [
+        {"title": "Gr\u00edma", "extract":
+         "Gr\u00edma Wormtongue is a fictional character in J. R. R. Tolkien's "
+         "legendarium. He serves as the chief advisor to King Th\u00e9oden of "
+         "Rohan, and is secretly in the employ of the wizard Saruman."},
+    ],
+    "huorns": [
+        {"title": "Huorn", "extract":
+         "A Huorn is a tree-like being in J. R. R. Tolkien's Middle-earth. The "
+         "Ents are said to have taught the trees to talk, and some trees "
+         "became angry and wild, turning into Huorns."},
+    ],
+    # The pub comes FIRST, exactly as the real search returned it.
+    "hobbit": [
+        {"title": "The Hobbit Inn", "extract":
+         "The Hobbit Inn is a pub in Southampton, Hampshire, England. It "
+         "serves ales and hosts live music at weekends."},
+        {"title": "Hobbit", "extract":
+         "Hobbits are a fictional humanoid race appearing in the works of "
+         "J. R. R. Tolkien. They average between two and four feet tall and "
+         "are fond of farming and simple living."},
+    ],
+    "trail mix": [
+        {"title": "Trail mix", "extract":
+         "Trail mix is a type of snack mix consisting of granola, dried fruit, "
+         "nuts and sometimes chocolate. It was developed as a food to be taken "
+         "along on hikes."},
+    ],
+    # Nothing here is about the thing asked for.
+    "low watts": [
+        {"title": "Watts Towers", "extract":
+         "The Watts Towers are a collection of 17 interconnected sculptural "
+         "towers in the Watts neighbourhood of Los Angeles."},
+    ],
+    "why is stinker slow?": [
+        {"title": "Slow loris", "extract":
+         "The slow loris is a nocturnal primate native to Southeast Asia. It "
+         "is the only primate known to produce a toxic bite."},
+    ],
+}
+
+
+def _stub_topic_search(query, exchars=4000, limit=6):
+    return _TOPIC_ARTICLES.get(query, [])
+
+
+def test_topic_lookup_answers_anything_with_an_article():
+    """Chat does not ask about places.
+
+    In one session the queries were 'lord of the rings', 'grima wormtongue',
+    'hobbit', 'huorns' and 'trail mix'. The place pipeline answered none of
+    them, because _title_relevance scored 'huorns' at 0 against the article
+    'Huorn' (plural against singular) and 'grima wormtongue' at 0 against
+    'Gr\u00edma' (the accent breaks the match), so both fell through to web
+    search and posted noise.
+    """
+    saved = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = _stub_topic_search
+    try:
+        for query, title in (("grima wormtongue", "Gr\u00edma"),
+                             ("huorns", "Huorn"),
+                             ("trail mix", "Trail mix")):
+            got = funfacts._wikipedia_topic(query)
+            assert got, f"no answer for {query}"
+            assert got["place"] == title, (query, got["place"], title)
+            assert got["facts"], query
+            assert all(len(f) <= 200 for f in got["facts"]), got["facts"]
+    finally:
+        funfacts._wiki_search_extracts = saved
+    print("[PASS] a topic lookup answers anything with an article")
+
+
+def test_topic_lookup_prefers_the_article_actually_asked_for():
+    """Searching 'hobbit' returns a pub in Southampton ahead of the article
+    about hobbits. Taking the first hit is what posted the pub."""
+    saved = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = _stub_topic_search
+    try:
+        got = funfacts._wikipedia_topic("hobbit")
+        assert got and got["place"] == "Hobbit", got
+        assert not any("Southampton" in f for f in got["facts"]), got["facts"]
+    finally:
+        funfacts._wiki_search_extracts = saved
+    print("[PASS] the article asked for beats the namesake, whatever the order")
+
+
+def test_topic_lookup_says_nothing_rather_than_guessing():
+    """The honest half. 'low watts' and 'why is stinker slow?' have no
+    article, and the nearest thing Wikipedia has is about something else.
+    Returning None lets the bot say it could not find it."""
+    saved = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = _stub_topic_search
+    try:
+        for query in ("low watts", "why is stinker slow?",
+                      "heating notification"):
+            assert funfacts._wikipedia_topic(query) is None, query
+        assert funfacts._wikipedia_topic("") is None
+        assert funfacts._wikipedia_topic(None) is None
+    finally:
+        funfacts._wiki_search_extracts = saved
+    print("[PASS] no article means no answer, not the nearest shared word")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -1678,6 +1782,9 @@ def main():
     test_harvested_facts_must_stand_alone()
     test_real_facts_survive_the_stand_alone_gate()
     test_facts_are_ranked_by_relevance_to_what_was_asked()
+    test_topic_lookup_answers_anything_with_an_article()
+    test_topic_lookup_prefers_the_article_actually_asked_for()
+    test_topic_lookup_says_nothing_rather_than_guessing()
     print("\nALL PASSED ✔")
     return 0
 

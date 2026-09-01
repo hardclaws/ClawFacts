@@ -30,11 +30,20 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 
-USER_AGENT = "TwitchFunFactBot/1.0 (hobby Twitch chat bot)"
+# Wikimedia's rate-limit policy keys off this string: a UA of the form
+# "<tool>/<version> (<contact URL or email>)" gets 200 requests/minute, while
+# one with no contact address counts as unidentified and gets 10/minute - and
+# returns 403 rather than 429 if it is missing or generic. Ten a minute is
+# reached by a single busy channel asking random questions, so the contact
+# address is not optional politeness here.
+USER_AGENT = ("ClawFacts/1.0 "
+              "(+https://github.com/hardclaws/ClawFacts; hobby Twitch chat "
+              "bot, Wikipedia fun facts)")
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
@@ -2161,6 +2170,110 @@ def _give_up(location: str):
     return None
 
 
+# ---------------------------------------------------------------------------
+# General topic lookup.
+#
+# Chat does not ask about places. In one #hardclaws session the queries were
+# "lord of the rings", "grima wormtongue", "hobbit", "huorns", "trail mix" and
+# "cycling sprint 15 second watts world record". The place pipeline answers
+# none of those, because _title_relevance requires the article to be about the
+# requested place: "huorns" scored 0 against the article "Huorn" (plural
+# against singular) and "grima wormtongue" scored 0 against "Grima" (the accent
+# breaks the match), so both fell through to web search and posted noise.
+#
+# This is the same Wikipedia search with the place assumptions taken out.
+# ---------------------------------------------------------------------------
+
+_TOPIC_STOP = frozenset("""
+the a an of and or for in on at by to from with is are was were
+la le les der die das del von van da di
+""".split())
+
+
+def _fold(text: str) -> str:
+    """Lower-case and strip accents, so 'Grima' matches 'grima'.
+
+    The accented form is the article's real title and the unaccented form is
+    what a viewer types; without folding, that one character is the difference
+    between a real fact and falling through to web search.
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def _topic_words(text: str) -> list:
+    return [w for w in re.split(r"[^a-z0-9]+", _fold(text))
+            if len(w) >= 3 and w not in _TOPIC_STOP]
+
+
+def _topic_match(title: str, query: str) -> bool:
+    """Does this article answer this question?
+
+    Matches on the FIRST significant word of each, allowing singular/plural.
+    That is what separates the article you want from the namesake:
+
+        "grima wormtongue" -> "Grima"        yes (first word matches)
+        "huorns"           -> "Huorn"        yes (plural against singular)
+        "low watts"        -> "Watts Towers" no  (watts is the SECOND word)
+
+    Matching on any shared word instead would let "low watts" through to an
+    article about a neighbourhood in Los Angeles.
+    """
+    tw, qw = _topic_words(title), _topic_words(query)
+    if not tw or not qw:
+        return False
+    head_t, head_q = tw[0], qw[0]
+    if head_t == head_q:
+        return True
+    short, long_ = sorted((head_t, head_q), key=len)
+    # Huorn/Huorns, Wormtongue/Wormtongues - but not "cat"/"car".
+    return len(short) >= 5 and long_.startswith(short[:-1])
+
+
+def _wikipedia_topic(query: str, spice: bool = False, limit: int = 200):
+    """A fun fact about anything with a Wikipedia article, not just a place.
+
+    Deliberately does not apply _title_relevance, the region guards or
+    _is_non_place_article: those exist to stop a tiny town borrowing facts
+    from a namesake, and they are what make every non-place query fail. The
+    stand-alone gate in _ranked_facts still applies, so fragments, questions
+    and ranking tables are dropped here exactly as they are for places.
+
+    Returns None rather than a weak match. A lookup that cannot find the thing
+    asked about should say so, not post the nearest article that shares a word.
+    """
+    q = " ".join((query or "").split())
+    if not q:
+        return None
+    try:
+        hits = _wiki_search_extracts(q, exchars=4000, limit=6)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return None
+    qw = _topic_words(q)
+    best = None                       # (exact, extra words, search order)
+    for order, it in enumerate(hits):
+        title, extract = it["title"], it.get("extract", "")
+        if "(disambiguation)" in title.lower():
+            continue
+        if not extract or _is_disambiguation(extract):
+            continue
+        if not _topic_match(title, q):
+            continue
+        facts = _ranked_facts(_filter_definitions(_sentences(extract)),
+                              spice=spice, limit=limit, count=6, subject=q)
+        if not facts:
+            continue
+        # Closest title wins, not the highest search hit. Searching "hobbit"
+        # returns The Hobbit Inn - a pub in Southampton - ahead of Hobbit, and
+        # taking the first match posted the pub. Sorting by how many words the
+        # title carries beyond the query puts the thing asked for first.
+        key = (0 if _fold(title) == _fold(q) else 1,
+               abs(len(_topic_words(title)) - len(qw)), order)
+        if best is None or key < best[0]:
+            best = (key, title, facts)
+    return {"place": best[1], "facts": best[2]} if best else None
+
+
 def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
     # Curated spicy facts stay at the TOP of the pool, but the web is still
     # searched so significant / weird facts (e.g. the Lincoln Flag in Milford)
@@ -2180,6 +2293,19 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
                     result["facts"] = result["facts"] + rdig
             result["facts"] = result["facts"][:8]
         return _package(curated, result, location, options, spicy, limit)
+
+    # 2b. Not a place at all. Chat asks about anything - "grima wormtongue",
+    #     "trail mix", "lord of the rings" - and the geocoder below will not
+    #     find those, so the topic lookup runs before it rather than after.
+    if not spicy:
+        try:
+            topic = _wikipedia_topic(location, spicy, limit)
+        except Exception as exc:      # never let a bad source crash the bot
+            print(f"[funfacts] topic lookup error: {exc!r}", flush=True)
+        else:
+            if topic:
+                return _package(curated, topic, location, options, spicy,
+                                limit)
 
     # 3. Remote / tiny town fallback: geocode the name, retry with the
     #    canonical "Name, State", then use coordinate-based geosearch for the

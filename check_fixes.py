@@ -164,6 +164,38 @@ def main() -> int:
                 return False
         return True
 
+    def _topic_lookup_answers_anything():
+        """A topic lookup finds a non-place article, prefers the one asked
+        for over a namesake, and returns nothing rather than guessing."""
+        articles = {
+            "hobbit": [
+                {"title": "The Hobbit Inn", "extract":
+                 "The Hobbit Inn is a pub in Southampton, Hampshire, England. "
+                 "It serves ales and hosts live music at weekends."},
+                {"title": "Hobbit", "extract":
+                 "Hobbits are a fictional humanoid race appearing in the "
+                 "works of J. R. R. Tolkien. They average between two and "
+                 "four feet tall and are fond of farming."},
+            ],
+            "low watts": [
+                {"title": "Watts Towers", "extract":
+                 "The Watts Towers are a collection of sculptural towers in "
+                 "the Watts neighbourhood of Los Angeles."},
+            ],
+        }
+        saved = funfacts._wiki_search_extracts
+        funfacts._wiki_search_extracts = (
+            lambda q, exchars=4000, limit=6: articles.get(q, []))
+        try:
+            got = funfacts._wikipedia_topic("hobbit")
+            if not got or got["place"] != "Hobbit":
+                return False
+            if funfacts._wikipedia_topic("low watts") is not None:
+                return False
+        finally:
+            funfacts._wiki_search_extracts = saved
+        return True
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -481,6 +513,11 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("!funfact answers anything with an article, or says it cannot",
+         hasattr(funfacts, "_wikipedia_topic")
+         and hasattr(funfacts, "_topic_match")
+         and "hardclaws/ClawFacts" in funfacts.USER_AGENT
+         and _topic_lookup_answers_anything()),
         ("a harvested fun fact can stand on its own (8 real defects)",
          hasattr(funfacts, "_is_dangling")
          and hasattr(funfacts, "_is_fragment")
