@@ -620,6 +620,53 @@ Wikipedia also asks callers to back off after any request that took more than
 a second to serve; `harvest_category` sleeps five seconds when that happens,
 which is the signal that usually precedes a 429 rather than the 429 itself.
 
+### !beef — a three-act feud
+
+```
+!beef Hardclaws zwift
+!beef random
+!beef zwift            (a lone genre word is the setting, not the rival)
+```
+
+Whoever types it stars in it, against the name they give. The story is four
+queued messages — header, three acts, winner — because a feud is 600+
+characters and a Twitch message is not.
+
+```
+BEEF | 🔥 BEEF: SpeedyDave vs. Hardclaws — the virtual mountains of Watopia 🔥
+BEEF | Act 1 — SpeedyDave reported Hardclaws for a 900-watt FTP that no human
+       has ever held.
+BEEF | Act 2 — SpeedyDave started lubing the chain with something that is
+       definitely not chain lube.
+BEEF | Act 3 — The league settled it on time trial. Hardclaws by four seconds.
+       🏆 WINNER: Hardclaws. SpeedyDave has left the building.
+```
+
+**Template-driven, not a model call per command.** A round trip is seconds,
+every beef would spend OpenRouter credits, and an account with none returns
+402 and disables the LLM for an hour — which would take the fun facts down
+with it. Six genres × 6 sparks × 6 escalations × 5 climaxes × 5 rivals ×
+either winner is **10,800 stories before names go in**, and every line is one
+a person read before it shipped. A model writing fiction about two named
+people in someone's chat can produce something genuinely hurtful, and nothing
+downstream would catch it.
+
+**The winner is rolled before the text is written**, so the story lands on the
+right outcome instead of the model being asked to retrofit one.
+
+**`!beef random` randomises the genre, not the opponent.** Pulling a bystander
+out of chat into a public feud they never asked for is how a joke command
+becomes a harassment report, and their chat reads it too. The rival is a named
+character — The Watt-Bomber, Lot Lizard Larry, Buttercream Brenda — unless the
+issuer typed a real name.
+
+| control | effect |
+| ------- | ------ |
+| `!beef off` / `on` / `status` | moderators only, silent for viewers, works while the bot is off |
+| `"beef_enabled": false` | off for everyone; the bot names the key |
+
+`!beef` is reserved, so a moderator cannot shadow it with a custom command.
+
 ### The other games never run dry either
 
 `!joke`, `!randomfact`, `!riddle` and `!wyr` fetch live from their own

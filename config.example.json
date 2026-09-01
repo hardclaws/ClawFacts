@@ -44,6 +44,7 @@
   "cb_command_enabled": true,
   "cb_command_access": "everyone",
   "cb_yell_enabled": true,
+  "beef_enabled": true,
   "shoutout_enabled": true,
   "shoutout_theme": "auto",
   "custom_commands_enabled": true,

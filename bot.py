@@ -45,6 +45,7 @@ import reminders as reminders_mod
 import haul as haul_mod
 import names as names_mod
 import trucker as trucker_mod
+import beef as beef_mod
 import shoutout as shoutout_mod
 import customcmds as customcmds_mod
 import whois
@@ -85,13 +86,14 @@ CB_COMMANDS = {"cb", "radio", "breaker"}
 # !so <name> shouts a channel out. It also fires on its own when the stream
 # gets raided, so the switch moderates both paths.
 SO_COMMANDS = {"so", "shoutout"}
+BEEF_COMMANDS = {"beef"}
 # !cmd lets a moderator define new commands in chat, with no restart.
 CMD_COMMANDS = {"cmd", "customcmd"}
 
 # Everything a moderator must not be able to redefine. Without this, "!help"
 # typed by a moderator would silently stop meaning help.
 RESERVED_COMMANDS = (
-    FUNFACT_ALIASES | {"funfact"} | EXTRAS_COMMANDS | SMK_ALIASES
+    {"beef"} | FUNFACT_ALIASES | {"funfact"} | EXTRAS_COMMANDS | SMK_ALIASES
     | HELP_COMMANDS | WHOIS_COMMANDS | TWITCH_COMMANDS | REMINDER_COMMANDS
     | HAUL_COMMANDS | CB_COMMANDS | SO_COMMANDS | CMD_COMMANDS | {"bot"}
 )
@@ -148,6 +150,7 @@ DEFAULTS = {
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
+    "beef_enabled": True,
     # "auto" follows whatever this channel is streaming; or force one of
     # trucking / zwift / fortnite / generic.
     "shoutout_theme": "auto",
@@ -327,6 +330,7 @@ class TwitchBot:
         self._warned_401 = False
         self._cb_ambient_off = False        # !cb off, until the next restart
         self._so_off = False                # !so off, until the next restart
+        self._beef_off = False
         self._so_lock = threading.Lock()    # one shoutout per raid
         self._so_theme_cache = ("generic", 0.0)   # (theme, valid until)
         self._opts = {                      # passed through to funfacts
@@ -694,6 +698,12 @@ class TwitchBot:
         if command in SO_COMMANDS and self._so_switch(nick, badges, argument):
             return
 
+        # !beef off/on/status must stay reachable while the bot is switched
+        # off, for the same reason !so and !cb do.
+        if command in BEEF_COMMANDS and self._beef_switch(nick, badges,
+                                                          argument):
+            return
+
         if command in REMINDER_COMMANDS:
             self._reminder_command(nick, badges, argument)
             return
@@ -727,7 +737,8 @@ class TwitchBot:
             command = "smk"
         elif extras_enabled and (command in EXTRAS_COMMANDS
                                  or command in CB_COMMANDS
-                                 or command in SO_COMMANDS):
+                                 or command in SO_COMMANDS
+                                 or command in BEEF_COMMANDS):
             pass
         elif command in self.custom_cmds:
             # A command a moderator defined themselves. Deliberately outside
@@ -1200,6 +1211,65 @@ class TwitchBot:
         self._log(f"!cmd {sub} {name} from {nick} -> ok={ok}")
         return True
 
+    def _beef_switch(self, nick: str, badges: str, argument: str) -> bool:
+        """!beef off | on | status - moderators only, silent for viewers."""
+        sub = " ".join((argument or "").split()).lower()
+        if sub not in ("off", "on", "status", "enable", "disable"):
+            return False
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            self._log(f"!beef {sub} from {nick} ignored - not a moderator")
+            return True
+        if sub in ("off", "disable"):
+            self._beef_off = True
+        elif sub in ("on", "enable"):
+            self._beef_off = False
+        self._say(f"@{nick} !beef is "
+                  f"{'OFF' if self._beef_off else 'on'}.")
+        return True
+
+    def _reply_beef(self, nick: str, argument: str) -> None:
+        """!beef <rival> [genre] - a three-act feud, queued not said inline.
+
+        The issuer is whoever typed it: that is the point of the game, and it
+        is a person choosing to put themselves in.
+
+        `!beef random` randomises the genre, NOT the opponent. Pulling a
+        bystander out of chat into a public feud they never asked for is the
+        fastest way to turn a joke command into a harassment report, and their
+        chat reads it too.
+        """
+        if not self.cfg.get("beef_enabled", True) or self._beef_off:
+            where = ("switched off in config.json (beef_enabled)"
+                     if not self.cfg.get("beef_enabled", True)
+                     else "switched off - a moderator can turn it back on "
+                         "with !beef on")
+            self._say(f"@{nick} !beef is {where}.")
+            return
+
+        args = " ".join((argument or "").split())
+        if not args:
+            # A bare !beef is ambiguous - against whom? Everything else
+            # plays: an unusable rival name falls back to one of the named
+            # characters rather than dead-ending the joke.
+            self._say(f"@{nick} usage: !beef <name> [genre] - e.g. !beef "
+                      f"Hardclaws zwift, or !beef random for a surprise one")
+            return
+        rival, _, genre = args.partition(" ")
+        rival = rival.strip()
+        if not genre and rival.lower() in beef_mod.GENRES:
+            # "!beef zwift" means a beef set in Zwift, not a feud against
+            # somebody called zwift.
+            rival, genre = "", rival
+        lines = beef_mod.beef(nick, rival, genre)
+        if not lines:
+            self._say(f"@{nick} I could not build a beef from that - try "
+                      f"!beef <name> [genre]")
+            return
+        head = f"{beef_mod.LABEL} | "
+        for line in lines:
+            self._queue_fitted(head, line)
+        self._log(f"!beef {nick} vs {rival or 'a rival'} ({genre or 'random'})")
+
     def _so_switch(self, nick: str, badges: str, argument: str) -> bool:
         """!so off | !so on | !so status - moderators only.
 
@@ -1583,6 +1653,8 @@ class TwitchBot:
                     self._reply_cb(nick, badges)
                 elif command in SO_COMMANDS:
                     self._reply_so(nick, badges, argument)
+                elif command in BEEF_COMMANDS:
+                    self._reply_beef(nick, argument)
                 elif command in self.custom_cmds:
                     self._say_custom(nick, command)
                 else:

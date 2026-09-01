@@ -269,6 +269,33 @@ def main() -> int:
         return not funfacts._is_echo(
             "Illinois was admitted as a state in 1818.", "illinois")
 
+    def _beef_is_sound():
+        """!beef must queue, name its issuer, and never pick a bystander."""
+        import beef as _beef
+
+        if _beef.combination_count() < 5000:
+            return False
+        named = set()
+        for pool in _beef.RIVALS.values():
+            named |= set(pool)
+        for genre in _beef.GENRES:
+            for _ in range(40):
+                lines = _beef.beef("Hardclaws", "random", genre)
+                if len(lines) != 4:
+                    return False
+                if not any("Hardclaws" in ln for ln in lines):
+                    return False
+                rival = lines[0].split(" vs. ", 1)[1].split(" \u2014 ", 1)[0]
+                if rival not in named:
+                    return False
+                for ln in lines:
+                    if "{" in ln or len(ln) >= 450:
+                        return False
+                    for word in ln.split():
+                        if word.endswith("'s") and word[:-2].lower().endswith("s"):
+                            return False
+        return True
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -586,6 +613,11 @@ def main() -> int:
         ("a shoutout names a game only when Twitch confirmed the stream",
          hasattr(__import__("access").Helix("c", "t", "1"), "stream_info")
          and _shoutout_says_nothing_false()),
+        ("!beef queues, names its issuer, and never picks a bystander",
+         hasattr(_bot.TwitchBot, "_reply_beef")
+         and "beef" in _bot.RESERVED_COMMANDS
+         and "beef" in _bot.BEEF_COMMANDS
+         and _beef_is_sound()),
         ("an echoed question is never posted back as the fact",
          hasattr(funfacts, "_is_echo") and _an_echo_is_not_a_fact()),
         ("a free-form question is answered, but only from its sources",
