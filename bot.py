@@ -46,6 +46,7 @@ import haul as haul_mod
 import names as names_mod
 import trucker as trucker_mod
 import beef as beef_mod
+import beefstats as beefstats_mod
 import shoutout as shoutout_mod
 import customcmds as customcmds_mod
 import whois
@@ -87,13 +88,23 @@ CB_COMMANDS = {"cb", "radio", "breaker"}
 # gets raided, so the switch moderates both paths.
 SO_COMMANDS = {"so", "shoutout"}
 BEEF_COMMANDS = {"beef"}
+# !revenge is its own command rather than a !beef subcommand: the player who
+# just lost types it in a hurry, and '!beef revenge' would collide with a
+# rival actually called Revenge.
+REVENGE_COMMANDS = {"revenge"}
+# "!beef stats" and friends. Parsed before the rival, so nobody ends up in a
+# feud against somebody called Stats - the same bug class as '!beef random'
+# once being accepted as a display name.
+BEEF_STATS_WORDS = {"stats", "stat", "score", "scoreboard", "leaderboard",
+                    "top", "lb"}
 # !cmd lets a moderator define new commands in chat, with no restart.
 CMD_COMMANDS = {"cmd", "customcmd"}
 
 # Everything a moderator must not be able to redefine. Without this, "!help"
 # typed by a moderator would silently stop meaning help.
 RESERVED_COMMANDS = (
-    {"beef"} | FUNFACT_ALIASES | {"funfact"} | EXTRAS_COMMANDS | SMK_ALIASES
+    {"beef", "revenge"} | FUNFACT_ALIASES | {"funfact"} | EXTRAS_COMMANDS
+    | SMK_ALIASES
     | HELP_COMMANDS | WHOIS_COMMANDS | TWITCH_COMMANDS | REMINDER_COMMANDS
     | HAUL_COMMANDS | CB_COMMANDS | SO_COMMANDS | CMD_COMMANDS | {"bot"}
 )
@@ -151,6 +162,10 @@ DEFAULTS = {
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
     "beef_enabled": True,
+    # Where the beef leaderboard and the !revenge windows live. Local file,
+    # local logic: the game runs on what the bot already has and never waits
+    # on an LLM, so there is nothing else to configure.
+    "beef_state_path": "beef_state.json",
     # "auto" follows whatever this channel is streaming; or force one of
     # trucking / zwift / fortnite / generic.
     "shoutout_theme": "auto",
@@ -331,6 +346,13 @@ class TwitchBot:
         self._cb_ambient_off = False        # !cb off, until the next restart
         self._so_off = False                # !so off, until the next restart
         self._beef_off = False
+        # The beef game's persistent state: points, titles, the leaderboard,
+        # the !revenge window. A file plus pure-local logic - if any part of
+        # the game could fail because a model or an API was down, it would be
+        # a dependency of the fun facts, not a game.
+        self.beef_state = beefstats_mod.BeefState(
+            path=str(cfg.get("beef_state_path") or beefstats_mod.STATE_PATH))
+        self._beef_seen = beefstats_mod.RecentChatters()
         self._so_lock = threading.Lock()    # one shoutout per raid
         self._so_theme_cache = ("generic", 0.0)   # (theme, valid until)
         self._opts = {                      # passed through to funfacts
@@ -670,6 +692,10 @@ class TwitchBot:
                     login: str = "", badges: str = "") -> None:
         # Anything anyone says counts as chat being alive, not just commands.
         self._last_chat = time.time()
+        # ...and anyone who says anything counts as present. Presence only
+        # ever decides whether an @-tag would reach somebody - never who gets
+        # named in a feud - and it is kept in memory, not in a file.
+        self._beef_seen.note(nick)
         prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
@@ -738,7 +764,8 @@ class TwitchBot:
         elif extras_enabled and (command in EXTRAS_COMMANDS
                                  or command in CB_COMMANDS
                                  or command in SO_COMMANDS
-                                 or command in BEEF_COMMANDS):
+                                 or command in BEEF_COMMANDS
+                                 or command in REVENGE_COMMANDS):
             pass
         elif command in self.custom_cmds:
             # A command a moderator defined themselves. Deliberately outside
@@ -1238,15 +1265,21 @@ class TwitchBot:
         fastest way to turn a joke command into a harassment report, and their
         chat reads it too.
         """
-        if not self.cfg.get("beef_enabled", True) or self._beef_off:
-            where = ("switched off in config.json (beef_enabled)"
-                     if not self.cfg.get("beef_enabled", True)
-                     else "switched off - a moderator can turn it back on "
-                         "with !beef on")
-            self._say(f"@{nick} !beef is {where}.")
+        args = " ".join((argument or "").split())
+
+        # The scoreboard is read-only, so it answers even while the game is
+        # switched off: turning the feuds off should not hide the standings,
+        # and "!beef stats" must never start a feud with somebody called
+        # Stats. This runs before the off gates on purpose.
+        first, _, rest = args.partition(" ")
+        if first.lower() in BEEF_STATS_WORDS:
+            self._say_beef_stats(nick, rest.strip())
             return
 
-        args = " ".join((argument or "").split())
+        if not self.cfg.get("beef_enabled", True) or self._beef_off:
+            self._say(f"@{nick} !beef is {self._beef_off_reason()}.")
+            return
+
         if not args:
             # A bare !beef is ambiguous - against whom? Everything else
             # plays: an unusable rival name falls back to one of the named
@@ -1260,15 +1293,101 @@ class TwitchBot:
             # "!beef zwift" means a beef set in Zwift, not a feud against
             # somebody called zwift.
             rival, genre = "", rival
-        lines = beef_mod.beef(nick, rival, genre)
-        if not lines:
+        result = beef_mod.feud(nick, rival, genre,
+                               tag=bool(self._beef_tag_target(rival)))
+        if not result:
             self._say(f"@{nick} I could not build a beef from that - try "
                       f"!beef <name> [genre]")
             return
         head = f"{beef_mod.LABEL} | "
-        for line in lines:
+        for line in result["lines"]:
             self._queue_fitted(head, line)
-        self._log(f"!beef {nick} vs {rival or 'a rival'} ({genre or 'random'})")
+        # Scored after the lines are queued, so a scoring hiccup can never
+        # cost chat the story - and because the story is the point.
+        self.beef_state.record(nick, result["rival"], result["genre"],
+                               result["issuer_won"])
+        self._log(f"!beef {nick} vs {result['rival']} ({result['genre']}) - "
+                  f"winner {result['winner']}")
+
+    def _reply_revenge(self, nick: str) -> None:
+        """!revenge - rematch the rival who just beat you, inside the window.
+
+        The window is a timestamp in the state file, not a Timer on a thread:
+        the worker that ran the original beef is long gone by the time the
+        player types this, and a restart inside the window must not eat the
+        rematch. A fresh 50/50 roll - an unloseable rematch would not be
+        worth the extra point.
+        """
+        if not self.cfg.get("beef_enabled", True) or self._beef_off:
+            self._say(f"@{nick} !beef is {self._beef_off_reason()}.")
+            return
+        window = self.beef_state.window_for(nick)
+        if not window:
+            prefix = self.cfg.get("prefix", "!")
+            self._say(f"@{nick} nothing to avenge - start one: {prefix}beef "
+                      f"<name> [genre], and if you lose you get 60s to "
+                      f"{prefix}revenge it.")
+            return
+        result = beef_mod.feud(nick, window["rival"], window["genre"],
+                               revenge=True,
+                               tag=bool(self._beef_tag_target(window["rival"])))
+        if not result:
+            self._say(f"@{nick} that rematch fell apart - try !beef "
+                      f"{window['rival']} {window['genre']}")
+            return
+        head = f"{beef_mod.LABEL} | "
+        for line in result["lines"]:
+            self._queue_fitted(head, line)
+        self.beef_state.record(nick, result["rival"], result["genre"],
+                               result["issuer_won"], revenge=True)
+        self._log(f"!revenge {nick} vs {result['rival']} "
+                  f"({result['genre']}) - winner {result['winner']}")
+
+    def _beef_off_reason(self) -> str:
+        """Why the beef game is off - the config key when config did it,
+        the way back when a moderator did. Named either way: a switch that
+        just says 'off' makes the user guess which lever to pull."""
+        if not self.cfg.get("beef_enabled", True):
+            return "switched off in config.json (beef_enabled)"
+        return "switched off - a moderator can turn it back on with !beef on"
+
+    def _beef_tag_target(self, rival: str) -> str:
+        """The rival name if it may be @-tagged in the headline, else "".
+
+        Dynamic, and deliberately strict: a tag pings a person, so it has to
+        be aimed at somebody who is actually there and has actually joined
+        the game themselves. A bystander the issuer named still gets named -
+        naming is the issuer's choice - but they are never pinged into a
+        feud they never touched. The channel's broadcaster is the one
+        presence this bot can assume without asking.
+        """
+        name = (rival or "").strip()
+        if not name or not beef_mod._valid(name):
+            return ""
+        owner = (self.cfg.get("channel") or "").lstrip("#@ ").lower()
+        if owner and name.lower() == owner:
+            return name
+        if self.beef_state.is_player(name) and self._beef_seen.seen(name):
+            return name
+        return ""
+
+    def _say_beef_stats(self, nick: str, name: str) -> None:
+        """!beef stats - the leaderboard, or one player's card."""
+        if name:
+            card = self.beef_state.card(name)
+            if card:
+                self._say(self._fit(f"@{nick} ", card))
+            else:
+                self._say(f"@{nick} no beefs on file for {name} - they "
+                          f"haven't started one yet.")
+            return
+        line = self.beef_state.leader_line()
+        if not line:
+            prefix = self.cfg.get("prefix", "!")
+            self._say(f"@{nick} nobody has started a beef yet - be the "
+                      f"first: {prefix}beef <name>")
+            return
+        self._say(self._fit(f"@{nick} beef leaderboard: ", line))
 
     def _so_switch(self, nick: str, badges: str, argument: str) -> bool:
         """!so off | !so on | !so status - moderators only.
@@ -1655,6 +1774,8 @@ class TwitchBot:
                     self._reply_so(nick, badges, argument)
                 elif command in BEEF_COMMANDS:
                     self._reply_beef(nick, argument)
+                elif command in REVENGE_COMMANDS:
+                    self._reply_revenge(nick)
                 elif command in self.custom_cmds:
                     self._say_custom(nick, command)
                 else:
@@ -1681,6 +1802,9 @@ class TwitchBot:
             if self.cfg.get("cb_command_enabled", True) else None,
             f"{prefix}so <name> - shout a channel out (mods only)"
             if self.cfg.get("shoutout_enabled", True) else None,
+            f"{prefix}beef <name> [genre] - a three-act feud ({prefix}beef "
+            f"stats for the standings, {prefix}revenge after a loss)"
+            if self.cfg.get("beef_enabled", True) else None,
         ]
         # Packed into as few messages as fit, rather than one "|" line.
         # Joining them all means every command added pushes the same message

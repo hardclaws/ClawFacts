@@ -626,6 +626,8 @@ which is the signal that usually precedes a 429 rather than the 429 itself.
 !beef Hardclaws zwift
 !beef random
 !beef zwift            (a lone genre word is the setting, not the rival)
+!revenge               (rematch the rival who just beat you, within 60s)
+!beef stats            (the leaderboard; !beef stats <name> for one player)
 ```
 
 Whoever types it stars in it, against the name they give. The story is four
@@ -646,10 +648,14 @@ BEEF | Act 3 — The league settled it on time trial. Hardclaws by four seconds.
 every beef would spend OpenRouter credits, and an account with none returns
 402 and disables the LLM for an hour — which would take the fun facts down
 with it. Six genres × 6 sparks × 6 escalations × 5 climaxes × 5 rivals ×
-either winner is **10,800 stories before names go in**, and every line is one
-a person read before it shipped. A model writing fiction about two named
-people in someone's chat can produce something genuinely hurtful, and nothing
-downstream would catch it.
+either winner is **10,800 stories before names go in** (the six rematch
+openers double it again to 21,600), and every line is one a person read
+before it shipped. A model writing fiction about two named people in
+someone's chat can produce something genuinely hurtful, and nothing
+downstream would catch it. Neither `beef.py` nor `beefstats.py` imports the
+LLM, the network, or a key — a dead Ollama or a 402 on the fun facts cannot
+take the feuds down with them, and `python3 check_fixes.py` refuses a copy
+where that ever changes.
 
 **The winner is rolled before the text is written**, so the story lands on the
 right outcome instead of the model being asked to retrofit one.
@@ -664,8 +670,52 @@ issuer typed a real name.
 | ------- | ------ |
 | `!beef off` / `on` / `status` | moderators only, silent for viewers, works while the bot is off |
 | `"beef_enabled": false` | off for everyone; the bot names the key |
+| `!revenge` | the player who just lost may rematch the same rival within 60s |
+| `!beef stats [name]` | the top five, or one player's card; readable even while the game is off |
 
-`!beef` is reserved, so a moderator cannot shadow it with a custom command.
+`!beef` and `!revenge` are both reserved, so a moderator cannot shadow either
+with a custom command.
+
+#### !revenge — the rematch
+
+Whoever just **lost** a beef has 60 seconds to run it back against the same
+rival, same genre:
+
+```
+BEEF | 🔥 REMATCH: SpeedyDave vs. Hardclaws — the virtual mountains of Watopia 🔥
+BEEF | Act 1 — SpeedyDave demanded a rematch on the spot, and the room went quiet.
+...
+```
+
+The window is a timestamp in `beef_state.json`, not a timer on a thread — the
+worker that ran the original beef is long gone by the time the player types
+`!revenge`, and a restart inside the window must not eat the rematch. The
+rematch is a fresh 50/50 roll: an unloseable rematch would not be worth the
+extra point. Winning one is the hard win of the game.
+
+#### !beef stats — the leaderboard
+
+```
+!beef stats              -> the top five
+!beef stats Hardclaws    -> one player's card
+```
+
+Points: a win is **+2**, a loss **−1**, an avenged loss **+3**. Streaks are
+consecutive wins; titles run from *Fresh Meat* through *Feud Professional* to
+*Legendary Grudge*. Only the person who typed the command is scored — a named
+rival who never played has not opted into having a record. The state lives in
+`beef_state.json` next to the code, written atomically; losing it loses the
+board, not the bot. The scoring knobs (`WIN_POINTS`, `REVENGE_WINDOW`, …) are
+all at the top of `beefstats.py` for tuning after a stream.
+
+#### Tagging is earned, not assumed
+
+The headline @-tags the rival only when that rival **has played the game
+themselves** (typed `!beef` or `!revenge` at least once) **and was seen in
+chat recently** — or is the channel's broadcaster, the one presence the bot
+can assume. A bystander the issuer named still gets *named*; naming is the
+issuer's choice. But they are never *pinged* into a feud they never touched.
+Presence is kept in memory only, capped, and never written to a file.
 
 ### The other games never run dry either
 
@@ -1563,6 +1613,7 @@ appends fake joke comments.
 | `customcmds.py`      | `!cmd` - moderator-defined commands.            |
 | `shoutout.py`        | The raid shoutout wording.                      |
 | `trucker.py`         | The `!cb` radio chatter generator.              |
+| `beefstats.py`       | Beef-game state: leaderboard, !revenge window, tagging gate. |
 | `access.py`          | Who may use a command, and how often.           |
 | `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
@@ -1582,10 +1633,13 @@ appends fake joke comments.
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_idle_test.py`  | Offline idle-chat tests.                        |
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
+| `mock_beef_test.py`  | Offline `!beef` story tests.                    |
+| `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |
 | `mock_shoutout_test.py` | Offline raid-shoutout tests.                 |
 | `mock_customcmds_test.py` | Offline `!cmd` tests.                      |
 | `tokens.json`        | Created on first login; holds the saved login.  |
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |
+| `beef_state.json`    | The beef leaderboard and !revenge windows.      |
 | `custom_commands.json` | Mod-defined commands; written at runtime.     |
 | `names.json`         | Harvested `!smk` names; written at runtime.     |

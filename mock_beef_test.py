@@ -1,7 +1,9 @@
 """Offline tests for !beef. No network, no model."""
 
+import os
 import random
 import re
+import tempfile
 import threading
 
 import beef
@@ -13,7 +15,11 @@ VIEWER = ""
 
 def _bot(**over):
     cfg = dict(bot_mod.DEFAULTS, nick="bot", channel="#test",
-               cooldown_seconds=0, max_message_chars=450)
+               cooldown_seconds=0, max_message_chars=450,
+               # A temp state file keeps the run hermetic: scoring a beef in a
+               # test must not grow a leaderboard in the repo either.
+               beef_state_path=os.path.join(
+                   tempfile.mkdtemp(prefix="beef-test-"), "beef_state.json"))
     cfg.update(over)
     b = bot_mod.TwitchBot(cfg)
     said = []

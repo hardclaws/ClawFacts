@@ -13,3 +13,6 @@ __pycache__/
 # harvested !smk name cache (rebuilt in the background, never hand-edited)
 names.json
 custom_commands.json
+
+# the beef game scoreboard and !revenge windows
+beef_state.json

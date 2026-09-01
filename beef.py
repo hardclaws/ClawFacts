@@ -16,12 +16,18 @@ reasons the rest of this bot already learned:
 The winner is decided BEFORE the text is assembled, the same way the blueprint
 proposed - so the story always lands on the right outcome instead of the model
 being asked to retrofit one.
+
+!revenge is a retelling of the same engine (feud(revenge=True)), not a second
+one: a rematch headline, a rematch opener, a fresh 50/50 roll. Its window and
+the leaderboard live in beefstats.py, which is as local as this file - the
+game never waits on a model, spends a credit, or breaks when the LLM is down.
 """
 
 import random
 import re
 
-__all__ = ["beef", "GENRES", "combination_count", "genre_for", "LABEL"]
+__all__ = ["beef", "feud", "GENRES", "combination_count", "genre_for", "LABEL",
+           "REMATCH_SPARKS"]
 
 LABEL = "BEEF"
 
@@ -212,6 +218,19 @@ _ALIASES = {
     "karaoke": ("singing", "song", "mic", "open mic"),
 }
 
+#: Rematch openers - Act 1 of a !revenge story. Genre-agnostic on purpose: a
+#: slammed table is a slammed table in any setting, and per-genre rematch
+#: pools would double the text for no new joke. Acts 2 and 3 stay native to
+#: the genre the original feud was fought in.
+REMATCH_SPARKS = (
+    "{a} demanded a rematch on the spot, and the room went quiet.",
+    "{b} said 'best of three' before {a} even finished asking.",
+    "{a} flipped the table, set it back up, and demanded it again.",
+    "{b} agreed to run it back, purely to watch {a} lose twice.",
+    "{a} queued the rematch with shaking hands and total confidence.",
+    "The rematch was scheduled for right now. {b} did not object, which worried everyone.",
+)
+
 _NAME_OK = re.compile(r"^[A-Za-z0-9_]{2,25}$")
 
 
@@ -242,28 +261,39 @@ def _valid(name: str) -> bool:
 
 
 def combination_count() -> int:
-    """Distinct stories, before names go in."""
+    """Distinct stories, before names go in.
+
+    Act 1 is drawn from the genre's sparks or, for a rematch, the shared
+    rematch openers - both pools count, so revenge doubles the openers rather
+    than reusing them.
+    """
     total = 0
     for genre, pools in GENRES.items():
-        total += (len(pools["sparks"]) * len(pools["escalations"])
+        total += ((len(pools["sparks"]) + len(REMATCH_SPARKS))
+                  * len(pools["escalations"])
                   * len(pools["climaxes"]) * len(RIVALS[genre]) * 2)
     return total
 
 
-def beef(issuer: str, rival: str = "", genre: str = "") -> list:
-    """Three chat lines telling a feud, or [] if the names are unusable.
+def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
+         tag: bool = False) -> dict | None:
+    """Tell one feud and report what happened, or None if names are unusable.
 
-    The issuer is whoever typed the command - that is the whole point of the
-    game, and it is a person choosing to put themselves in. The rival defaults
-    to one of the named characters rather than another viewer, because pulling
-    a stranger into a public feud they did not ask for is not a joke to them.
+    This is the engine behind beef(): same templates, same winner-first roll,
+    but the caller gets the outcome too - the leaderboard and the !revenge
+    window need to know who won, and parsing it back out of the English was
+    how the last self-inflicted bug happened.
 
-    Returns a list of lines rather than one string: the story is 600+
-    characters and a Twitch message is not. The caller queues them.
+    revenge=True retells it as a rematch: a REMATCH headline and a rematch
+    opener in Act 1, everything else native to the genre. The roll stays
+    50/50 - a rematch you were guaranteed to win would not be worth points.
+
+    tag=True renders the rival as @name in the headline only. The caller
+    decides who deserves a ping; this module just formats it.
     """
     issuer = (issuer or "").strip()
     if not _valid(issuer):
-        return []
+        return None
 
     genre_key = genre_for(genre)
     pools = GENRES[genre_key]
@@ -296,15 +326,45 @@ def beef(issuer: str, rival: str = "", genre: str = "") -> list:
                     .replace("{l}'s", _poss(loser)))
         return text.format(a=issuer, b=rival, w=winner, l=loser)
 
-    head = f"\U0001f525 BEEF: {issuer} vs. {rival} \u2014 {pools['setting']} \U0001f525"
-    spark = fill(random.choice(pools["sparks"]))
+    label = "REMATCH" if revenge else "BEEF"
+    head_rival = f"@{rival}" if tag else rival
+    head = (f"\U0001f525 {label}: {issuer} vs. {head_rival} "
+            f"\u2014 {pools['setting']} \U0001f525")
+    opener = random.choice(REMATCH_SPARKS if revenge else pools["sparks"])
+    spark = fill(opener)
     escalation = fill(random.choice(pools["escalations"]))
     climax = fill(random.choice(pools["climaxes"]))
     verdict = f"\U0001f3c6 WINNER: {winner}. {loser} has left the building."
 
-    return [
-        head,
-        f"Act 1 \u2014 {spark}",
-        f"Act 2 \u2014 {escalation}",
-        f"Act 3 \u2014 {climax} {verdict}",
-    ]
+    return {
+        "lines": [
+            head,
+            f"Act 1 \u2014 {spark}",
+            f"Act 2 \u2014 {escalation}",
+            f"Act 3 \u2014 {climax} {verdict}",
+        ],
+        "issuer": issuer,
+        "rival": rival,
+        "genre": genre_key,
+        "winner": winner,
+        "loser": loser,
+        "issuer_won": issuer_wins,
+    }
+
+
+def beef(issuer: str, rival: str = "", genre: str = "") -> list:
+    """Three chat lines telling a feud, or [] if the names are unusable.
+
+    The issuer is whoever typed the command - that is the whole point of the
+    game, and it is a person choosing to put themselves in. The rival defaults
+    to one of the named characters rather than another viewer, because pulling
+    a stranger into a public feud they did not ask for is not a joke to them.
+
+    Returns a list of lines rather than one string: the story is 600+
+    characters and a Twitch message is not. The caller queues them.
+
+    Callers that need the outcome (stats, !revenge) call feud() instead; this
+    stays for every caller that only wants the story.
+    """
+    result = feud(issuer, rival, genre)
+    return result["lines"] if result else []

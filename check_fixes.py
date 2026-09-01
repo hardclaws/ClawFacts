@@ -296,6 +296,54 @@ def main() -> int:
                             return False
         return True
 
+    def _revenge_window_and_scoreboard():
+        """!revenge's window is a timestamp in a file, not a Timer on the
+        worker thread - and the scoreboard the window feeds survives a
+        restart. Presence alone never earns a tag."""
+        import os
+        import tempfile
+
+        import beefstats as _bs
+        t = [1000.0]
+        path = os.path.join(tempfile.mkdtemp(prefix="clawfacts-beef-"),
+                            "bs.json")
+        st = _bs.BeefState(path, clock=lambda: t[0])
+        st.record("Hardclaws", "Rival_Rob", "trucking", False)
+        t[0] += 5.0
+        w = st.window_for("Hardclaws")
+        if not w or w["rival"] != "Rival_Rob" or w["genre"] != "trucking":
+            return False
+        if not 0 < w["seconds_left"] <= 60:
+            return False
+        t[0] += 61.0
+        if st.window_for("Hardclaws"):
+            return False
+        again = _bs.BeefState(path, clock=lambda: t[0])
+        if not again.is_player("Hardclaws") or not again.leader_line():
+            return False
+        if not (again.card("hardclaws") or "").startswith("Hardclaws:"):
+            return False
+        # The tagging gate: seen-in-chat is necessary but not sufficient, and
+        # presence alone is never consent.
+        rc = _bs.RecentChatters(clock=lambda: t[0])
+        rc.note("Lurker_Lou")
+        return rc.seen("lurker_lou") and not rc.seen("NeverSeen")
+
+    def _beef_game_is_self_contained():
+        """The beef game must run on what the bot already has: no model, no
+        network, no key. A game that a dead Ollama or a 402 on the fun facts
+        could take down is a dependency, not a game."""
+        import beef as _beef
+        for fname in ("beef.py", "beefstats.py"):
+            src = pathlib.Path(fname).read_text(encoding="utf-8")
+            for marker in ("import llm", "from llm", "urllib", "http",
+                           "socket", "api_key"):
+                if marker in src:
+                    return False
+        res = _beef.feud("Hardclaws", "Rival_Rob", "trucking", revenge=True)
+        return bool(res) and len(res["lines"]) == 4 \
+            and res["lines"][0].startswith("\U0001f525 REMATCH:")
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -618,6 +666,17 @@ def main() -> int:
          and "beef" in _bot.RESERVED_COMMANDS
          and "beef" in _bot.BEEF_COMMANDS
          and _beef_is_sound()),
+        ("!revenge replays a lost beef inside its window",
+         hasattr(_bot.TwitchBot, "_reply_revenge")
+         and "revenge" in _bot.RESERVED_COMMANDS
+         and "revenge" in _bot.REVENGE_COMMANDS
+         and _revenge_window_and_scoreboard()),
+        ("!beef stats keeps a leaderboard that survives a restart",
+         hasattr(_bot.TwitchBot, "_say_beef_stats")
+         and hasattr(__import__("beefstats"), "BeefState")
+         and hasattr(__import__("beefstats"), "title_for")),
+        ("the beef game runs without the LLM (no model, no network)",
+         _beef_game_is_self_contained()),
         ("an echoed question is never posted back as the fact",
          hasattr(funfacts, "_is_echo") and _an_echo_is_not_a_fact()),
         ("a free-form question is answered, but only from its sources",
