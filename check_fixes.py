@@ -347,6 +347,31 @@ def main() -> int:
             and res["lines"][0].startswith("\U0001f525 REMATCH:") \
             and res["lines"][4].startswith("\U0001f3c6 WINNER:")
 
+    def _beef_llm_never_breaks_the_game():
+        """The optional LLM pass writes body lines only, behind validate(),
+        and every failure mode means templates. Unconfigured must mean None
+        immediately, and a story that swaps the pre-rolled winner must be
+        rejected - the leaderboard is scored off the roll, never the text."""
+        import beef as _beef
+        import beefllm as _bl
+        res = _beef.feud("Hardclaws", "Rival_Rob", "zwift")
+        if _bl.write_story(res, {"beef_llm": "auto"}) is not None:
+            return False                      # no key/base configured
+        other = dict(res, winner=res["loser"], loser=res["winner"])
+        good = "\n".join([
+            f"Act 1 — {res['issuer']} and {res['rival']} fell out over a pun.",
+            f"Act 2 — {res['rival']} escalated by bringing a leafblower.",
+            f"Act 3 — {res['winner']} settled it with one perfect move.",
+            f"\U0001f3c6 WINNER: {res['winner']}. "
+            f"{res['loser']} left mid-sentence."])
+        if _bl.validate(good, res) is None:
+            return False
+        if _bl.validate(good, other) is not None:
+            return False                      # wrong pre-rolled winner
+        if _bl.validate(good + "\nAct 4 — more", res) is not None:
+            return False                      # shape must be exactly four
+        return hasattr(_bot.TwitchBot, "_tell_beef")
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -680,6 +705,8 @@ def main() -> int:
          and hasattr(__import__("beefstats"), "title_for")),
         ("the beef game runs without the LLM (no model, no network)",
          _beef_game_is_self_contained()),
+        ("the beef LLM pass validates or falls back (never breaks the game)",
+         _beef_llm_never_breaks_the_game()),
         ("an echoed question is never posted back as the fact",
          hasattr(funfacts, "_is_echo") and _an_echo_is_not_a_fact()),
         ("a free-form question is answered, but only from its sources",

@@ -47,6 +47,7 @@ import names as names_mod
 import trucker as trucker_mod
 import beef as beef_mod
 import beefstats as beefstats_mod
+import beefllm
 import shoutout as shoutout_mod
 import customcmds as customcmds_mod
 import whois
@@ -162,14 +163,21 @@ DEFAULTS = {
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
     "beef_enabled": True,
+    # Optional LLM pass for beef stories: "auto" uses the model whenever one
+    # is configured, false always uses the templates. The model gets the
+    # pre-rolled winner as a fact, its output must pass the same shape checks
+    # the templates guarantee, and any miss (or timeout, or missing key)
+    # falls back to templates silently - the game never waits or breaks.
+    "beef_llm": "auto",
+    "beef_llm_timeout": 3.0,
     # Seconds between the acts of a beef story. The acts drip out with growing
     # pauses (0.75x, 1x, 1.25x, 1.5x this value) so chat can react between
     # them, and the verdict lands behind the longest pause. 0 sends the whole
     # story at once, which is a wall nobody reads.
     "beef_act_delay": 4.0,
     # Where the beef leaderboard and the !revenge windows live. Local file,
-    # local logic: the game runs on what the bot already has and never waits
-    # on an LLM, so there is nothing else to configure.
+    # local logic: the game runs on what the bot already has even with no LLM
+    # anywhere, so there is nothing else to configure.
     "beef_state_path": "beef_state.json",
     # "auto" follows whatever this channel is streaming; or force one of
     # trucking / zwift / fortnite / generic.
@@ -901,8 +909,42 @@ class TwitchBot:
     # the pause before the winner is announced is the whole point.
     _BEEF_GAPS = (0.75, 1.0, 1.25, 1.5)
 
-    def _schedule_beef(self, lines: list) -> None:
-        """Drip a beef story out with pauses between the acts.
+    def _tell_beef(self, result: dict) -> None:
+        """Post a feud's story: the headline NOW, the body drip-fed.
+
+        The headline is always the template one - it carries the @-tag
+        decision, and that is never the model's to make. It is queued before
+        the LLM is even asked, so the command always answers instantly.
+
+        Then the body lines: the model's, if beefllm delivered four lines
+        that passed the shape checks inside the deadline; the templates',
+        otherwise. Scoring (in the caller) uses `result` either way - the
+        winner was rolled before any text existed, and a story that
+        disagrees with the roll is a validation failure, not a story.
+        """
+        head = f"{beef_mod.LABEL} | "
+        lines = result["lines"]
+        self._queue_fitted(head, lines[0])
+        body = lines[1:]
+        try:
+            delay = float(self.cfg.get("beef_act_delay", 4.0) or 0.0)
+        except (TypeError, ValueError):
+            delay = 4.0
+        # Burst mode (delay 0) has no gap to write in - the template lines
+        # are queued immediately, so there is nothing for the model to fill.
+        if delay > 0 and beefllm.available(self.cfg):
+            got = beefllm.write_story(result, self.cfg)
+            if got:
+                body = got
+                self._log(f"!beef acts written by the LLM "
+                          f"({self.cfg.get('llm_model') or 'default model'})")
+            else:
+                self._log("!beef LLM pass failed or missed the deadline - "
+                          "templates used")
+        self._schedule_beef_rest(head, body, delay)
+
+    def _schedule_beef_rest(self, head: str, body: list, delay: float) -> None:
+        """Drip the body of a beef story out with pauses between the acts.
 
         Five messages at once is a wall - chat reads the ending before the
         middle, and there is nowhere for anyone to react. The acts go out on
@@ -910,21 +952,15 @@ class TwitchBot:
         thread stays free for other commands while the story breathes, and
         every send still passes through the queue's pacing.
 
-        beef_act_delay in config.json scales the gaps; 0 restores the old
-        all-at-once burst, which the tests rely on for determinism.
+        `delay` is beef_act_delay seconds; 0 sends the rest at once (the
+        tests rely on that for determinism).
         """
-        head = f"{beef_mod.LABEL} | "
-        try:
-            delay = float(self.cfg.get("beef_act_delay", 4.0) or 0.0)
-        except (TypeError, ValueError):
-            delay = 4.0
         if delay <= 0.0:
-            for line in lines:
+            for line in body:
                 self._queue_fitted(head, line)
             return
-        self._queue_fitted(head, lines[0])
         wait = 0.0
-        for line, gap in zip(lines[1:], self._BEEF_GAPS):
+        for line, gap in zip(body, self._BEEF_GAPS):
             wait += gap * delay
             t = threading.Timer(wait, self._queue_fitted, args=(head, line))
             t.daemon = True
@@ -1289,8 +1325,13 @@ class TwitchBot:
             self._beef_off = True
         elif sub in ("on", "enable"):
             self._beef_off = False
-        self._say(f"@{nick} !beef is "
-                  f"{'OFF' if self._beef_off else 'on'}.")
+        msg = f"@{nick} !beef is {'OFF' if self._beef_off else 'on'}."
+        if sub == "status":
+            src = ("LLM when the model delivers, templates otherwise"
+                   if beefllm.available(self.cfg)
+                   else "templates (no LLM in use)")
+            msg += f" Stories: {src}."
+        self._say(msg)
         return True
 
     def _reply_beef(self, nick: str, argument: str) -> None:
@@ -1338,7 +1379,7 @@ class TwitchBot:
             self._say(f"@{nick} I could not build a beef from that - try "
                       f"!beef <name> [genre]")
             return
-        self._schedule_beef(result["lines"])
+        self._tell_beef(result)
         # Scored after the lines are queued, so a scoring hiccup can never
         # cost chat the story - and because the story is the point.
         self.beef_state.record(nick, result["rival"], result["genre"],
@@ -1372,7 +1413,7 @@ class TwitchBot:
             self._say(f"@{nick} that rematch fell apart - try !beef "
                       f"{window['rival']} {window['genre']}")
             return
-        self._schedule_beef(result["lines"])
+        self._tell_beef(result)
         self.beef_state.record(nick, result["rival"], result["genre"],
                                result["issuer_won"], revenge=True)
         self._log(f"!revenge {nick} vs {result['rival']} "

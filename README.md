@@ -658,19 +658,27 @@ BEEF | Act 3 — Last corner of the crit: TruckingWithDoc took an inside line
 BEEF | 🏆 WINNER: TruckingWithDoc. SpeedyDave says the result is 'under review'.
 ```
 
-**Template-driven, not a model call per command.** A round trip is seconds,
-every beef would spend OpenRouter credits, and an account with none returns
-402 and disables the LLM for an hour — which would take the fun facts down
-with it. Six genres × 18 openers (incl. the six rematch lines) × 10
+**Template-driven, with an optional LLM pass that has to earn its slot.**
+The templates are the engine of record: the winner is rolled before any text
+exists, and every template line is one a person read before it shipped. When
+an LLM is configured (`beef_llm: "auto"`), `beefllm.py` asks the model for
+the three acts and the verdict while chat is still reading the headline —
+the pacing work is what makes this safe, because the first act's gap is the
+model's deadline. Deliver in time and pass `validate()` — exactly four lines,
+the Act prefixes, **the pre-rolled winner**, both players in the acts, length
+limits, no `@`-pings, no URLs or markup — and chat gets the model's version.
+Anything else (no key, 402, timeout, wrong winner, creative formatting)
+falls back to the template lines silently. The headline is always the
+template one: it carries the @-tag decision, and that is never the model's
+to make. The leaderboard and `!revenge` are scored off the pre-rolled winner
+either way, so the model cannot tilt the game. Six genres × 18 openers × 10
 escalations × 6 climaxes × 5 rivals × either winner × 9 exit lines is
-**583,200 stories on the spine before names go in** — and the quotes, crowd
-reactions, stakes and act tags multiply it beyond that. Every line is one a
-person read before it shipped. A model writing fiction about two named
-people in someone's chat can produce something genuinely hurtful, and nothing
-downstream would catch it. Neither `beef.py` nor `beefstats.py` imports the
-LLM, the network, or a key — a dead Ollama or a 402 on the fun facts cannot
-take the feuds down with them, and `python3 check_fixes.py` refuses a copy
-where that ever changes.
+**583,200 template stories on the spine before names go in**, so the
+fallback is never a consolation prize. Neither `beef.py` nor `beefstats.py`
+imports the LLM, the network, or a key — a dead Ollama or a 402 on the fun
+facts cannot take the feuds down with them — and `python3 check_fixes.py`
+refuses a copy where that ever changes, or where the LLM pass stops
+validating its output.
 
 **The winner is rolled before the text is written**, so the story lands on the
 right outcome instead of the model being asked to retrofit one — and the
@@ -697,6 +705,8 @@ issuer typed a real name.
 | `!beef off` / `on` / `status` | moderators only, silent for viewers, works while the bot is off |
 | `"beef_enabled": false` | off for everyone; the bot names the key |
 | `"beef_act_delay": 4` | seconds between the acts (0 = the whole story at once) |
+| `"beef_llm": "auto"` | LLM writes the acts when a model is configured; `false` = templates only. Failures fall back silently |
+| `"beef_llm_timeout": 3` | seconds the model gets — never more than the gap before Act 1 |
 | `!revenge` | the player who just lost may rematch the same rival within 60s |
 | `!beef stats [name]` | the top five, or one player's card; readable even while the game is off |
 
@@ -1642,6 +1652,7 @@ appends fake joke comments.
 | `shoutout.py`        | The raid shoutout wording.                      |
 | `trucker.py`         | The `!cb` radio chatter generator.              |
 | `beefstats.py`       | Beef-game state: leaderboard, !revenge window, tagging gate. |
+| `beefllm.py`         | Optional LLM pass for beef acts — validates or falls back.   |
 | `access.py`          | Who may use a command, and how often.           |
 | `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
@@ -1663,6 +1674,7 @@ appends fake joke comments.
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
 | `mock_beef_test.py`  | Offline `!beef` story tests.                    |
 | `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |
+| `mock_beefllm_test.py` | Offline LLM-pass tests, incl. a fake OpenAI server. |
 | `mock_shoutout_test.py` | Offline raid-shoutout tests.                 |
 | `mock_customcmds_test.py` | Offline `!cmd` tests.                      |
 | `tokens.json`        | Created on first login; holds the saved login.  |

@@ -45,6 +45,8 @@
   "cb_command_access": "everyone",
   "cb_yell_enabled": true,
   "beef_enabled": true,
+  "beef_llm": "auto",
+  "beef_llm_timeout": 3,
   "beef_act_delay": 4,
   "shoutout_enabled": true,
   "shoutout_theme": "auto",
