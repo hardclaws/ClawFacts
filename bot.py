@@ -1715,6 +1715,67 @@ class TwitchBot:
         self._log(f"replied for {argument!r}")
 
 
+def _doctor_questions(cfg: dict) -> None:
+    """Report - and actually exercise - the free-form question path.
+
+    --doctor printed a healthy login and a list of fact sources while saying
+    nothing about whether questions can be answered at all. That left a
+    working-looking doctor in front of a feature that had never run, and the
+    only way to find out was to ask in chat and read the log afterwards.
+
+    This makes one real call. A key that is present but rejected (401), or an
+    OpenRouter account with no credits (402), fails here in two seconds instead
+    of silently posting "couldn't find any fun facts" all evening.
+    """
+    print("\nClawFacts question answering\n")
+    on = cfg.get("answer_questions", True)
+    print(f"  answer_questions : {'on' if on else 'OFF'}")
+
+    tkey = (cfg.get("tavily_api_key") or os.environ.get("TAVILY_API_KEY", "")
+            or "").strip()
+    skey = (cfg.get("serper_api_key") or "").strip()
+    bits = []
+    if tkey:
+        bits.append("tavily")
+    if skey:
+        bits.append("serper")
+    line = ", ".join(bits) if bits else (
+        "none - only DuckDuckGo, which returns nothing for most "
+        "free-form questions")
+    print(f"  search for answers: {line}")
+
+    try:
+        import llm as llm_mod
+    except Exception as exc:
+        print(f"  llm module       : import failed - {exc!r}")
+        return
+    if not llm_mod.is_configured(cfg):
+        print("  llm              : NOT configured - questions cannot be "
+              "answered. Set llm_api_key (or GROQ_API_KEY / "
+              "OPENROUTER_API_KEY), or point llm_base_url at a local Ollama.")
+        return
+
+    print("  llm              : configured - making one real call ...")
+    llm_mod.reset_disable_state()
+    try:
+        got = llm_mod.answer_question(
+            "What is the dew point?",
+            ["The dew point is the temperature to which air must be cooled to "
+             "become saturated with water vapour."],
+            cfg,
+        )
+    except Exception as exc:
+        print(f"  call raised      : {exc!r}")
+        return
+    if not got:
+        print("  call             : FAILED - no answer came back. A rejected "
+              "key (401/403) or no credits (402) prints its own line above.")
+        return
+    text = " ".join(str(got).split())
+    print(f"  call             : OK - {text[:90]}"
+          f"{'...' if len(text) > 90 else ''}")
+
+
 def warn_config(cfg: dict) -> None:
     """Loud, clear warnings so a misconfiguration can't silently downgrade
     the bot to boring plain facts."""
@@ -1883,6 +1944,8 @@ def run_doctor(cfg: dict) -> int:
     print("ClawFacts login check\n")
     for line in auth.describe_login(cfg):
         print("  " + line)
+
+    _doctor_questions(cfg)
 
     print("\n  attempting a real renewal ...")
     auth._WARNED.clear()      # so this run always shows the reason
