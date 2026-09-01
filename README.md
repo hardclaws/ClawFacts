@@ -630,35 +630,61 @@ which is the signal that usually precedes a 429 rather than the 429 itself.
 !beef stats            (the leaderboard; !beef stats <name> for one player)
 ```
 
-Whoever types it stars in it, against the name they give. The story is four
-queued messages — header, three acts, winner — because a feud is 600+
-characters and a Twitch message is not.
+Whoever types it stars in it, against the name they give. The story is five
+messages — header, three acts, verdict — because a feud is 600+ characters
+and a Twitch message is not. And they are **spaced out, not fired as one
+burst**: the headline lands immediately, then each act follows on a growing
+pause, and the winner is announced behind the longest one. Five messages at
+once is a wall; drip-fed, it's a bit of theatre chat can react to between
+acts (`OHHH` at act 1, `no he didn't` at act 2). With the default
+`beef_act_delay: 4` the gaps run about 3s, 4s, 5s, 6s — the whole story
+takes ~18 seconds.
 
 ```
-BEEF | 🔥 BEEF: SpeedyDave vs. Hardclaws — the virtual mountains of Watopia 🔥
-BEEF | Act 1 — SpeedyDave reported Hardclaws for a 900-watt FTP that no human
-       has ever held.
-BEEF | Act 2 — SpeedyDave started lubing the chain with something that is
-       definitely not chain lube.
-BEEF | Act 3 — The league settled it on time trial. Hardclaws by four seconds.
-       🏆 WINNER: Hardclaws. SpeedyDave has left the building.
+BEEF | 🔥 BEEF: SpeedyDave vs. @TruckingWithDoc — the Alpe du Zwift, all
+       twenty-one hairpins of it 🔥
+        (3s)
+BEEF | Act 1 — SpeedyDave watched TruckingWithDoc's watts jump two hundred in
+       one second and said nothing, loudly.
+        (4s)
+BEEF | Act 2 — TruckingWithDoc reported SpeedyDave's sprint to the UCI, Zwift
+       support, and one very confused parish council. The race chat is ninety
+       percent popcorn.
+        (5s)
+BEEF | Act 3 — Last corner of the crit: TruckingWithDoc took an inside line
+       that does not exist; SpeedyDave is still in the barriers thinking
+       about that line.
+        (6s)
+BEEF | 🏆 WINNER: TruckingWithDoc. SpeedyDave says the result is 'under review'.
 ```
 
 **Template-driven, not a model call per command.** A round trip is seconds,
 every beef would spend OpenRouter credits, and an account with none returns
 402 and disables the LLM for an hour — which would take the fun facts down
-with it. Six genres × 6 sparks × 6 escalations × 5 climaxes × 5 rivals ×
-either winner is **10,800 stories before names go in** (the six rematch
-openers double it again to 21,600), and every line is one a person read
-before it shipped. A model writing fiction about two named people in
-someone's chat can produce something genuinely hurtful, and nothing
+with it. Six genres × 18 openers (incl. the six rematch lines) × 10
+escalations × 6 climaxes × 5 rivals × either winner × 9 exit lines is
+**583,200 stories on the spine before names go in** — and the quotes, crowd
+reactions, stakes and act tags multiply it beyond that. Every line is one a
+person read before it shipped. A model writing fiction about two named
+people in someone's chat can produce something genuinely hurtful, and nothing
 downstream would catch it. Neither `beef.py` nor `beefstats.py` imports the
 LLM, the network, or a key — a dead Ollama or a 402 on the fun facts cannot
 take the feuds down with them, and `python3 check_fixes.py` refuses a copy
 where that ever changes.
 
 **The winner is rolled before the text is written**, so the story lands on the
-right outcome instead of the model being asked to retrofit one.
+right outcome instead of the model being asked to retrofit one — and the
+verdict is its own message, so the pause before it does the work a drumroll
+would.
+
+**The acts are two beats, not one.** An incident plus a trash-talk quote, an
+escalation plus a crowd reaction ("The race chat is ninety percent popcorn").
+A single bare sentence per act was a summary, not a story — no voice in it,
+and with six lines per pool the repeats came fast. The pools are ~10 lines
+deep per beat now, headlines carry stakes ("Loser mutes the group chat."),
+the loser's exit is drawn from nine fates instead of "has left the building"
+every time, and `_pick()` refuses to re-draw any line used in the last three
+stories, so back-to-back beefs stop echoing each other.
 
 **`!beef random` randomises the genre, not the opponent.** Pulling a bystander
 out of chat into a public feud they never asked for is how a joke command
@@ -670,11 +696,13 @@ issuer typed a real name.
 | ------- | ------ |
 | `!beef off` / `on` / `status` | moderators only, silent for viewers, works while the bot is off |
 | `"beef_enabled": false` | off for everyone; the bot names the key |
+| `"beef_act_delay": 4` | seconds between the acts (0 = the whole story at once) |
 | `!revenge` | the player who just lost may rematch the same rival within 60s |
 | `!beef stats [name]` | the top five, or one player's card; readable even while the game is off |
 
 `!beef` and `!revenge` are both reserved, so a moderator cannot shadow either
-with a custom command.
+with a custom command. A rival typed as `@Name` works — the `@` is stripped,
+not treated as an invalid name that silently swaps in a random character.
 
 #### !revenge — the rematch
 

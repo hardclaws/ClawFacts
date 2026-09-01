@@ -281,7 +281,9 @@ def main() -> int:
         for genre in _beef.GENRES:
             for _ in range(40):
                 lines = _beef.beef("Hardclaws", "random", genre)
-                if len(lines) != 4:
+                if len(lines) != 5:
+                    return False
+                if not lines[4].startswith("\U0001f3c6 WINNER:"):
                     return False
                 if not any("Hardclaws" in ln for ln in lines):
                     return False
@@ -341,8 +343,9 @@ def main() -> int:
                 if marker in src:
                     return False
         res = _beef.feud("Hardclaws", "Rival_Rob", "trucking", revenge=True)
-        return bool(res) and len(res["lines"]) == 4 \
-            and res["lines"][0].startswith("\U0001f525 REMATCH:")
+        return bool(res) and len(res["lines"]) == 5 \
+            and res["lines"][0].startswith("\U0001f525 REMATCH:") \
+            and res["lines"][4].startswith("\U0001f3c6 WINNER:")
 
     checks = [
         ("wikipedia extract paging (excontinue)",

@@ -19,7 +19,8 @@ def _bot(**over):
                # A temp state file keeps the run hermetic: scoring a beef in a
                # test must not grow a leaderboard in the repo either.
                beef_state_path=os.path.join(
-                   tempfile.mkdtemp(prefix="beef-test-"), "beef_state.json"))
+                   tempfile.mkdtemp(prefix="beef-test-"), "beef_state.json"),
+               beef_act_delay=0)
     cfg.update(over)
     b = bot_mod.TwitchBot(cfg)
     said = []
@@ -46,11 +47,11 @@ def _drain(b):
 def test_every_genre_produces_a_readable_three_act_story():
     for genre in sorted(beef.GENRES):
         lines = beef.beef("Hardclaws", "", genre)
-        assert len(lines) == 4, (genre, lines)
+        assert len(lines) == 5, (genre, lines)
         assert lines[0].startswith("\U0001f525 BEEF:"), lines[0]
         for i, label in ((1, "Act 1"), (2, "Act 2"), (3, "Act 3")):
             assert lines[i].startswith(label), (genre, lines[i])
-        assert "WINNER:" in lines[3], lines[3]
+        assert lines[4].startswith("\U0001f3c6 WINNER:"), lines[4]
         for line in lines:
             assert len(line) < 450, (genre, len(line), line)
             assert "{" not in line and "}" not in line, line
@@ -76,7 +77,7 @@ def test_the_winner_is_one_of_the_two_and_is_declared():
         seen = set()
         for _ in range(300):
             lines = beef.beef("Hardclaws", "Rival_Rob", genre)
-            verdict = lines[3]
+            verdict = lines[4]
             m = re.search(r"WINNER: (.+?)\.", verdict)
             assert m, verdict
             winner = m.group(1).strip()
@@ -161,10 +162,11 @@ def test_the_story_is_queued_not_said_inline():
     assert said == [], f"said inline: {said}"
     assert not b._jobs.empty(), "nothing queued"
     out = _drain(b)
-    assert len(out) == 4, out
+    assert len(out) == 5, out
     assert all(o.startswith("BEEF | ") for o in out), out
     assert all(len(o) <= 450 for o in out), [len(o) for o in out]
-    print("[PASS] four lines queued through the worker, none said inline")
+    assert "WINNER:" in out[-1], out[-1]
+    print("[PASS] five lines queued through the worker, none said inline")
 
 
 def test_a_moderator_can_turn_it_off_and_a_viewer_cannot():
@@ -204,13 +206,13 @@ def test_bare_beef_shows_usage_but_a_bad_rival_still_plays():
     b, said = _bot()
     b._reply_beef("Hardclaws", "zwift")
     out = _drain(b)
-    assert "Watopia" in out[0], out[0]
+    assert any(s in out[0] for s in beef.GENRES["zwift"]["settings"]), out[0]
     assert "vs. zwift " not in out[0], out[0]
 
     b, said = _bot()
     b._reply_beef("Hardclaws", "a b c")     # 'a' is too short to be a name
     out = _drain(b)
-    assert len(out) == 4, out               # it still tells a story
+    assert len(out) == 5, out               # it still tells a story
     assert "vs. a " not in out[0], out[0]   # ...against a real character
     print("[PASS] bare !beef shows usage; a bad rival still plays")
 
@@ -218,6 +220,72 @@ def test_bare_beef_shows_usage_but_a_bad_rival_still_plays():
 def test_beef_is_reserved_so_it_cannot_be_shadowed():
     assert "beef" in bot_mod.RESERVED_COMMANDS
     print("[PASS] !beef is reserved against custom commands")
+
+
+def test_the_acts_are_spaced_out_not_fired_as_one_burst():
+    """A story needs room to breathe: chat reacts between the acts, and the
+    verdict lands behind the longest pause. With a real delay only the
+    headline is queued at once - the rest arrive on timers, and the worker
+    stays free for other commands in between."""
+    import time
+
+    b, said = _bot(beef_act_delay=0.05)
+    b._reply_beef("Hardclaws", "Rival_Rob zwift")
+    assert said == [], f"said inline: {said}"
+    immediate = _drain(b)
+    assert 1 <= len(immediate) < 5, immediate      # headline only, no wall
+    assert immediate[0].startswith("BEEF | \U0001f525"), immediate[0]
+    time.sleep(0.05 * sum(b._BEEF_GAPS) + 0.6)     # let the timers fire
+    rest = _drain(b)
+    assert len(immediate) + len(rest) == 5, (immediate, rest)
+    assert "WINNER:" in rest[-1], rest[-1]         # the verdict arrives last
+    print("[PASS] the acts drip out; the verdict lands behind the longest pause")
+
+
+def test_consecutive_stories_stop_echoing_each_other():
+    """Half of 'always way the same' was the same line coming back three
+    beefs in a row. The no-repeat ring makes consecutive repeats of a beat
+    impossible, and 40 stories draw far more distinct openers than the old
+    six-line pool ever could."""
+    openers = [beef.feud("Hardclaws", "Rival_Rob", "zwift")["lines"][1]
+               for _ in range(40)]
+    for i in range(len(openers) - 1):
+        assert openers[i] != openers[i + 1], (i, openers[i])
+    assert len(set(openers)) >= 25, len(set(openers))
+    settings = {beef.feud("A_Name", "Rival_Rob", "zwift")["lines"][0]
+                for _ in range(30)}
+    assert len(settings) >= 2, "the setting never varied"
+    print("[PASS] back-to-back beefs do not reuse their lines")
+
+
+def test_an_at_prefixed_rival_is_still_the_rival():
+    """Viewers type '@name' out of habit. Treating that as an invalid name
+    silently swapped the person they named for a random character."""
+    res = beef.feud("Hardclaws", "@TruckingWithDoc", "zwift")
+    assert res is not None and res["rival"] == "TruckingWithDoc", res
+    assert "vs. TruckingWithDoc" in res["lines"][0], res["lines"][0]
+
+    b, said = _bot()
+    b._reply_beef("Hardclaws", "@Rival_Rob zwift")
+    out = _drain(b)
+    assert any("vs. Rival_Rob" in o for o in out), out
+    print("[PASS] !beef @Name feud is against Name, not a random character")
+
+
+def test_the_acts_carry_two_beats_and_a_loser_fate():
+    """A bare sentence per act was a summary, not a story: the acts now mix
+    in quotes and crowd reactions, and the loser's exit is drawn from a pool
+    instead of 'has left the building' every time."""
+    fates = set()
+    for _ in range(400):
+        res = beef.feud("Hardclaws", "Rival_Rob", "zwift")
+        assert res is not None
+        verdict = res["lines"][4]
+        assert verdict.startswith("\U0001f3c6 WINNER: "), verdict
+        assert verdict[len("\U0001f3c6 WINNER: "):].strip(), verdict
+        fates.add(verdict)
+    assert len(fates) >= 5, len(fates)   # the exit line is not one fixed joke
+    print("[PASS] verdicts vary; the exit is a punchline slot, not a stamp")
 
 
 def main():
@@ -233,6 +301,10 @@ def main():
     test_config_can_disable_it_and_says_so()
     test_bare_beef_shows_usage_but_a_bad_rival_still_plays()
     test_beef_is_reserved_so_it_cannot_be_shadowed()
+    test_the_acts_are_spaced_out_not_fired_as_one_burst()
+    test_consecutive_stories_stop_echoing_each_other()
+    test_an_at_prefixed_rival_is_still_the_rival()
+    test_the_acts_carry_two_beats_and_a_loser_fate()
     print("\nALL PASSED \u2714")
     return 0
 

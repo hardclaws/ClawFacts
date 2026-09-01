@@ -162,6 +162,11 @@ DEFAULTS = {
     # the raid notice, and the affiliate/follower line comes from Helix.
     "shoutout_enabled": True,
     "beef_enabled": True,
+    # Seconds between the acts of a beef story. The acts drip out with growing
+    # pauses (0.75x, 1x, 1.25x, 1.5x this value) so chat can react between
+    # them, and the verdict lands behind the longest pause. 0 sends the whole
+    # story at once, which is a wall nobody reads.
+    "beef_act_delay": 4.0,
     # Where the beef leaderboard and the !revenge windows live. Local file,
     # local logic: the game runs on what the bot already has and never waits
     # on an LLM, so there is nothing else to configure.
@@ -891,6 +896,40 @@ class TwitchBot:
             self._queue_say(head + chunk)
             head = ""           # continuation lines carry no repeated prefix
 
+    # Relative gaps between a story's five lines: headline, act 1, act 2,
+    # act 3, verdict. Growing, because a story should tighten as it goes, and
+    # the pause before the winner is announced is the whole point.
+    _BEEF_GAPS = (0.75, 1.0, 1.25, 1.5)
+
+    def _schedule_beef(self, lines: list) -> None:
+        """Drip a beef story out with pauses between the acts.
+
+        Five messages at once is a wall - chat reads the ending before the
+        middle, and there is nowhere for anyone to react. The acts go out on
+        timers (the riddle answer already uses this pattern) so the worker
+        thread stays free for other commands while the story breathes, and
+        every send still passes through the queue's pacing.
+
+        beef_act_delay in config.json scales the gaps; 0 restores the old
+        all-at-once burst, which the tests rely on for determinism.
+        """
+        head = f"{beef_mod.LABEL} | "
+        try:
+            delay = float(self.cfg.get("beef_act_delay", 4.0) or 0.0)
+        except (TypeError, ValueError):
+            delay = 4.0
+        if delay <= 0.0:
+            for line in lines:
+                self._queue_fitted(head, line)
+            return
+        self._queue_fitted(head, lines[0])
+        wait = 0.0
+        for line, gap in zip(lines[1:], self._BEEF_GAPS):
+            wait += gap * delay
+            t = threading.Timer(wait, self._queue_fitted, args=(head, line))
+            t.daemon = True
+            t.start()
+
     def _fit(self, head: str, body: str, tail: str = "") -> str:
         """Keep head + body + tail inside Twitch's 500-character limit."""
         budget = max(60, min(500, int(self.cfg.get("max_message_chars", 450)))
@@ -1299,9 +1338,7 @@ class TwitchBot:
             self._say(f"@{nick} I could not build a beef from that - try "
                       f"!beef <name> [genre]")
             return
-        head = f"{beef_mod.LABEL} | "
-        for line in result["lines"]:
-            self._queue_fitted(head, line)
+        self._schedule_beef(result["lines"])
         # Scored after the lines are queued, so a scoring hiccup can never
         # cost chat the story - and because the story is the point.
         self.beef_state.record(nick, result["rival"], result["genre"],
@@ -1335,9 +1372,7 @@ class TwitchBot:
             self._say(f"@{nick} that rematch fell apart - try !beef "
                       f"{window['rival']} {window['genre']}")
             return
-        head = f"{beef_mod.LABEL} | "
-        for line in result["lines"]:
-            self._queue_fitted(head, line)
+        self._schedule_beef(result["lines"])
         self.beef_state.record(nick, result["rival"], result["genre"],
                                result["issuer_won"], revenge=True)
         self._log(f"!revenge {nick} vs {result['rival']} "
@@ -1361,7 +1396,7 @@ class TwitchBot:
         feud they never touched. The channel's broadcaster is the one
         presence this bot can assume without asking.
         """
-        name = (rival or "").strip()
+        name = (rival or "").strip().lstrip("@").strip()
         if not name or not beef_mod._valid(name):
             return ""
         owner = (self.cfg.get("channel") or "").lstrip("#@ ").lower()

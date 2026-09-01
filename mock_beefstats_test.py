@@ -23,7 +23,8 @@ def _bot(**over):
     cfg = dict(bot_mod.DEFAULTS, nick="bot", channel="#test",
                cooldown_seconds=0, max_message_chars=450,
                beef_state_path=os.path.join(
-                   tempfile.mkdtemp(prefix="beefstats-"), "beef_state.json"))
+                   tempfile.mkdtemp(prefix="beefstats-"), "beef_state.json"),
+               beef_act_delay=0)
     cfg.update(over)
     b = bot_mod.TwitchBot(cfg)
     said = []
@@ -62,7 +63,7 @@ def test_feud_reports_the_winner_beef_still_tells_the_story():
         res = beef.feud("Hardclaws", "Rival_Rob", "zwift")
         assert res is not None
         lines = beef.beef("Hardclaws", "Rival_Rob", "zwift")
-        assert isinstance(lines, list) and len(lines) == 4, lines
+        assert isinstance(lines, list) and len(lines) == 5, lines
         assert lines[0].startswith("\U0001f525 BEEF:"), lines[0]
         assert res["winner"] in ("Hardclaws", "Rival_Rob")
         assert res["issuer_won"] == (res["winner"] == "Hardclaws")
@@ -79,12 +80,13 @@ def test_rematch_reads_as_a_rematch_and_stays_four_sound_lines():
     for _ in range(300):
         res = beef.feud("Hardclaws", "Diesel Dan", "trucking", revenge=True)
         lines = res["lines"]
-        assert len(lines) == 4, lines
+        assert len(lines) == 5, lines
         assert lines[0].startswith("\U0001f525 REMATCH:"), lines[0]
-        assert lines[0].endswith("\U0001f525"), lines[0]
+        # The headline closes with the second flame; a stake line may follow.
+        assert lines[0].count("\U0001f525") >= 2, lines[0]
         for i, label in ((1, "Act 1"), (2, "Act 2"), (3, "Act 3")):
             assert lines[i].startswith(label), lines[i]
-        assert "WINNER:" in lines[3], lines[3]
+        assert "WINNER:" in lines[4], lines[4]
         for line in lines:
             assert len(line) < 450, (len(line), line)
             assert "{" not in line and "}" not in line, line
@@ -191,7 +193,7 @@ def test_stats_subcommand_answers_instead_of_starting_a_feud():
     # And a beef still happens for a name that merely starts with 'stat'.
     b._reply_beef("Hardclaws", "Statler zwift")
     out = _drain(b)
-    assert len(out) == 4 and "vs. Statler" in out[0], out
+    assert len(out) == 5 and "vs. Statler" in out[0], out
     print("[PASS] stats words answer; they are never taken for a rival")
 
 
