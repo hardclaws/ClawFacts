@@ -20,11 +20,10 @@ import beefllm
 import bot as bot_mod
 import llm
 
-GOOD = ("Act 1 — {a} started it by stealing {b}'s lucky charm and denying it "
+GOOD = ("{a} started it by stealing {b}'s lucky charm and denying it "
         "under oath.\n"
-        "Act 2 — {b} escalated to mild arson, domestically.\n"
-        "Act 3 — {w} settled it in one perfect move that is still talked "
-        "about.\n"
+        "{b} escalated to mild arson, domestically.\n"
+        "{w} settled it in one perfect move that is still talked about.\n"
         "\U0001f3c6 WINNER: {w}. {l} left mid-sentence and muted the group chat.")
 
 
@@ -115,21 +114,22 @@ def test_validate_rejects_every_rule_break():
         "wrong winner": _good_story(other),
         "three lines": "\n".join(_good_story(res).splitlines()[:3]),
         "five lines": _good_story(res) + "\nAct 4 — more",
-        "no act prefix": "\n".join(
-            ln.replace("Act 2 — ", "", 1) if ln.startswith("Act 2")
-            else ln for ln in _good_story(res).splitlines()),
+        "act labels reintroduced": "\n".join(
+            f"Act {i} — {ln}" for i, ln in enumerate(
+                _good_story(res).splitlines(), 1)),
         "missing a player": GOOD.format(a="Somebody", b="Elsewhere",
                                         w=res["winner"], l=res["loser"]),
         "at-ping": _good_story(res).replace(
-            "Act 2 — ", "Act 2 — @streamer look: ", 1),
-        "markdown bold": _good_story(res).replace("Act 1 — ",
-                                                  "Act 1 — **big trouble** ", 1),
+            "escalated", "@streamer look: escalated", 1),
+        "markdown bold": _good_story(res).replace(
+            "under oath", "under **oath**", 1),
         "url": _good_story(res).replace(
-            "Act 2 — ", "Act 2 — proof: http://example.com ", 1),
-        "hashtag": _good_story(res).replace("Act 3 — ", "Act 3 — #beef ", 1),
+            "escalated", "proof at http://example.com - escalated", 1),
+        "hashtag": _good_story(res).replace(
+            "settled it", "settled it #beef", 1),
         "preamble": "Sure, here is the story:\n" + _good_story(res),
         "overlong": _good_story(res).replace(
-            "Act 2 — ", "Act 2 — " + "word " * 120, 1),
+            "escalated", "word " * 120 + "escalated", 1),
         "empty": "   ",
     }
     for name, raw in cases.items():
@@ -223,7 +223,7 @@ def test_the_bot_uses_model_lines_and_always_keeps_the_headline():
         b._tell_beef(res)
         immediate = _drain(b)
         assert immediate and immediate[0].startswith(
-            "BEEF | \U0001f525 BEEF: Hardclaws vs. Rival_Rob"), immediate
+            "\U0001f525 Hardclaws vs. Rival_Rob"), immediate
         import time
         time.sleep(0.05 * 4 + 0.6)
         rest = _drain(b)
@@ -247,8 +247,8 @@ def test_fallback_lines_are_the_templates_and_scoring_follows_the_roll():
         time.sleep(0.05 * 4 + 0.6)
         out = _drain(b)
         assert len(out) == 5, out
-        assert out[0] == f"BEEF | {res['lines'][0]}", out[0]
-        assert any(ln == f"BEEF | {res['lines'][4]}" for ln in out), out
+        assert out[0] == res["lines"][0], out[0]
+        assert any(ln == res["lines"][4] for ln in out), out
     finally:
         beefllm.available, beefllm.write_story = orig_avail, orig_write
     # Burst mode never asks the model - there is no gap to write in.

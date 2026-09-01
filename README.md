@@ -632,32 +632,31 @@ which is the signal that usually precedes a 429 rather than the 429 itself.
 
 Whoever types it stars in it, against the name they give. The story is five
 messages — header, three acts, verdict — because a feud is 600+ characters
-and a Twitch message is not. And they are **spaced out, not fired as one
+and a Twitch message is not. They are **clean** — no `BEEF |` prefix, no
+`Act 1` labels; the chrome read like a form and took away from the story,
+so the lines stand alone. And they are **spaced out, not fired as one
 burst**: the headline lands immediately, then each part follows
 `beef_act_delay` seconds apart — the same gap every time, so the knob means
 exactly what it reads — and the winner is announced last. Five messages at
 once is a wall; drip-fed, it's a bit of theatre chat can react to between
-acts (`OHHH` at act 1, `no he didn't` at act 2). With the default
+the lines (`OHHH`, `no he didn't`). With the default
 `beef_act_delay: 4` the whole story takes ~16 seconds. **Config is read at
 startup — restart the bot after editing config.json**, and `!beef status`
 shows the live value so you never have to guess whether it took.
 
 ```
-BEEF | 🔥 BEEF: SpeedyDave vs. @TruckingWithDoc — the Alpe du Zwift, all
-       twenty-one hairpins of it 🔥
+🔥 SpeedyDave vs. @TruckingWithDoc — Eating Tacos 🔥 Two enter, one leaves.
         (+ beef_act_delay)
-BEEF | Act 1 — SpeedyDave watched TruckingWithDoc's watts jump two hundred in
-       one second and said nothing, loudly.
+SpeedyDave caught TruckingWithDoc double-dipping the communal salsa like a
+man with no witnesses.
         (+ beef_act_delay)
-BEEF | Act 2 — TruckingWithDoc reported SpeedyDave's sprint to the UCI, Zwift
-       support, and one very confused parish council. The race chat is ninety
-       percent popcorn.
+TruckingWithDoc retaliated with a taco so structurally ambitious it required
+a permit. The salsa bar is picking sides.
         (+ beef_act_delay)
-BEEF | Act 3 — Last corner of the crit: TruckingWithDoc took an inside line
-       that does not exist; SpeedyDave is still in the barriers thinking
-       about that line.
+They settled it at the table, three tacos each, judged by the whole room.
+TruckingWithDoc's collapsed on the second bite.
         (+ beef_act_delay)
-BEEF | 🏆 WINNER: TruckingWithDoc. SpeedyDave says the result is 'under review'.
+🏆 WINNER: SpeedyDave. TruckingWithDoc says the result is 'under review'.
 ```
 
 **Template-driven, with an optional LLM pass that has to earn its slot.**
@@ -704,7 +703,7 @@ issuer typed a real name.
 
 **Freeform themes.** `!beef @W_E_S_T_Y Eating Tacos` doesn't have to name a
 genre. The words after the rival become the story's setting line verbatim —
-*🔥 BEEF: Hardclaws vs. W_E_S_T_Y — Eating Tacos 🔥* — and with the LLM pass
+*🔥 Hardclaws vs. W_E_S_T_Y — Eating Tacos 🔥* — and with the LLM pass
 on, the acts are written inside that theme (a taco-eating feud, salsa
 politics and all). With templates only, the acts come from a random genre
 under your words: arbitrary themes are the one thing a fixed pool honestly
@@ -732,8 +731,8 @@ rival, same genre — and same theme, so a taco loss gets avenged as a taco
 rematch:
 
 ```
-BEEF | 🔥 REMATCH: SpeedyDave vs. Hardclaws — the virtual mountains of Watopia 🔥
-BEEF | Act 1 — SpeedyDave demanded a rematch on the spot, and the room went quiet.
+🔥 REMATCH: SpeedyDave vs. Hardclaws — the virtual mountains of Watopia 🔥
+SpeedyDave demanded a rematch on the spot, and the room went quiet.
 ...
 ```
 

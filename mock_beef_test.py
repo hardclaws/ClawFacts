@@ -48,9 +48,9 @@ def test_every_genre_produces_a_readable_three_act_story():
     for genre in sorted(beef.GENRES):
         lines = beef.beef("Hardclaws", "", genre)
         assert len(lines) == 5, (genre, lines)
-        assert lines[0].startswith("\U0001f525 BEEF:"), lines[0]
-        for i, label in ((1, "Act 1"), (2, "Act 2"), (3, "Act 3")):
-            assert lines[i].startswith(label), (genre, lines[i])
+        assert lines[0].startswith("\U0001f525 Hardclaws vs."), lines[0]
+        for ln in lines[1:4]:
+            assert ln and not ln.startswith(("Act", "BEEF", "Line")), ln
         assert lines[4].startswith("\U0001f3c6 WINNER:"), lines[4]
         for line in lines:
             assert len(line) < 450, (genre, len(line), line)
@@ -163,7 +163,8 @@ def test_the_story_is_queued_not_said_inline():
     assert not b._jobs.empty(), "nothing queued"
     out = _drain(b)
     assert len(out) == 5, out
-    assert all(o.startswith("BEEF | ") for o in out), out
+    assert out[0].startswith("\U0001f525 "), out[0]
+    assert not any(o.startswith(("BEEF |", "Act ")) for o in out), out
     assert all(len(o) <= 450 for o in out), [len(o) for o in out]
     assert "WINNER:" in out[-1], out[-1]
     print("[PASS] five lines queued through the worker, none said inline")
@@ -234,7 +235,7 @@ def test_the_acts_are_spaced_out_not_fired_as_one_burst():
     assert said == [], f"said inline: {said}"
     immediate = _drain(b)
     assert 1 <= len(immediate) < 5, immediate      # headline only, no wall
-    assert immediate[0].startswith("BEEF | \U0001f525"), immediate[0]
+    assert immediate[0].startswith("\U0001f525 "), immediate[0]
     time.sleep(0.05 * 4 + 0.6)     # let the timers fire
     rest = _drain(b)
     assert len(immediate) + len(rest) == 5, (immediate, rest)

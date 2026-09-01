@@ -359,9 +359,9 @@ def main() -> int:
             return False                      # no key/base configured
         other = dict(res, winner=res["loser"], loser=res["winner"])
         good = "\n".join([
-            f"Act 1 — {res['issuer']} and {res['rival']} fell out over a pun.",
-            f"Act 2 — {res['rival']} escalated by bringing a leafblower.",
-            f"Act 3 — {res['winner']} settled it with one perfect move.",
+            f"{res['issuer']} and {res['rival']} fell out over a pun.",
+            f"{res['rival']} escalated by bringing a leafblower.",
+            f"{res['winner']} settled it with one perfect move.",
             f"\U0001f3c6 WINNER: {res['winner']}. "
             f"{res['loser']} left mid-sentence."])
         if _bl.validate(good, res) is None:

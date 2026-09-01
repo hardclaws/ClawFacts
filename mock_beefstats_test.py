@@ -64,7 +64,7 @@ def test_feud_reports_the_winner_beef_still_tells_the_story():
         assert res is not None
         lines = beef.beef("Hardclaws", "Rival_Rob", "zwift")
         assert isinstance(lines, list) and len(lines) == 5, lines
-        assert lines[0].startswith("\U0001f525 BEEF:"), lines[0]
+        assert lines[0].startswith("\U0001f525 Hardclaws vs."), lines[0]
         assert res["winner"] in ("Hardclaws", "Rival_Rob")
         assert res["issuer_won"] == (res["winner"] == "Hardclaws")
         assert res["winner"] in res["lines"][3]
@@ -84,8 +84,8 @@ def test_rematch_reads_as_a_rematch_and_stays_four_sound_lines():
         assert lines[0].startswith("\U0001f525 REMATCH:"), lines[0]
         # The headline closes with the second flame; a stake line may follow.
         assert lines[0].count("\U0001f525") >= 2, lines[0]
-        for i, label in ((1, "Act 1"), (2, "Act 2"), (3, "Act 3")):
-            assert lines[i].startswith(label), lines[i]
+        for ln in lines[1:4]:
+            assert ln and not ln.startswith(("Act", "BEEF")), ln
         assert "WINNER:" in lines[4], lines[4]
         for line in lines:
             assert len(line) < 450, (len(line), line)
@@ -246,7 +246,7 @@ def test_revenge_replays_a_loss_inside_the_window():
     b._reply_revenge("Hardclaws")
     assert said == [], f"said inline: {said}"
     out = _drain(b)
-    assert len(out) >= 4 and all(o.startswith("BEEF | ") for o in out), out
+    assert len(out) >= 4 and out[0].startswith("\U0001f525 REMATCH:"), out
     assert "REMATCH" in out[0] and "Rival_Rob" in out[0], out[0]
     assert any("WINNER:" in ln for ln in out), out
     card = b.beef_state.card("Hardclaws")

@@ -930,9 +930,10 @@ class TwitchBot:
         winner was rolled before any text existed, and a story that
         disagrees with the roll is a validation failure, not a story.
         """
-        head = f"{beef_mod.LABEL} | "
         lines = result["lines"]
-        self._queue_fitted(head, lines[0])
+        # No "BEEF |" prefix: the labels read like a form and took away from
+        # the story. The lines stand alone; the pacing does the structuring.
+        self._queue_say(lines[0])
         body = lines[1:]
         delay = self._beef_gap()
         # Burst mode (delay 0) has no gap to write in - the template lines
@@ -946,9 +947,9 @@ class TwitchBot:
             else:
                 self._log("!beef LLM pass failed or missed the deadline - "
                           "templates used")
-        self._schedule_beef_rest(head, body, delay)
+        self._schedule_beef_rest(body, delay)
 
-    def _schedule_beef_rest(self, head: str, body: list, delay: float) -> None:
+    def _schedule_beef_rest(self, body: list, delay: float) -> None:
         """Drip the body of a beef story out, `delay` seconds apart.
 
         Five messages at once is a wall - chat reads the ending before the
@@ -963,11 +964,10 @@ class TwitchBot:
         """
         if delay <= 0.0:
             for line in body:
-                self._queue_fitted(head, line)
+                self._queue_say(line)
             return
         for i, line in enumerate(body, 1):
-            t = threading.Timer(i * delay, self._queue_fitted,
-                                args=(head, line))
+            t = threading.Timer(i * delay, self._queue_say, args=(line,))
             t.daemon = True
             t.start()
 

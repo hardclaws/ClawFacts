@@ -50,10 +50,11 @@ SYSTEM = (
     "- The winner is FIXED and given to you. The story must end with exactly "
     "that winner. You do not choose the winner.\n"
     "- Reply with EXACTLY 4 lines and nothing else - no preamble, no "
-    "numbered list, no markdown, no code fences:\n"
-    "  Act 1 — <the incident that started it, one or two sentences>\n"
-    "  Act 2 — <the escalation, one or two sentences>\n"
-    "  Act 3 — <the showdown; the fixed winner wins it>\n"
+    "numbered list, no markdown, no code fences, and NO line labels (never "
+    "write 'Act 1' or similar):\n"
+    "  line 1: the incident that started it, one or two sentences\n"
+    "  line 2: the escalation, one or two sentences\n"
+    "  line 3: the showdown; the FIXED winner wins it\n"
     "  🏆 WINNER: <fixed winner>. <one short exit line for the loser>\n"
     "- Each line at most 200 characters.\n"
     "- No @ mentions, no hashtags, no URLs, no markdown, no emoji except the "
@@ -195,8 +196,10 @@ def validate(raw: str, result: dict) -> list | None:
 
     winner, loser = result["winner"], result["loser"]
     issuer, rival = result["issuer"], result["rival"]
-    for i, prefix in ((0, "Act 1"), (1, "Act 2"), (2, "Act 3")):
-        if not lines[i].startswith(prefix):
+    # No labels anywhere: "Act 1 -" reads like a form. If the model
+    # reintroduces them, that is a fallback, not a cleanup.
+    for ln in lines:
+        if re.match(r"^(act\s*\d|line\s*\d|scene\s*\d)\b", ln.lower()):
             return None
     if not lines[3].startswith(f"\U0001f3c6 WINNER: {winner}."):
         return None

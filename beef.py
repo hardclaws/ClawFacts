@@ -90,13 +90,6 @@ STAKES = (
     "This is sanctioned. Barely.",
 )
 
-#: Act sub-labels, so the shape of the story is not literally identical
-#: every time. "Act 1 (the grudge)" still starts with "Act 1" - the tests
-#: and chat both parse it the same way.
-_ACT1_TAGS = ("the grudge", "how it started", "round one")
-_ACT2_TAGS = ("the escalation", "how it went", "the mind games")
-_ACT3_TAGS = ("the showdown", "how it ended", "the reckoning")
-
 #: Rematch openers - Act 1 of a !revenge story. Genre-agnostic on purpose: a
 #: slammed table is a slammed table in any setting, and per-genre rematch
 #: pools would double the text for no new joke. Acts 2 and 3 stay native to
@@ -533,10 +526,11 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     window need to know who won, and parsing it back out of the English was
     how the last self-inflicted bug happened.
 
-    The story is five lines: headline, three acts, verdict. Each act is up to
-    two beats (incident + quote, escalation + crowd reaction) because a bare
-    sentence per act is a summary, not a story. The verdict stands alone so
-    the caller can put the biggest pause before it.
+    The story is five clean lines - headline, three story lines, verdict -
+    with no "Act 1" labels: the chrome read like a form and took away from
+    the story. Each line is up to two beats (incident + quote, escalation +
+    crowd reaction) because a bare sentence is a summary, not a story. The
+    verdict stands alone so the caller can put the biggest pause before it.
 
     revenge=True retells it as a rematch: a REMATCH headline and a rematch
     opener in Act 1, everything else native to the genre. The roll stays
@@ -588,7 +582,9 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
                     .replace("{l}'s", _poss(loser)))
         return text.format(a=issuer, b=rival, w=winner, l=loser)
 
-    label = "REMATCH" if revenge else "BEEF"
+    # Only a rematch needs the word - a normal beef is self-evident, and
+    # labels on every line read like a form.
+    label = "REMATCH: " if revenge else ""
     key = "rematch" if revenge else genre_key
     head_rival = f"@{rival}" if tag else rival
 
@@ -598,7 +594,7 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     else:
         setting = _pick(pools["settings"], ("setting", key))
 
-    head = (f"\U0001f525 {label}: {issuer} vs. {head_rival} \u2014 "
+    head = (f"\U0001f525 {label}{issuer} vs. {head_rival} \u2014 "
             f"{setting} \U0001f525")
     if random.random() < 0.55:
         head += f" {fill(_pick(STAKES, ('stakes', key)))}"
@@ -614,23 +610,11 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
 
     act3 = fill(_pick(pools["climaxes"], ("climax", key)))
 
-    def _act(n, tags, body):
-        """'Act 2 (the escalation) - ...' about half the time; plain otherwise."""
-        if random.random() < 0.5:
-            return f"Act {n} ({_pick(tags, ('tag', str(n)))}) \u2014 {body}"
-        return f"Act {n} \u2014 {body}"
-
     verdict = (f"\U0001f3c6 WINNER: {winner}. "
                f"{fill(_pick(FATES, ('fate', key)))}")
 
     return {
-        "lines": [
-            head,
-            _act(1, _ACT1_TAGS, act1),
-            _act(2, _ACT2_TAGS, act2),
-            _act(3, _ACT3_TAGS, act3),
-            verdict,
-        ],
+        "lines": [head, act1, act2, act3, verdict],
         "issuer": issuer,
         "rival": rival,
         "genre": genre_key,
