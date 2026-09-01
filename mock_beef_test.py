@@ -51,7 +51,7 @@ def test_every_genre_produces_a_readable_three_act_story():
         assert lines[0].startswith("\U0001f525 Hardclaws vs."), lines[0]
         for ln in lines[1:4]:
             assert ln and not ln.startswith(("Act", "BEEF", "Line")), ln
-        assert lines[4].startswith("\U0001f3c6 WINNER:"), lines[4]
+        assert lines[4].startswith("\U0001f3c6 "), lines[4]
         for line in lines:
             assert len(line) < 450, (genre, len(line), line)
             assert "{" not in line and "}" not in line, line
@@ -78,7 +78,7 @@ def test_the_winner_is_one_of_the_two_and_is_declared():
         for _ in range(300):
             lines = beef.beef("Hardclaws", "Rival_Rob", genre)
             verdict = lines[4]
-            m = re.search(r"WINNER: (.+?)\.", verdict)
+            m = re.search(r"\U0001f3c6 (\S+)", verdict)
             assert m, verdict
             winner = m.group(1).strip()
             assert winner in ("Hardclaws", "Rival_Rob"), (genre, winner)
@@ -166,7 +166,7 @@ def test_the_story_is_queued_not_said_inline():
     assert out[0].startswith("\U0001f525 "), out[0]
     assert not any(o.startswith(("BEEF |", "Act ")) for o in out), out
     assert all(len(o) <= 450 for o in out), [len(o) for o in out]
-    assert "WINNER:" in out[-1], out[-1]
+    assert out[-1].startswith("\U0001f3c6 "), out[-1]
     print("[PASS] five lines queued through the worker, none said inline")
 
 
@@ -239,7 +239,7 @@ def test_the_acts_are_spaced_out_not_fired_as_one_burst():
     time.sleep(0.05 * 4 + 0.6)     # let the timers fire
     rest = _drain(b)
     assert len(immediate) + len(rest) == 5, (immediate, rest)
-    assert "WINNER:" in rest[-1], rest[-1]         # the verdict arrives last
+    assert rest[-1].startswith("\U0001f3c6 ")      # the verdict arrives last
     print("[PASS] the acts drip out; the verdict lands behind the longest pause")
 
 
@@ -304,8 +304,8 @@ def test_the_acts_carry_two_beats_and_a_loser_fate():
         res = beef.feud("Hardclaws", "Rival_Rob", "zwift")
         assert res is not None
         verdict = res["lines"][4]
-        assert verdict.startswith("\U0001f3c6 WINNER: "), verdict
-        assert verdict[len("\U0001f3c6 WINNER: "):].strip(), verdict
+        assert verdict.startswith("\U0001f3c6 "), verdict
+        assert verdict[len("\U0001f3c6 "):].strip(), verdict
         fates.add(verdict)
     assert len(fates) >= 5, len(fates)   # the exit line is not one fixed joke
     print("[PASS] verdicts vary; the exit is a punchline slot, not a stamp")

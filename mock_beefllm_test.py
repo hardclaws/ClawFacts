@@ -24,7 +24,7 @@ GOOD = ("{a} started it by stealing {b}'s lucky charm and denying it "
         "under oath.\n"
         "{b} escalated to mild arson, domestically.\n"
         "{w} settled it in one perfect move that is still talked about.\n"
-        "\U0001f3c6 WINNER: {w}. {l} left mid-sentence and muted the group chat.")
+        "\U0001f3c6 {w} takes it. {l} left mid-sentence and muted the group chat.")
 
 
 def _result(**over):
@@ -97,7 +97,7 @@ def test_validate_accepts_a_conforming_story():
     res = _result()
     lines = beefllm.validate(_good_story(res), res)
     assert lines and len(lines) == 4, lines
-    assert lines[3].startswith(f"\U0001f3c6 WINNER: {res['winner']}."), lines[3]
+    assert lines[3].startswith(f"\U0001f3c6 {res['winner']}"), lines[3]
     # Numbered-list and bullet prefixes are cleaned, not rejected.
     numbered = "\n".join(f"{i}. {ln}" for i, ln in enumerate(
         _good_story(res).splitlines(), 1))
@@ -228,7 +228,7 @@ def test_the_bot_uses_model_lines_and_always_keeps_the_headline():
         time.sleep(0.05 * 4 + 0.6)
         rest = _drain(b)
         assert any("mild arson" in ln for ln in rest), rest   # the model's acts
-        assert any("\U0001f3c6 WINNER:" in ln for ln in rest), rest
+        assert any(ln.startswith("\U0001f3c6 ") for ln in rest), rest
     finally:
         beefllm.available, beefllm.write_story = orig_avail, orig_write
     print("[PASS] model acts ship behind the template headline")

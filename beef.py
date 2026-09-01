@@ -1,4 +1,5 @@
-"""!beef - a three-act feud between whoever typed the command and a rival.
+"""!beef - a feud between whoever typed the command and a rival, told in
+five clean lines.
 
 Deliberately template-driven rather than a model call per command, for three
 reasons the rest of this bot already learned:
@@ -41,6 +42,7 @@ import re
 from collections import deque
 
 __all__ = ["beef", "feud", "GENRES", "combination_count", "genre_for",
+           "VERDICTS",
            "match_genre", "LABEL", "REMATCH_SPARKS", "FATES", "STAKES"]
 
 LABEL = "BEEF"
@@ -62,6 +64,16 @@ RIVALS = {
     "karaoke": ("Falsetto Phil", "The Key-Change Kid", "Ballad Brenda",
                 "Mic-Drop Marcus", "The Autotune Menace"),
 }
+
+#: How the verdict names the winner - spoken, not labelled. "WINNER:" in
+#: caps was the last piece of form-speak left in the story.
+VERDICTS = (
+    "takes it",
+    "wins it",
+    "takes the W",
+    "walks away with this one",
+    "settles it",
+)
 
 #: What the loser gets. "Has left the building" every single time was part of
 #: why the stories felt stamped out - the exit is a punchline slot, and it
@@ -610,7 +622,8 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
 
     act3 = fill(_pick(pools["climaxes"], ("climax", key)))
 
-    verdict = (f"\U0001f3c6 WINNER: {winner}. "
+    verdict = (f"\U0001f3c6 {winner} "
+               f"{_pick(VERDICTS, ('verb', key))}. "
                f"{fill(_pick(FATES, ('fate', key)))}")
 
     return {

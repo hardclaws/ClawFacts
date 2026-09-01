@@ -86,7 +86,7 @@ def test_rematch_reads_as_a_rematch_and_stays_four_sound_lines():
         assert lines[0].count("\U0001f525") >= 2, lines[0]
         for ln in lines[1:4]:
             assert ln and not ln.startswith(("Act", "BEEF")), ln
-        assert "WINNER:" in lines[4], lines[4]
+        assert lines[4].startswith("\U0001f3c6 "), lines[4]
         for line in lines:
             assert len(line) < 450, (len(line), line)
             assert "{" not in line and "}" not in line, line
@@ -238,7 +238,7 @@ def test_revenge_replays_a_loss_inside_the_window():
     for _ in range(300):
         b._reply_beef("Hardclaws", "Rival_Rob zwift")
         out = _drain(b)
-        if any("WINNER: Rival_Rob" in ln for ln in out):
+        if any(ln.startswith("\U0001f3c6 Rival_Rob") for ln in out):
             lost = True
             break
     assert lost, "the roll never produced a loss to avenge"
@@ -248,7 +248,7 @@ def test_revenge_replays_a_loss_inside_the_window():
     out = _drain(b)
     assert len(out) >= 4 and out[0].startswith("\U0001f525 REMATCH:"), out
     assert "REMATCH" in out[0] and "Rival_Rob" in out[0], out[0]
-    assert any("WINNER:" in ln for ln in out), out
+    assert any(ln.startswith("\U0001f3c6 ") for ln in out), out
     card = b.beef_state.card("Hardclaws")
     row = b.beef_state.players["hardclaws"]
     assert card and row["revenges"] == 1 and row["beefs"] >= 2, (card, row)
@@ -263,7 +263,7 @@ def test_revenge_expires_and_says_so_plainly():
     for _ in range(300):
         b._reply_beef("Hardclaws", "Rival_Rob zwift")
         out = _drain(b)
-        if any("WINNER: Rival_Rob" in ln for ln in out):
+        if any(ln.startswith("\U0001f3c6 Rival_Rob") for ln in out):
             break
     else:
         raise AssertionError("no loss to arm a window")
@@ -343,7 +343,7 @@ def test_the_game_runs_with_the_llm_dead():
             b._reply_beef("Hardclaws", "Rival_Rob zwift")
             out = _drain(b)
             assert len(out) >= 4, out
-            if any("WINNER: Rival_Rob" in ln for ln in out):
+            if any(ln.startswith("\U0001f3c6 Rival_Rob") for ln in out):
                 break
         else:
             raise AssertionError("no loss to revenge")

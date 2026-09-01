@@ -170,10 +170,9 @@ DEFAULTS = {
     # falls back to templates silently - the game never waits or breaks.
     "beef_llm": "auto",
     "beef_llm_timeout": 3.0,
-    # Seconds between the acts of a beef story. The acts drip out with growing
-    # pauses (0.75x, 1x, 1.25x, 1.5x this value) so chat can react between
-    # them, and the verdict lands behind the longest pause. 0 sends the whole
-    # story at once, which is a wall nobody reads.
+    # Seconds between the parts of a beef story - the literal gap, exactly,
+    # so the knob means what it reads. 0 sends the whole story at once,
+    # which is a wall nobody reads.
     "beef_act_delay": 4.0,
     # Where the beef leaderboard and the !revenge windows live. Local file,
     # local logic: the game runs on what the bot already has even with no LLM
@@ -1339,13 +1338,14 @@ class TwitchBot:
             # instead of a guess. Config is read at startup - a config.json
             # edit does nothing until the bot restarts.
             msg += (f" Stories: {src}. "
-                    f"Acts every {self._beef_gap():g}s "
+                    f"Lines every {self._beef_gap():g}s "
                     f"(beef_act_delay; restart after editing config.json).")
         self._say(msg)
         return True
 
     def _reply_beef(self, nick: str, argument: str) -> None:
-        """!beef <rival> [genre] - a three-act feud, queued not said inline.
+        """!beef <rival> [topic] - a feud in five clean lines, queued not
+        said inline.
 
         The issuer is whoever typed it: that is the point of the game, and it
         is a person choosing to put themselves in.
@@ -1374,8 +1374,9 @@ class TwitchBot:
             # A bare !beef is ambiguous - against whom? Everything else
             # plays: an unusable rival name falls back to one of the named
             # characters rather than dead-ending the joke.
-            self._say(f"@{nick} usage: !beef <name> [genre] - e.g. !beef "
-                      f"Hardclaws zwift, or !beef random for a surprise one")
+            self._say(f"@{nick} usage: !beef <name> [topic] - e.g. !beef "
+                      f"Hardclaws zwift, !beef Hardclaws Eating Tacos, or "
+                      f"!beef random")
             return
         rival, _, rest = args.partition(" ")
         rival = rival.strip()
@@ -1902,7 +1903,7 @@ class TwitchBot:
             if self.cfg.get("cb_command_enabled", True) else None,
             f"{prefix}so <name> - shout a channel out (mods only)"
             if self.cfg.get("shoutout_enabled", True) else None,
-            f"{prefix}beef <name> [genre] - a three-act feud ({prefix}beef "
+            f"{prefix}beef <name> [topic] - start a feud ({prefix}beef "
             f"stats for the standings, {prefix}revenge after a loss)"
             if self.cfg.get("beef_enabled", True) else None,
         ]

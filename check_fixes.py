@@ -283,7 +283,7 @@ def main() -> int:
                 lines = _beef.beef("Hardclaws", "random", genre)
                 if len(lines) != 5:
                     return False
-                if not lines[4].startswith("\U0001f3c6 WINNER:"):
+                if not lines[4].startswith("\U0001f3c6 "):
                     return False
                 if not any("Hardclaws" in ln for ln in lines):
                     return False
@@ -345,7 +345,31 @@ def main() -> int:
         res = _beef.feud("Hardclaws", "Rival_Rob", "trucking", revenge=True)
         return bool(res) and len(res["lines"]) == 5 \
             and res["lines"][0].startswith("\U0001f525 REMATCH:") \
-            and res["lines"][4].startswith("\U0001f3c6 WINNER:")
+            and res["lines"][4].startswith("\U0001f3c6 ")
+
+    def _beef_stories_carry_no_chrome():
+        """No labels anywhere in a beef story: no 'BEEF |' prefix, no 'Act n'
+        lines, no 'WINNER:' - the verdict speaks English (' takes it.').
+        Swept across genres, a rematch and a freeform theme."""
+        import re as _re
+
+        import beef as _beef
+        label = _re.compile(r"^(act|line|scene)\s*\d\b", _re.IGNORECASE)
+        stories = [_beef.feud("Hardclaws", "Rival_Rob", g)
+                   for g in list(_beef.GENRES) for _ in range(6)]
+        stories += [_beef.feud("Hardclaws", "Rival_Rob", "trucking",
+                               revenge=True) for _ in range(6)]
+        stories.append(_beef.feud("Hardclaws", "W_E_S_T_Y", "",
+                                  theme="Eating Tacos"))
+        for res in stories:
+            if not res:
+                return False
+            for ln in res["lines"]:
+                if "BEEF |" in ln or "WINNER:" in ln or label.match(ln):
+                    return False
+            if not res["lines"][4].startswith("\U0001f3c6 "):
+                return False
+        return True
 
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
@@ -362,7 +386,7 @@ def main() -> int:
             f"{res['issuer']} and {res['rival']} fell out over a pun.",
             f"{res['rival']} escalated by bringing a leafblower.",
             f"{res['winner']} settled it with one perfect move.",
-            f"\U0001f3c6 WINNER: {res['winner']}. "
+            f"\U0001f3c6 {res['winner']} takes it. "
             f"{res['loser']} left mid-sentence."])
         if _bl.validate(good, res) is None:
             return False
@@ -727,6 +751,8 @@ def main() -> int:
          _beef_game_is_self_contained()),
         ("the beef LLM pass validates or falls back (never breaks the game)",
          _beef_llm_never_breaks_the_game()),
+        ("beef stories carry no chrome (no BEEF |, Act n or WINNER: labels)",
+         _beef_stories_carry_no_chrome()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

@@ -11,8 +11,9 @@ The deal, and it is a strict one:
   the output must match. The leaderboard and the !revenge window are scored
   off that roll, never off model text - a story that disagrees with the roll
   is not a story, it is a validation failure, and the templates take over.
-* Everything the templates guarantee, validate() demands: four lines, the
-  Act prefixes, the exact winner, both names, length limits, no @-pings
+* Everything the templates guarantee, validate() demands: four unlabelled
+  lines, the fixed winner right after the trophy, both names in the story,
+  length limits, no @-pings
   (pinging is the bot's decision, not the model's), no URLs, hashtags or
   markdown. One miss, one fallback.
 * No LLM configured, key rejected, out of credits, rate-limited, slow,
@@ -55,7 +56,8 @@ SYSTEM = (
     "  line 1: the incident that started it, one or two sentences\n"
     "  line 2: the escalation, one or two sentences\n"
     "  line 3: the showdown; the FIXED winner wins it\n"
-    "  🏆 WINNER: <fixed winner>. <one short exit line for the loser>\n"
+    "  🏆 <fixed winner> takes it (or similar words). <one short exit line "
+    "for the loser>\n"
     "- Each line at most 200 characters.\n"
     "- No @ mentions, no hashtags, no URLs, no markdown, no emoji except the "
     "trophy in the last line.\n"
@@ -201,7 +203,9 @@ def validate(raw: str, result: dict) -> list | None:
     for ln in lines:
         if re.match(r"^(act\s*\d|line\s*\d|scene\s*\d)\b", ln.lower()):
             return None
-    if not lines[3].startswith(f"\U0001f3c6 WINNER: {winner}."):
+    # The trophy is followed immediately by the fixed winner's name - no
+    # "WINNER:" label; the verdict speaks English.
+    if not lines[3].startswith(f"\U0001f3c6 {winner}"):
         return None
 
     # Both players star in the acts themselves. The verdict always names the

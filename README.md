@@ -620,7 +620,7 @@ Wikipedia also asks callers to back off after any request that took more than
 a second to serve; `harvest_category` sleeps five seconds when that happens,
 which is the signal that usually precedes a 429 rather than the 429 itself.
 
-### !beef — a three-act feud
+### !beef — a drip-fed feud
 
 ```
 !beef Hardclaws zwift
@@ -631,9 +631,10 @@ which is the signal that usually precedes a 429 rather than the 429 itself.
 ```
 
 Whoever types it stars in it, against the name they give. The story is five
-messages — header, three acts, verdict — because a feud is 600+ characters
-and a Twitch message is not. They are **clean** — no `BEEF |` prefix, no
-`Act 1` labels; the chrome read like a form and took away from the story,
+messages — headline, three story lines, verdict — because a feud is 600+
+characters and a Twitch message is not. They are **clean** — no `BEEF |` prefix, no
+`Act 1` labels, no `WINNER:` in caps — the verdict speaks English ("🏆
+SpeedyDave takes it."); the chrome read like a form and took away from the story,
 so the lines stand alone. And they are **spaced out, not fired as one
 burst**: the headline lands immediately, then each part follows
 `beef_act_delay` seconds apart — the same gap every time, so the knob means
@@ -656,7 +657,7 @@ a permit. The salsa bar is picking sides.
 They settled it at the table, three tacos each, judged by the whole room.
 TruckingWithDoc's collapsed on the second bite.
         (+ beef_act_delay)
-🏆 WINNER: SpeedyDave. TruckingWithDoc says the result is 'under review'.
+🏆 SpeedyDave takes it. TruckingWithDoc says the result is 'under review'.
 ```
 
 **Template-driven, with an optional LLM pass that has to earn its slot.**
@@ -666,7 +667,8 @@ an LLM is configured (`beef_llm: "auto"`), `beefllm.py` asks the model for
 the three acts and the verdict while chat is still reading the headline —
 the pacing work is what makes this safe, because the first act's gap is the
 model's deadline. Deliver in time and pass `validate()` — exactly four lines,
-the Act prefixes, **the pre-rolled winner**, both players in the acts, length
+the unlabelled shape, **the pre-rolled winner** right after the trophy,
+both players in the story, length
 limits, no `@`-pings, no URLs or markup — and chat gets the model's version.
 Anything else (no key, 402, timeout, wrong winner, creative formatting)
 falls back to the template lines silently. The headline is always the
@@ -704,8 +706,8 @@ issuer typed a real name.
 **Freeform themes.** `!beef @W_E_S_T_Y Eating Tacos` doesn't have to name a
 genre. The words after the rival become the story's setting line verbatim —
 *🔥 Hardclaws vs. W_E_S_T_Y — Eating Tacos 🔥* — and with the LLM pass
-on, the acts are written inside that theme (a taco-eating feud, salsa
-politics and all). With templates only, the acts come from a random genre
+on, the story is written inside that theme (a taco-eating feud, salsa
+politics and all). With templates only, the lines come from a random genre
 under your words: arbitrary themes are the one thing a fixed pool honestly
 cannot do, which is the model's job. Losing a themed beef arms `!revenge`
 with the theme attached, so the rematch is still about the tacos.
@@ -715,8 +717,8 @@ with the theme attached, so the rematch is still about the tacos.
 | `!beef off` / `on` / `status` | moderators only, silent for viewers, works while the bot is off |
 | `"beef_enabled": false` | off for everyone; the bot names the key |
 | `"beef_act_delay": 4` | **exact** seconds between each part (0 = the whole story at once; restart after editing) |
-| `"beef_llm": "auto"` | LLM writes the acts when a model is configured; `false` = templates only. Failures fall back silently |
-| `"beef_llm_timeout": 3` | seconds the model gets — never more than the gap before Act 1 |
+| `"beef_llm": "auto"` | LLM writes the story when a model is configured; `false` = templates only. Failures fall back silently |
+| `"beef_llm_timeout": 3` | seconds the model gets — never more than the first gap |
 | `!revenge` | the player who just lost may rematch the same rival within 60s |
 | `!beef stats [name]` | the top five, or one player's card; readable even while the game is off |
 
