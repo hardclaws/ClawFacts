@@ -1472,7 +1472,17 @@ class TwitchBot:
         row = self.beef_state.players.get(name.lower())
         if row and row.get("name"):
             return row["name"]
-        return self._beef_seen.display(name) or rival
+        known = self._beef_seen.display(name)
+        if known:
+            return known
+        # The one source that always knows: Twitch itself. The broadcaster
+        # never plays the game and talks on mic, not in chat - but his
+        # display name is one scope-free Helix call away, cached afterwards.
+        helix = getattr(self._access, "helix", None)
+        try:
+            return (helix.display_name(name) if helix else None) or rival
+        except Exception:
+            return rival
 
     def _beef_tag_target(self, rival: str) -> str:
         """The rival name if it may be @-tagged in the headline, else "".

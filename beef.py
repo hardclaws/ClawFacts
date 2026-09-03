@@ -655,7 +655,7 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     head = (f"\U0001f525 {label}{issuer} vs. {head_rival} \u2014 "
             f"{setting} \U0001f525")
     if random.random() < 0.55:
-        head += f" {fill(_pick(STAKES, ('stakes', key)))}"
+        head += f" {fill(_pick(STAKES, ('stakes',)))}"
 
     # A freeform theme tells its own story lines - borrowing a genre's lines
     # under a themed headline is how a poledancing beef came back full of
@@ -681,8 +681,8 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     act3 = fill(_pick(story["climaxes"], ("climax",) + tagpools))
 
     verdict = (f"\U0001f3c6 {winner} "
-               f"{_pick(VERDICTS, ('verb', key))}. "
-               f"{fill(_pick(FATES, ('fate', key)))}")
+               f"{_pick(VERDICTS, ('verb',))}. "
+               f"{fill(_pick(FATES, ('fate',)))}")
 
     return {
         "lines": [head, act1, act2, act3, verdict],

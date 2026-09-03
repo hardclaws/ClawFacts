@@ -416,6 +416,35 @@ def main() -> int:
                              _re.IGNORECASE)
         return bool(msgs) and not any(domain.search(m) for m in msgs)
 
+    def _beef_fates_never_repeat():
+        """Shared pools (fates, stakes, verbs) draw from ONE ring each, so
+        two beefs cannot land on the same exit line back-to-back."""
+        import beef as _beef
+        a = _beef.feud("Hardclaws", "Rival_Rob", "zwift")
+        b_ = _beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="poledancing")
+        c = _beef.feud("Hardclaws", "Rival_Rob", "trucking")
+        return (a["lines"][4] != b_["lines"][4]
+                and b_["lines"][4] != c["lines"][4]
+                and a["lines"][4] != c["lines"][4])
+
+    def _beef_rival_name_resolves_via_helix():
+        """A rival nobody has seen in chat still gets the display name
+        Twitch holds - one cached, scope-free Get Users call."""
+        import tempfile as _tf
+
+        cfg = dict(_bot.DEFAULTS, nick="b", channel="#t", beef_act_delay=0,
+                   beef_state_path=os.path.join(_tf.mkdtemp(), "bn.json"))
+        bot_ = _bot.TwitchBot(cfg)
+
+        class _H:
+            @staticmethod
+            def display_name(login):
+                return ("TruckingWithDoc"
+                        if login == "truckingwithdoc" else None)
+        bot_._access.helix = _H()
+        return bot_._beef_canonical_rival("@truckingwithdoc") \
+            == "TruckingWithDoc"
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -802,6 +831,10 @@ def main() -> int:
          _beef_theme_fallback_stays_on_theme()),
         ("no beef message carries a bare linkable domain ('config.json')",
          _beef_chat_copy_never_autolinks()),
+        ("the loser's exit line never repeats back-to-back",
+         _beef_fates_never_repeat()),
+        ("a rival's display name resolves via Twitch when chat never saw them",
+         _beef_rival_name_resolves_via_helix()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

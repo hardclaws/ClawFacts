@@ -312,6 +312,49 @@ def test_no_chat_message_contains_a_bare_linkable_domain():
     print("[PASS] no beef message carries a bare linkable domain")
 
 
+def test_fates_never_repeat_back_to_back():
+    """Two streamed beefs ended on the identical exit line: the no-repeat
+    ring was split per genre, so two theme beefs with different background
+    genres drew from different rings and collided. Fates, stakes and verbs
+    are genre-agnostic - one global ring each."""
+    stories = []
+    for i in range(12):
+        if i % 2:
+            res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="poledancing")
+        else:
+            res = beef.feud("Hardclaws", "Rival_Rob",
+                            random.choice(sorted(beef.GENRES)))
+        stories.append(res)
+    for a, b in zip(stories, stories[1:]):
+        assert a["lines"][4] != b["lines"][4], (a["lines"][4], b["lines"][4])
+    print("[PASS] the loser's exit line never repeats back-to-back")
+
+
+def test_a_rivals_display_name_comes_from_twitch_when_unknown():
+    """The stream's lowercase 'truckingwithdoc': the broadcaster never plays
+    the game and talks on mic, not in chat - scoreboard and presence both
+    miss, so the bot asks Twitch itself: one cached, scope-free call."""
+    class FakeHelix:
+        def __init__(self):
+            self.asked = []
+
+        def display_name(self, login):
+            self.asked.append(login)
+            return {"truckingwithdoc": "TruckingWithDoc"}.get(login)
+
+    b, _ = _bot()
+    fake = FakeHelix()
+    b._access.helix = fake
+    assert b._beef_canonical_rival("@truckingwithdoc") == "TruckingWithDoc"
+    assert fake.asked == ["truckingwithdoc"]
+    b._reply_beef("Hardclaws", "@truckingwithdoc poledancing")
+    out = _drain(b)
+    assert out and "vs. TruckingWithDoc" in out[0], out[0]
+    # A Helix miss falls back to the typed spelling, never a crash.
+    assert b._beef_canonical_rival("Ghost_Name") == "Ghost_Name"
+    print("[PASS] unknown rivals get their display name from Twitch")
+
+
 def test_beef_is_reserved_so_it_cannot_be_shadowed():
     assert "beef" in bot_mod.RESERVED_COMMANDS
     print("[PASS] !beef is reserved against custom commands")
@@ -428,6 +471,8 @@ def main():
     test_a_theme_fallback_stays_on_theme()
     test_a_typed_rival_keeps_its_real_casing()
     test_no_chat_message_contains_a_bare_linkable_domain()
+    test_fates_never_repeat_back_to_back()
+    test_a_rivals_display_name_comes_from_twitch_when_unknown()
     test_the_acts_carry_two_beats_and_a_loser_fate()
     print("\nALL PASSED \u2714")
     return 0

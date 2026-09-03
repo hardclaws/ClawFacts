@@ -137,6 +137,7 @@ class Helix:
         self.cache_seconds = float(cache_seconds)
         self.timeout = float(timeout)
         self._ids = {}       # login -> user id (ids never change)
+        self._names = {}     # login -> display name (for pretty chat copy)
         self._follows = {}   # user id -> (expires_at, followed_at or None)
         self.errors = 0
         # 401s seen. Tracked so a denial can say "my login expired" instead of
@@ -335,6 +336,31 @@ class Helix:
         if uid:
             self._ids[login] = uid
         return uid
+
+    def display_name(self, login: str):
+        """The display name Twitch shows for `login`, or None.
+
+        One scope-free Get Users call, cached for the session. This is for
+        chat copy - '!beef @truckingwithdoc' should print the man's actual
+        display name, not the lowercase spelling the viewer happened to
+        type. Returns None on any failure; the caller falls back quietly.
+        """
+        login = clean_login(login).lower()
+        if not login or not (self.client_id and self.token):
+            return None
+        if login in self._names:
+            return self._names[login]
+        try:
+            data = self._fetch("/helix/users", {"login": login})
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError):
+            return None
+        users = data.get("data") or []
+        name = (users[0].get("display_name") or "").strip() if users else ""
+        if not name:
+            return None
+        self._names[login] = name
+        return name
 
     def channel_profile(self, login: str):
         """What Twitch says about a channel, or None if there is no such user.
