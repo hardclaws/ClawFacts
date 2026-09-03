@@ -434,7 +434,7 @@ def test_on_names_the_config_setting_when_config_has_it_off():
     assert "back ON" not in said[0], said
     said.clear()
     b._cb_switch("amod", MOD, "status")
-    assert "config.json" in said[0], said
+    assert "the config (cb_chatter_enabled)" in said[0], said
     print("[PASS] with cb_chatter_enabled=false it names the config key")
 
 

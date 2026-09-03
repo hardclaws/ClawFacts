@@ -313,7 +313,7 @@ def test_config_can_switch_them_off():
     _run_worker(b)
     assert said == [], said
     b._cmd_command("viewer19", VIEWER, "list")
-    assert "switched off in config.json" in said[0], said[0]
+    assert "switched off in the config" in said[0], said[0]
     assert "custom_commands_enabled" in said[0], said[0]
     print("[PASS] custom_commands_enabled=false stops them and names itself")
 

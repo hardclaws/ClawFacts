@@ -1137,7 +1137,7 @@ class TwitchBot:
                 # The keeper thread was never started, so promising "back on"
                 # would be a lie. Name the setting that is actually holding it.
                 self._say(f"@{nick} random truck talk is switched off in "
-                          f"config.json (cb_chatter_enabled) - {pre}cb on its "
+                          f"the config (cb_chatter_enabled) - {pre}cb on its "
                           f"own still works.")
                 return True
             self._cb_ambient_off = False
@@ -1146,8 +1146,8 @@ class TwitchBot:
                       f"average.")
         else:
             if not self.cfg.get("cb_chatter_enabled", True):
-                self._say(f"@{nick} random truck talk is OFF in config.json "
-                          f"(cb_chatter_enabled).")
+                self._say(f"@{nick} random truck talk is OFF in the "
+                          f"config (cb_chatter_enabled).")
             else:
                 state = "OFF" if self._cb_ambient_off else "ON"
                 self._say(f"@{nick} random truck talk is {state}. {pre}cb off "
@@ -1275,7 +1275,7 @@ class TwitchBot:
             # Read-only and useful to everyone, so viewers get it too.
             if not self.cfg.get("custom_commands_enabled", True):
                 self._say(f"@{nick} custom commands are switched off in "
-                          f"config.json (custom_commands_enabled).")
+                          f"the config (custom_commands_enabled).")
                 return True
             names = self.custom_cmds.names()
             if not names:
@@ -1346,7 +1346,7 @@ class TwitchBot:
             # edit does nothing until the bot restarts.
             msg += (f" Stories: {src}. "
                     f"Lines every {self._beef_gap():g}s "
-                    f"(beef_act_delay; restart after editing config.json).")
+                    f"(beef_act_delay; config edits need a restart).")
         self._say(msg)
         return True
 
@@ -1455,7 +1455,7 @@ class TwitchBot:
         the way back when a moderator did. Named either way: a switch that
         just says 'off' makes the user guess which lever to pull."""
         if not self.cfg.get("beef_enabled", True):
-            return "switched off in config.json (beef_enabled)"
+            return "switched off in the config (beef_enabled)"
         return "switched off - a moderator can turn it back on with !beef on"
 
     def _beef_canonical_rival(self, rival: str) -> str:
@@ -1531,14 +1531,14 @@ class TwitchBot:
                       f"announced. {pre}so on to resume.")
         elif verb in ("on", "enable"):
             if not self.cfg.get("shoutout_enabled", True):
-                self._say(f"@{nick} shoutouts are switched off in config.json "
-                          f"(shoutout_enabled).")
+                self._say(f"@{nick} shoutouts are switched off in the "
+                          f"config (shoutout_enabled).")
                 return True
             self._so_off = False
             self._say(f"@{nick} shoutouts are back ON - raids will be "
                       f"announced again.")
         else:
-            state = ("OFF in config.json"
+            state = ("OFF in the config"
                      if not self.cfg.get("shoutout_enabled", True)
                      else ("OFF" if self._so_off else "ON"))
             self._say(f"@{nick} shoutouts are {state}. {pre}so off to silence "

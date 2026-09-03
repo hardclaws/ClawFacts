@@ -381,6 +381,41 @@ def main() -> int:
             return False
         return all("poledancing" in ln for ln in res["lines"][1:4])
 
+    def _beef_chat_copy_never_autolinks():
+        """.json is a real TLD: chat clients auto-link the bare word
+        'config.json' to a stranger's website. No beef message may carry
+        any bare dotted word."""
+        import re as _re
+        import tempfile as _tf
+
+        cfg = dict(_bot.DEFAULTS, nick="b", channel="#t", beef_act_delay=0,
+                   beef_state_path=os.path.join(_tf.mkdtemp(), "bs.json"))
+        bot_ = _bot.TwitchBot(cfg)
+        said = []
+        bot_._say = said.append
+        bot_._log = lambda *a, **k: None
+        bot_._access.helix = None
+
+        def _fire(fn, *a):
+            before = len(said)
+            fn(*a)
+            while not bot_._jobs.empty():
+                _, _, _, command, text = bot_._jobs.get()
+                if command == "say":
+                    said.append(text)
+                bot_._jobs.task_done()
+            return said[before:]
+
+        msgs = []
+        msgs += _fire(bot_._beef_switch, "mod", "moderator/1", "status")
+        msgs += _fire(bot_._reply_beef, "Hardclaws", "")
+        msgs += _fire(bot_._reply_beef, "Hardclaws", "Rival_Rob poledancing")
+        msgs += _fire(bot_._reply_beef, "Hardclaws", "stats")
+        msgs += _fire(bot_._reply_revenge, "Hardclaws")
+        domain = _re.compile(r"\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b",
+                             _re.IGNORECASE)
+        return bool(msgs) and not any(domain.search(m) for m in msgs)
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -765,6 +800,8 @@ def main() -> int:
          _beef_stories_carry_no_chrome()),
         ("a freeform-theme beef keeps its theme in every line (fallback too)",
          _beef_theme_fallback_stays_on_theme()),
+        ("no beef message carries a bare linkable domain ('config.json')",
+         _beef_chat_copy_never_autolinks()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",
