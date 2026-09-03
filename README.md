@@ -718,11 +718,11 @@ with the theme attached, so the rematch is still about the tacos.
 | `"beef_enabled": false` | off for everyone; the bot names the key |
 | `"beef_act_delay": 4` | **exact** seconds between each part (0 = the whole story at once; restart after editing) |
 | `"beef_llm": "auto"` | LLM writes the story when a model is configured; `false` = templates only. Failures fall back silently |
-| `"beef_llm_timeout": 3` | seconds the model gets — never more than the first gap |
+| `"beef_llm_timeout": 4` | seconds the model gets — never more than the first gap |
 
 Stories coming out as templates while a model *is* configured means the model
 missed the deadline — the console logs `!beef LLM pass failed or missed the
-deadline`. A local 8B can need 8–10s: raise `beef_llm_timeout` (it is capped
+deadline`. A local 8B can need 8–10s: raise `beef_llm_timeout` (default 4) (it is capped
 at the first gap, and the pacing is measured from the headline, so waiting
 longer never stretches the gaps). `!beef status` says whether the LLM pass is
 live at all.

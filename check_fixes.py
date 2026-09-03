@@ -445,6 +445,45 @@ def main() -> int:
         return bot_._beef_canonical_rival("@truckingwithdoc") \
             == "TruckingWithDoc"
 
+    def _beef_theme_pools_are_deep_and_grammar_safe():
+        """Theme fallbacks must not sound stamped out: 20+ openers, and the
+        topic rides every line inside quotes so a gerund theme ('using
+        webcams with Zwift') can never produce 'attempting using...'."""
+        import beef as _beef
+        if len(_beef.THEME_SPARKS) < 20 or len(_beef.THEME_QUOTES) < 10:
+            return False
+        pools = (_beef.THEME_SPARKS, _beef.THEME_ESCALATIONS,
+                 _beef.THEME_CLIMAXES, _beef.THEME_QUOTES, _beef.THEME_CROWD)
+        for pool in pools:
+            for line in pool:
+                idx = line.find("{topic}")
+                while idx != -1:
+                    if line[idx - 1] != '"':
+                        return False
+                    idx = line.find("{topic}", idx + 1)
+        return True
+
+    def _beef_at_names_do_not_eat_the_theme():
+        """'!beef @a @truckingwithdoc beer alpe' once matched the trucking
+        genre via the 'truck' inside the leftover @name - theme lost."""
+        import tempfile as _tf
+
+        cfg = dict(_bot.DEFAULTS, nick="b", channel="#t", beef_act_delay=0,
+                   beef_state_path=os.path.join(_tf.mkdtemp(), "bt.json"))
+        bot_ = _bot.TwitchBot(cfg)
+        said = []
+        bot_._say = said.append
+        bot_._log = lambda *a, **k: None
+        bot_._access.helix = None
+        bot_._reply_beef("smithkxx", "@Hardclaws @truckingwithdoc beer alpe")
+        while not bot_._jobs.empty():
+            _, _, _, command, text = bot_._jobs.get()
+            if command == "say":
+                said.append(text)
+            bot_._jobs.task_done()
+        return bool(said) and "beer alpe" in said[0] \
+            and "interstate" not in said[0]
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -835,6 +874,10 @@ def main() -> int:
          _beef_fates_never_repeat()),
         ("a rival's display name resolves via Twitch when chat never saw them",
          _beef_rival_name_resolves_via_helix()),
+        ("theme fallbacks are deep, and the topic is quoted (grammar-safe)",
+         _beef_theme_pools_are_deep_and_grammar_safe()),
+        ("@names in the argument no longer swallow the theme",
+         _beef_at_names_do_not_eat_the_theme()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

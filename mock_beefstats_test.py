@@ -163,7 +163,7 @@ def test_the_leaderboard_orders_and_formats():
     st.record("Cid", "x", "zwift", True, revenge=True)  # 3 pts
     st.record("Dot", "x", "zwift", False)             # -1 pt
     line = st.leader_line()
-    assert line.startswith("1. Cid 3pts (1W-0L"), line
+    assert line.startswith("1. Cid 3 pts (1W-0L"), line
     assert "2. " in line and "3. " in line
     # Same points: more wins first. Ann and Bob both have 2; a second win
     # for Bob settles it.

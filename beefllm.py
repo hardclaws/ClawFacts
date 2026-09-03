@@ -84,7 +84,7 @@ def _deadline(cfg: dict) -> float:
     """Seconds the model gets. Never more than the gap before Act 1, so the
     pacing of the story is guaranteed regardless of what the model does."""
     try:
-        timeout = float(cfg.get("beef_llm_timeout", 3.0) or 3.0)
+        timeout = float(cfg.get("beef_llm_timeout", 4.0) or 4.0)
     except (TypeError, ValueError):
         timeout = 3.0
     try:

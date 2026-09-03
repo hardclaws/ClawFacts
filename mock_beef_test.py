@@ -226,8 +226,10 @@ def test_a_theme_fallback_stays_on_theme():
     for topic in ("poledancing", "Eating Tacos", "extreme ironing"):
         res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme=topic)
         assert res and topic in res["lines"][0], res["lines"][0]
-        for ln in res["lines"][1:4]:
-            assert topic in ln, (topic, ln)      # every line, not just the head
+        # The opener and the escalation always carry the theme's words; the
+        # showdown usually does and is allowed to land without restating it.
+        assert topic in res["lines"][1], (topic, res["lines"][1])
+        assert topic in res["lines"][2], (topic, res["lines"][2])
         assert res["lines"][4].startswith("\U0001f3c6 ")
     # A rematch under a theme keeps it too: the rematch opener is universal,
     # the escalation and showdown still carry the theme.
@@ -355,6 +357,60 @@ def test_a_rivals_display_name_comes_from_twitch_when_unknown():
     print("[PASS] unknown rivals get their display name from Twitch")
 
 
+def test_theme_fallbacks_have_real_variety():
+    """'Way more variety - too many sound the same': the theme pools were
+    nine lines deep with no second beats, so a stream of fallback beefs
+    recycled the same skeletons. Now 20+ deep per beat with trash-talk and
+    crowd beats, and no line survives into the next few stories."""
+    seen_openers, seen_exits = [], []
+    for _ in range(40):
+        res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="poledancing")
+        seen_openers.append(res["lines"][1])
+        seen_exits.append(res["lines"][4])
+    assert len(set(seen_openers)) >= 22, len(set(seen_openers))
+    for a, b in zip(seen_exits, seen_exits[1:]):
+        assert a != b
+    # Two consecutive theme beefs share no story line at all.
+    for _ in range(20):
+        a = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="poledancing")
+        b = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="poledancing")
+        assert not (set(a["lines"][1:4]) & set(b["lines"][1:4]))
+    print("[PASS] 40 themed beefs draw 22+ distinct openers, zero reruns")
+
+
+def test_the_topic_is_quoted_so_grammar_survives():
+    """'attempting using webcams with Zwift' - a gerund theme pasted into a
+    sentence slot is broken English. The topic rides every line inside
+    quotes, as the activity's name, so any string reads correctly."""
+    for topic in ("using webcams with Zwift", "poledancing",
+                  "Picking noses", "Farting Contest",
+                  "pizza eating contests"):
+        for _ in range(30):
+            res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme=topic)
+            assert topic in res["lines"][0]          # headline: title position
+            for ln in res["lines"][1:4]:
+                idx = ln.find(topic)
+                while idx != -1:
+                    assert ln[idx - 1] == '"', (topic, ln)
+                    idx = ln.find(topic, idx + 1)
+                assert "  " not in ln and "{" not in ln, ln
+    print("[PASS] gerunds and phrases stay grammatical: the topic is quoted")
+
+
+def test_extra_at_names_do_not_eat_the_theme():
+    """'!beef @a @truckingwithdoc beer alpe' matched the TRUCKING genre,
+    because the leftover @name contains 'truck', and 'beer alpe' was never
+    seen again. @tokens are spectators, not theme words."""
+    b, _ = _bot()
+    b._reply_beef("smithkxx", "@Hardclaws @truckingwithdoc beer alpe")
+    out = _drain(b)
+    assert out and "beer alpe" in out[0], out[0]
+    assert "interstate" not in out[0], out[0]
+    assert "vs. Hardclaws" in out[0], out[0]
+    assert "beer alpe" in out[1], out[1]
+    print("[PASS] @names in the argument no longer swallow the theme")
+
+
 def test_beef_is_reserved_so_it_cannot_be_shadowed():
     assert "beef" in bot_mod.RESERVED_COMMANDS
     print("[PASS] !beef is reserved against custom commands")
@@ -473,6 +529,9 @@ def main():
     test_no_chat_message_contains_a_bare_linkable_domain()
     test_fates_never_repeat_back_to_back()
     test_a_rivals_display_name_comes_from_twitch_when_unknown()
+    test_theme_fallbacks_have_real_variety()
+    test_the_topic_is_quoted_so_grammar_survives()
+    test_extra_at_names_do_not_eat_the_theme()
     test_the_acts_carry_two_beats_and_a_loser_fate()
     print("\nALL PASSED \u2714")
     return 0

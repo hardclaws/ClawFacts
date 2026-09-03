@@ -169,7 +169,7 @@ DEFAULTS = {
     # the templates guarantee, and any miss (or timeout, or missing key)
     # falls back to templates silently - the game never waits or breaks.
     "beef_llm": "auto",
-    "beef_llm_timeout": 3.0,
+    "beef_llm_timeout": 4.0,
     # Seconds between the parts of a beef story - the literal gap, exactly,
     # so the knob means what it reads. 0 sends the whole story at once,
     # which is a wall nobody reads.
@@ -1392,7 +1392,11 @@ class TwitchBot:
             # somebody called zwift.
             rival, rest = "", rival
         genre, theme = "", ""
-        rest = rest.strip()
+        # Extra @names are spectators, not words: "!beef @a @truckingwithdoc
+        # beer alpe" once matched the trucking GENRE, because the leftover
+        # @truckingwithdoc contains "truck" - and the actual theme ("beer
+        # alpe") was never seen again. Drop @tokens before parsing.
+        rest = " ".join(t for t in rest.split() if not t.startswith("@"))
         if rest:
             genre = beef_mod.match_genre(rest)
             if not genre:
@@ -1845,7 +1849,9 @@ class TwitchBot:
             return
         self._last_denial_note[login] = now
         if wait:
-            self._say(f"@{nick} that's on cooldown - {int(wait)}s to go.")
+            import math as _math
+            self._say(f"@{nick} that's on cooldown - "
+                      f"{_math.ceil(wait)}s to go.")
         elif "follow" in reason:
             helix = self._access.helix
             if helix is not None and helix.unauthorized:

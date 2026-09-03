@@ -451,37 +451,101 @@ GENRES = {
 #: carry the theme's own words into every line: universal beats that are
 #: funny about ANY activity, because they are about the people.
 THEME_SPARKS = (
-    "It started at {topic}, like most tragedies do.",
-    "{b} was seen practising {topic} alone at 2am. Dedication, possibly derangement.",
-    "{a} accused {b} of doing {topic} with the door closed. There are rules.",
-    "{b} brought a custom rig for {topic} and acted like that was normal.",
-    "It began as friendly {topic} and escalated within minutes, witnesses say.",
-    "{a} called {b}'s form at {topic} 'a safety incident'.",
-    "{b} rated {a}'s {topic} a four out of ten, out loud, in front of everyone.",
-    "Someone filmed {a} attempting {topic}. The footage is sealed, thankfully.",
-    "{a} and {b} were paired for {topic} and neither has been the same since.",
+    "It started, as these things do, with both of them claiming to be the founder of \"{topic}\".",
+    "{b} was caught running a secret \"{topic}\" training camp in a storage unit.",
+    "{a} accused {b} of doing \"{topic}\" with the door closed. There are rules.",
+    "{b} brought custom equipment for \"{topic}\" and acted like that was normal.",
+    "Someone filmed {a} attempting \"{topic}\". The footage is sealed, thankfully.",
+    "It began as friendly \"{topic}\" and escalated within minutes, witnesses say.",
+    "{a} called {b}'s form at \"{topic}\" 'a safety incident'.",
+    "{b} rated {a}'s \"{topic}\" a four out of ten, out loud, in front of everyone.",
+    "{a} and {b} were paired for \"{topic}\" at a retreat. Neither has been the same since.",
+    "{b} allegedly hid the good \"{topic}\" supplies where only they could find them.",
+    "It started when {b} suggested \"{topic}\" 'just for fun', which nobody believed.",
+    "{a} found {b}'s \"{topic}\" diary. It has CHAPTERS.",
+    "{b} has been telling everyone they invented \"{topic}\". There are records. There are witnesses.",
+    "{a} asked one question about \"{topic}\" and {b} answered for forty minutes.",
+    "The \"{topic}\" league had two slots left and exactly one brain cell between them.",
+    "{b} practised \"{topic}\" in front of a mirror, and the mirror filed a complaint.",
+    "{a} bumped the thermostat during \"{topic}\" and called it 'strategy'.",
+    "It was \"{topic}\" for charity until {b} made it personal.",
+    "{b} brought a laminated rulebook for \"{topic}\" and read it aloud, twice.",
+    "{a} swears {b} cheated at \"{topic}\". {b} swears nothing, on legal advice.",
 )
 
 THEME_ESCALATIONS = (
-    "{a} started training for {topic} in secret, at dawn, like a person with a plan.",
-    "{b} studied fourteen hours of {topic} footage 'for research'.",
-    "{a} hired a coach. For {topic}. Money changed hands.",
-    "{b} wrote a forty-slide presentation titled 'Why I Am Better At {topic}'.",
-    "The {topic} authorities were notified, and then ignored.",
-    "{a} challenged {b} to public {topic}, winner picks the playlist forever.",
-    "{b} annexed the only good spot for {topic} and declared it sovereign.",
-    "Group chat polls were held about the {topic} dispute. Two friendships ended.",
-    "{a} got sponsors. For {topic}. The sponsors have questions now.",
+    "{a} started training for \"{topic}\" at dawn, in secret, like a person with a plan.",
+    "{b} studied fourteen hours of \"{topic}\" footage 'for research'.",
+    "{a} hired a coach. For \"{topic}\". Money changed hands.",
+    "{b} prepared a forty-slide presentation about \"{topic}\". Nobody asked for it.",
+    "The \"{topic}\" authorities were notified, and then ignored.",
+    "{a} challenged {b} to public \"{topic}\", winner picks the playlist forever.",
+    "{b} annexed the only good spot for \"{topic}\" and declared it sovereign.",
+    "Group-chat polls were held about the \"{topic}\" dispute. Two friendships ended.",
+    "{a} got sponsors. For \"{topic}\". The sponsors have questions now.",
+    "{b} started a podcast purely to discuss \"{topic}\" grievances. Episode one is four hours.",
+    "Neutral parties were invited to mediate the \"{topic}\" situation. All of them declined.",
+    "{a} planted a mole in {b}'s \"{topic}\" crew. The mole is doing great.",
+    "{b} got \"{topic}\" insured, which raises more questions than it answers.",
+    "The \"{topic}\" dispute went to arbitration. The arbitrator quit.",
+    "{a} released a diss track about \"{topic}\". It's... not bad, actually.",
+    "{b} printed T-shirts declaring themselves the \"{topic}\" champion. Premature.",
+    "{a} studied {b}'s old \"{topic}\" tapes and took notes in a small, angry notebook.",
+    "Somebody leaked {b}'s \"{topic}\" practice schedule. Analysts called it 'concerning'.",
+    "{b} lobbied to have the \"{topic}\" rules changed. The rules said no.",
+    "It escalated when {a} brought a lawyer to casual \"{topic}\". The lawyer stayed for the drama.",
 )
 
 THEME_CLIMAXES = (
-    "They settled it head-to-head at {topic}, in front of everyone. {w} by a mile; {l} is appealing.",
-    "One round of {topic} each, judged by the room. {w} took every vote but {l}'s.",
-    "{w} won at {topic} so convincingly that {l} demanded a drug test.",
-    "It ended in sudden-death {topic}: {w} advanced; {l} blamed the lighting.",
-    "The final was {topic}, best of three. {w} took it in two; {l} took it personally.",
-    "{w} settled it with one perfect {topic} run that got slow-clapped. {l} left during the applause.",
+    "They settled it head-to-head at \"{topic}\", in front of everyone. {w} by a mile; {l} is appealing.",
+    "One round of \"{topic}\" each, judged by the room. {w} took every vote but {l}'s.",
+    "{w} won at \"{topic}\" so convincingly that {l} demanded a drug test.",
+    "It ended in sudden-death \"{topic}\": {w} advanced; {l} blamed the lighting.",
+    "The final was \"{topic}\", best of three. {w} took it in two; {l} took it personally.",
+    "{w} settled it with one perfect \"{topic}\" run that got slow-clapped. {l} left during the applause.",
+    "The \"{topic}\" title match went long. {w} endured; {l} asked if they could start over.",
+    "Judges' decision, unanimous: {w}. {l} submitted a counter-argument with diagrams. The diagrams were wrong.",
+    "{w} clutched the \"{topic}\" final with a move nobody has attempted since. {l} saw it coming and could do nothing.",
+    "It came down to the last attempt at \"{topic}\". {w} delivered; {l} delivered slightly less.",
+    "The \"{topic}\" showdown ended in a score so lopsided the scoreboard asked for confirmation. {w} confirmed. {l} left.",
+    "{w} took the \"{topic}\" crown on a tiebreaker nobody knew existed, least of all {l}.",
 )
+
+#: Second beats for theme stories - trash talk and crowd weather, the same
+#: two-beat structure the genre pools always had. A bare sentence per line
+#: was half of why fallback beefs read stamped-out.
+THEME_QUOTES = (
+    "{a} told the room that {b} treats \"{topic}\" like a whole personality.",
+    "{b} was overheard calling {a} 'a tourist' at \"{topic}\".",
+    "{a} said {b}'s \"{topic}\" reputation is 'mostly background noise'.",
+    "{b} described {a}'s \"{topic}\" style as 'legally distinct from talent'.",
+    "{a} asked whether \"{topic}\" has a mercy rule. It does not.",
+    "{b} told a journalist, unprompted, that \"{topic}\" is 'a war of attrition'.",
+    "{a} now refers to {b} only as 'the situation'.",
+    "{b} said 'we'll see' in the tone of someone who had already seen.",
+    "{a} promised the crowd a masterclass in \"{topic}\". The crowd is still waiting.",
+    "{b} called {a} 'an ideas man' at \"{topic}\". It was not a compliment.",
+    "{a} demanded a rematch before the first one had even finished.",
+    "{b} thanked the fans, the family, and nobody else involved in \"{topic}\".",
+)
+
+THEME_CROWD = (
+    "The group chat is drafting constitutions.",
+    "Two neutral parties have chosen flags.",
+    "Someone started a bracket. It's already corrupt.",
+    "The spectators have opinions and no decorum.",
+    "A poll was held. The poll made it worse.",
+    "The whole room has stopped pretending to work.",
+    "Somebody's nan weighed in. She was brutal.",
+    "The chant started spontaneously and refuses to stop.",
+    "Merch is being made in someone's basement.",
+    "The \"{topic}\" thread made two local Facebook groups. Both locked it.",
+)
+
+#: The topic is QUOTED in every story line, never bare: a gerund theme
+#: ("using webcams with Zwift") pasted into "attempting {topic}" is how the
+#: bot once said 'attempting using webcams'. Quoted, any string reads as the
+#: activity's name: attempting "using webcams with Zwift" is a sentence.
 
 #: Genre aliases, so 'zwifting' and 'fortnite br' both land somewhere sensible.
 _ALIASES = {
@@ -669,14 +733,19 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
         story = pools
         tagpools = (key,)
 
+    if theme:
+        quotes, crowd = THEME_QUOTES, THEME_CROWD
+    else:
+        quotes, crowd = pools["quotes"], pools["crowd"]
+
     act1 = fill(_pick(REMATCH_SPARKS if revenge else story["sparks"],
                       ("spark",) + tagpools))
-    if not theme and not revenge and random.random() < 0.65:
-        act1 += " " + fill(_pick(pools["quotes"], ("quote", key)))
+    if not revenge and random.random() < 0.65:
+        act1 += " " + fill(_pick(quotes, ("quote",) + tagpools))
 
     act2 = fill(_pick(story["escalations"], ("esc",) + tagpools))
-    if not theme and random.random() < 0.65:
-        act2 += " " + fill(_pick(pools["crowd"], ("crowd", key)))
+    if random.random() < 0.65:
+        act2 += " " + fill(_pick(crowd, ("crowd",) + tagpools))
 
     act3 = fill(_pick(story["climaxes"], ("climax",) + tagpools))
 

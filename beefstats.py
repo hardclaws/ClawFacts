@@ -218,7 +218,8 @@ class BeefState:
         top = self.leaderboard(rows)
         if not top:
             return ""
-        parts = [f"{i}. {name} {r['points']}pts "
+        parts = [f"{i}. {name} {r['points']} "
+                 f"pt{'s' if r['points'] != 1 else ''} "
                  f"({r['wins']}W-{r['losses']}L"
                  + (f", streak {r['streak']}" if r.get("streak") else "")
                  + ")"
