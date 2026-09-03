@@ -676,7 +676,7 @@ template one: it carries the @-tag decision, and that is never the model's
 to make. The leaderboard and `!revenge` are scored off the pre-rolled winner
 either way, so the model cannot tilt the game. Six genres × 18 openers × 10
 escalations × 6 climaxes × 5 rivals × either winner × 9 exit lines is
-**583,200 template stories on the spine before names go in**, so the
+**1,000,000+ template stories on the spine before names go in**, so the
 fallback is never a consolation prize. Neither `beef.py` nor `beefstats.py`
 imports the LLM, the network, or a key — a dead Ollama or a 402 on the fun
 facts cannot take the feuds down with them — and `python3 check_fixes.py`
@@ -719,6 +719,13 @@ with the theme attached, so the rematch is still about the tacos.
 | `"beef_act_delay": 4` | **exact** seconds between each part (0 = the whole story at once; restart after editing) |
 | `"beef_llm": "auto"` | LLM writes the story when a model is configured; `false` = templates only. Failures fall back silently |
 | `"beef_llm_timeout": 3` | seconds the model gets — never more than the first gap |
+
+Stories coming out as templates while a model *is* configured means the model
+missed the deadline — the console logs `!beef LLM pass failed or missed the
+deadline`. A local 8B can need 8–10s: raise `beef_llm_timeout` (it is capped
+at the first gap, and the pacing is measured from the headline, so waiting
+longer never stretches the gaps). `!beef status` says whether the LLM pass is
+live at all.
 | `!revenge` | the player who just lost may rematch the same rival within 60s |
 | `!beef stats [name]` | the top five, or one player's card; readable even while the game is off |
 

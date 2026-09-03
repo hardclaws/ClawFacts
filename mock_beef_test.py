@@ -218,6 +218,57 @@ def test_bare_beef_shows_usage_but_a_bad_rival_still_plays():
     print("[PASS] bare !beef shows usage; a bad rival still plays")
 
 
+def test_a_theme_fallback_stays_on_theme():
+    """The stream's broken beef: '!beef @x poledancing' headlined poledancing
+    and then told a robots story - the template fallback borrowed a random
+    genre's lines under the themed headline. The fallback now carries the
+    player's own words into every story line."""
+    for topic in ("poledancing", "Eating Tacos", "extreme ironing"):
+        res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme=topic)
+        assert res and topic in res["lines"][0], res["lines"][0]
+        for ln in res["lines"][1:4]:
+            assert topic in ln, (topic, ln)      # every line, not just the head
+        assert res["lines"][4].startswith("\U0001f3c6 ")
+    # A rematch under a theme keeps it too: the rematch opener is universal,
+    # the escalation and showdown still carry the theme.
+    res = beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="Eating Tacos",
+                    revenge=True)
+    assert res["lines"][0].startswith("\U0001f525 REMATCH:")
+    assert "Eating Tacos" in res["lines"][2], res["lines"][2]
+    assert "Eating Tacos" in res["lines"][3], res["lines"][3]
+    # No rival named: the opponent is still a character, from any genre.
+    named = {r for pool in beef.RIVALS.values() for r in pool}
+    for _ in range(30):
+        res = beef.feud("Hardclaws", "", "", theme="poledancing")
+        assert res["rival"] in named, res["rival"]
+        assert "poledancing" in res["lines"][1], res["lines"][1]
+    print("[PASS] theme fallbacks tell the story the player asked for")
+
+
+def test_a_typed_rival_keeps_its_real_casing():
+    """'!beef @truckingwithdoc' printed lowercase through five messages when
+    the person's display name was on file the whole time."""
+    b, said = _bot()
+    b._beef_seen.note("TruckingWithDoc")
+    b._reply_beef("Hardclaws", "@truckingwithdoc poledancing")
+    out = _drain(b)
+    assert out and "vs. TruckingWithDoc" in out[0], out[0]
+
+    # A player's scoreboard name counts too, even if they left chat.
+    b2, _ = _bot()
+    b2.beef_state.record("SpeedyDave", "x", "zwift", True)
+    b2._reply_beef("Hardclaws", "@speedydave zwift")
+    out = _drain(b2)
+    assert out and "vs. SpeedyDave" in out[0], out[0]
+
+    # An unknown name is passed through untouched, not invented.
+    b3, _ = _bot()
+    b3._reply_beef("Hardclaws", "W_E_S_T_Y poledancing")
+    out = _drain(b3)
+    assert out and "vs. W_E_S_T_Y" in out[0], out[0]
+    print("[PASS] rivals keep their real display name when we know it")
+
+
 def test_beef_is_reserved_so_it_cannot_be_shadowed():
     assert "beef" in bot_mod.RESERVED_COMMANDS
     print("[PASS] !beef is reserved against custom commands")
@@ -328,6 +379,8 @@ def main():
     test_consecutive_stories_stop_echoing_each_other()
     test_an_at_prefixed_rival_is_still_the_rival()
     test_a_freeform_theme_is_honoured_not_discarded()
+    test_a_theme_fallback_stays_on_theme()
+    test_a_typed_rival_keeps_its_real_casing()
     test_the_acts_carry_two_beats_and_a_loser_fate()
     print("\nALL PASSED \u2714")
     return 0

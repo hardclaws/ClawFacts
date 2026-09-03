@@ -444,6 +444,45 @@ GENRES = {
     },
 }
 
+#: Theme-generic story lines. When the player types a freeform theme
+#: ("poledancing", "Eating Tacos") and the LLM pass cannot write the story,
+#: the fallback used to borrow a random genre's lines under the themed
+#: headline - a poledancing feud told with robot batteries. These instead
+#: carry the theme's own words into every line: universal beats that are
+#: funny about ANY activity, because they are about the people.
+THEME_SPARKS = (
+    "It started at {topic}, like most tragedies do.",
+    "{b} was seen practising {topic} alone at 2am. Dedication, possibly derangement.",
+    "{a} accused {b} of doing {topic} with the door closed. There are rules.",
+    "{b} brought a custom rig for {topic} and acted like that was normal.",
+    "It began as friendly {topic} and escalated within minutes, witnesses say.",
+    "{a} called {b}'s form at {topic} 'a safety incident'.",
+    "{b} rated {a}'s {topic} a four out of ten, out loud, in front of everyone.",
+    "Someone filmed {a} attempting {topic}. The footage is sealed, thankfully.",
+    "{a} and {b} were paired for {topic} and neither has been the same since.",
+)
+
+THEME_ESCALATIONS = (
+    "{a} started training for {topic} in secret, at dawn, like a person with a plan.",
+    "{b} studied fourteen hours of {topic} footage 'for research'.",
+    "{a} hired a coach. For {topic}. Money changed hands.",
+    "{b} wrote a forty-slide presentation titled 'Why I Am Better At {topic}'.",
+    "The {topic} authorities were notified, and then ignored.",
+    "{a} challenged {b} to public {topic}, winner picks the playlist forever.",
+    "{b} annexed the only good spot for {topic} and declared it sovereign.",
+    "Group chat polls were held about the {topic} dispute. Two friendships ended.",
+    "{a} got sponsors. For {topic}. The sponsors have questions now.",
+)
+
+THEME_CLIMAXES = (
+    "They settled it head-to-head at {topic}, in front of everyone. {w} by a mile; {l} is appealing.",
+    "One round of {topic} each, judged by the room. {w} took every vote but {l}'s.",
+    "{w} won at {topic} so convincingly that {l} demanded a drug test.",
+    "It ended in sudden-death {topic}: {w} advanced; {l} blamed the lighting.",
+    "The final was {topic}, best of three. {w} took it in two; {l} took it personally.",
+    "{w} settled it with one perfect {topic} run that got slow-clapped. {l} left during the applause.",
+)
+
 #: Genre aliases, so 'zwifting' and 'fortnite br' both land somewhere sensible.
 _ALIASES = {
     "trucking": ("truck", "trucker", "ets2", "ats", "convoy", "lorry", "semis"),
@@ -520,7 +559,10 @@ def combination_count() -> int:
     winner x fates. Quotes, crowd lines, stakes and act tags multiply it
     further, but they are optional beats - this counts the spine.
     """
-    total = 0
+    all_rivals = [r for g in RIVALS.values() for r in g]
+    total = ((len(THEME_SPARKS) + len(REMATCH_SPARKS))
+             * len(THEME_ESCALATIONS) * len(THEME_CLIMAXES)
+             * len(all_rivals) * 2 * len(FATES))
     for genre, pools in GENRES.items():
         total += ((len(pools["sparks"]) + len(REMATCH_SPARKS))
                   * len(pools["escalations"])
@@ -555,12 +597,14 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     Tacos"). It is not a genre and must not be discarded: it headlines the
     story as typed, travels to the LLM pass so the acts are written inside
     it, and is remembered in the result so a !revenge rematch stays on
-    theme. The template acts still come from a genre - arbitrary themes are
-    the one thing templates honestly cannot do, and the model's job.
+    theme. The LLM writes inside the theme when it can; the template
+    fallback draws from theme-generic pools that carry the player's words
+    into every line - never from an unrelated genre's pools.
     """
     issuer = (issuer or "").strip()
     if not _valid(issuer):
         return None
+    theme = " ".join((theme or "").split())
 
     genre_key = genre_for(genre)
     pools = GENRES[genre_key]
@@ -577,7 +621,9 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
         # opponent is one of the named characters - not another viewer, who did
         # not opt in, and not the issuer, whose escalation lines would read as
         # one person doing both halves.
-        others = [r for r in RIVALS[genre_key] if r.lower() != issuer.lower()]
+        pool = ([r for g in RIVALS.values() for r in g] if theme.strip()
+                else RIVALS[genre_key])
+        others = [r for r in pool if r.lower() != issuer.lower()]
         rival = random.choice(others)
 
     # Winner first, story second - otherwise the ending has to be retrofitted
@@ -592,7 +638,8 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
                     .replace("{b}'s", _poss(rival))
                     .replace("{w}'s", _poss(winner))
                     .replace("{l}'s", _poss(loser)))
-        return text.format(a=issuer, b=rival, w=winner, l=loser)
+        return text.format(a=issuer, b=rival, w=winner, l=loser,
+                           topic=theme)
 
     # Only a rematch needs the word - a normal beef is self-evident, and
     # labels on every line read like a form.
@@ -600,7 +647,6 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     key = "rematch" if revenge else genre_key
     head_rival = f"@{rival}" if tag else rival
 
-    theme = " ".join((theme or "").split())
     if theme:
         setting = theme            # the player's own words, not discarded
     else:
@@ -611,16 +657,28 @@ def feud(issuer: str, rival: str = "", genre: str = "", revenge: bool = False,
     if random.random() < 0.55:
         head += f" {fill(_pick(STAKES, ('stakes', key)))}"
 
-    act1 = fill(_pick(REMATCH_SPARKS if revenge else pools["sparks"],
-                      ("spark", key)))
-    if not revenge and random.random() < 0.65:
+    # A freeform theme tells its own story lines - borrowing a genre's lines
+    # under a themed headline is how a poledancing beef came back full of
+    # robot batteries. Only a rematch opener ignores the theme, and only
+    # because "demanded a rematch" is true in every world.
+    if theme:
+        story = {"sparks": THEME_SPARKS, "escalations": THEME_ESCALATIONS,
+                 "climaxes": THEME_CLIMAXES}
+        tagpools = ("theme",)
+    else:
+        story = pools
+        tagpools = (key,)
+
+    act1 = fill(_pick(REMATCH_SPARKS if revenge else story["sparks"],
+                      ("spark",) + tagpools))
+    if not theme and not revenge and random.random() < 0.65:
         act1 += " " + fill(_pick(pools["quotes"], ("quote", key)))
 
-    act2 = fill(_pick(pools["escalations"], ("esc", key)))
-    if random.random() < 0.65:
+    act2 = fill(_pick(story["escalations"], ("esc",) + tagpools))
+    if not theme and random.random() < 0.65:
         act2 += " " + fill(_pick(pools["crowd"], ("crowd", key)))
 
-    act3 = fill(_pick(pools["climaxes"], ("climax", key)))
+    act3 = fill(_pick(story["climaxes"], ("climax",) + tagpools))
 
     verdict = (f"\U0001f3c6 {winner} "
                f"{_pick(VERDICTS, ('verb', key))}. "

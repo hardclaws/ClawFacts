@@ -935,6 +935,7 @@ class TwitchBot:
         self._queue_say(lines[0])
         body = lines[1:]
         delay = self._beef_gap()
+        started = time.time()      # gaps are measured from the headline
         # Burst mode (delay 0) has no gap to write in - the template lines
         # are queued immediately, so there is nothing for the model to fill.
         if delay > 0 and beefllm.available(self.cfg):
@@ -946,9 +947,10 @@ class TwitchBot:
             else:
                 self._log("!beef LLM pass failed or missed the deadline - "
                           "templates used")
-        self._schedule_beef_rest(body, delay)
+        self._schedule_beef_rest(body, delay, started)
 
-    def _schedule_beef_rest(self, body: list, delay: float) -> None:
+    def _schedule_beef_rest(self, body: list, delay: float,
+                            started: float = None) -> None:
         """Drip the body of a beef story out, `delay` seconds apart.
 
         Five messages at once is a wall - chat reads the ending before the
@@ -965,8 +967,13 @@ class TwitchBot:
             for line in body:
                 self._queue_say(line)
             return
+        # Gaps are measured from the headline, not from whenever the LLM
+        # finished thinking - waiting on the model must not stretch the
+        # pacing the config promised.
+        base = started if started is not None else time.time()
         for i, line in enumerate(body, 1):
-            t = threading.Timer(i * delay, self._queue_say, args=(line,))
+            wait = max(0.05, i * delay - (time.time() - base))
+            t = threading.Timer(wait, self._queue_say, args=(line,))
             t.daemon = True
             t.start()
 
@@ -1379,7 +1386,7 @@ class TwitchBot:
                       f"!beef random")
             return
         rival, _, rest = args.partition(" ")
-        rival = rival.strip()
+        rival = self._beef_canonical_rival(rival)
         if not rest.strip() and rival.lower() in beef_mod.GENRES:
             # "!beef zwift" means a beef set in Zwift, not a feud against
             # somebody called zwift.
@@ -1390,10 +1397,9 @@ class TwitchBot:
             genre = beef_mod.match_genre(rest)
             if not genre:
                 # Freeform theme: "!beef @W_E_S_T_Y Eating Tacos" is a taco
-                # feud. The words headline the story as typed and go to the
-                # LLM pass; template acts (no model) come from a random
-                # genre under that headline. Silently randomising the genre
-                # - the old behaviour - threw the player's words away.
+                # feud. The words headline the story as typed, go to the LLM
+                # pass, and back the template fallback's theme pools - the
+                # player's words are never swapped for a random genre.
                 theme = rest
         result = beef_mod.feud(nick, rival, genre, theme=theme,
                                tag=bool(self._beef_tag_target(rival)))
@@ -1451,6 +1457,22 @@ class TwitchBot:
         if not self.cfg.get("beef_enabled", True):
             return "switched off in config.json (beef_enabled)"
         return "switched off - a moderator can turn it back on with !beef on"
+
+    def _beef_canonical_rival(self, rival: str) -> str:
+        """The properly-cased display name for a typed rival, when we know it.
+
+        '!beef @truckingwithdoc poledancing' used to print 'truckingwithdoc'
+        through all five messages, lowercase because that is how it was
+        typed. If that person has played the game or been in chat, their
+        real display name is on file - use it.
+        """
+        name = (rival or "").strip().lstrip("@").strip()
+        if not name:
+            return rival
+        row = self.beef_state.players.get(name.lower())
+        if row and row.get("name"):
+            return row["name"]
+        return self._beef_seen.display(name) or rival
 
     def _beef_tag_target(self, rival: str) -> str:
         """The rival name if it may be @-tagged in the headline, else "".

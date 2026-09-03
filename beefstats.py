@@ -267,6 +267,16 @@ class RecentChatters:
                                                              - self.cap]:
                 del self._seen[login]
 
+    def display(self, name: str) -> str | None:
+        """The display name we saw for `name`'s login, if we saw one.
+
+        '!beef @truckingwithdoc' is typed in lowercase; the story used to
+        print it that way for five messages when the person's real display
+        name was sitting in this table the whole time.
+        """
+        entry = self._seen.get((name or "").strip().lower())
+        return entry[0] if entry else None
+
     def seen(self, name: str, within: float = TAG_RECENT_SECONDS) -> bool:
         """True if `name` was seen in chat within `within` seconds."""
         entry = self._seen.get((name or "").strip().lower())

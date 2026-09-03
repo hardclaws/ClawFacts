@@ -371,6 +371,16 @@ def main() -> int:
                 return False
         return True
 
+    def _beef_theme_fallback_stays_on_theme():
+        """A freeform-theme beef must keep its words in every story line,
+        even on the template fallback - a 'poledancing' headline over robot
+        batteries is the broken beef that shipped."""
+        import beef as _beef
+        res = _beef.feud("Hardclaws", "W_E_S_T_Y", "", theme="poledancing")
+        if not res or "poledancing" not in res["lines"][0]:
+            return False
+        return all("poledancing" in ln for ln in res["lines"][1:4])
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -753,6 +763,8 @@ def main() -> int:
          _beef_llm_never_breaks_the_game()),
         ("beef stories carry no chrome (no BEEF |, Act n or WINNER: labels)",
          _beef_stories_carry_no_chrome()),
+        ("a freeform-theme beef keeps its theme in every line (fallback too)",
+         _beef_theme_fallback_stays_on_theme()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",
