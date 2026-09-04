@@ -500,6 +500,23 @@ def main() -> int:
             "whats the best usa trucking route and why")
         return subj == "usa trucking route"
 
+    def _funfact_namesakes_and_variety():
+        """Trucking was answered by a Backhaul article's Broadway gossip,
+        and american truckers posted the same one sentence twice. A namesake
+        must not match the head word, its lines must name the subject, and
+        the topic path pools every matching article instead of one."""
+        import inspect
+        if funfacts._topic_match("Backhaul (trucking)", "trucking"):
+            return False
+        if not funfacts._topic_match("Trucking industry in the United States",
+                                     "trucking"):
+            return False
+        if funfacts._names_subject(
+                "Mislove also invited Deutsch to the cabaret.", "trucking"):
+            return False
+        topic_src = inspect.getsource(funfacts._wikipedia_topic)
+        return "groups.sort" in topic_src and "reach" in topic_src
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -896,6 +913,8 @@ def main() -> int:
          _beef_at_names_do_not_eat_the_theme()),
         ("funfact survives a one-typo query; questions search Wikipedia",
          _funfact_survives_a_typo_and_answers_questions()),
+        ("funfact namesakes cannot speak for the subject; pools rotate",
+         _funfact_namesakes_and_variety()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

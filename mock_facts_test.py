@@ -1905,6 +1905,109 @@ def test_a_misspelled_dish_still_gets_its_facts():
     print("[PASS] a misspelled dish returns its article's facts")
 
 
+def test_a_namesake_cannot_label_or_speak_for_the_subject():
+    """'!funfact Trucking' answered under the heading "Backhaul (trucking)"
+    with a sentence about Broadway casting gossip - Mislove, Deutsch, Jules
+    Feiffer's Little Murders, and not one truck. A namesake article that
+    merely carries the word can no longer win the label, and an ungated
+    harvest from it cannot contribute lines that never name the subject."""
+    # The head word of the query is "trucking"; "backhaul" is not it.
+    assert not funfacts._topic_match("Backhaul (trucking)", "trucking")
+    # So lines from that article must name the subject to count...
+    assert not funfacts._names_subject(
+        "Mislove also invited Deutsch, who was appearing at The Upstairs at "
+        "the Downstairs Cabaret at the Plaza Hotel.", "trucking")
+    # ...while the article whose head word IS the subject speaks freely.
+    assert funfacts._topic_match("Trucking industry in the United States",
+                                 "trucking")
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "Backhaul (trucking)"},
+                    {"title": "Trucking industry in the United States"}]}}
+            pages = []
+            for t in params.get("titles", "").split("|"):
+                if t == "Backhaul (trucking)":
+                    pages.append({"title": t, "extract":
+                        "A backhaul is a return journey a truck makes after "
+                        "delivering a cargo. Mislove also invited Deutsch, "
+                        "who was appearing at The Upstairs at the Downstairs "
+                        "Cabaret at the Plaza Hotel."})
+                else:
+                    pages.append({"title": t, "extract":
+                        "Trucking moves most of the nation's freight. "
+                        "Trucking companies plan backhauls to avoid running "
+                        "empty."})
+            return {"query": {"pages": pages}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("Trucking", {"max_fact_chars": 200})
+        assert got, "trucking lookup returned nothing"
+        assert got["place"] == "Trucking industry in the United States", got
+        assert "Mislove" not in got["fact"], got["fact"]
+        assert "trucking" in got["fact"].lower(), got["fact"]
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a namesake cannot label the answer or speak for it")
+
+
+def test_a_one_fact_answer_gets_deepened_and_rotates():
+    """'!funfact american truckers' posted the identical ATHS mission
+    statement twice in a row: DuckDuckGo's Instant Answer is one sentence,
+    and a one-fact pool has nothing else to rotate to. A thin pool now gets
+    one topic-path pass to add articles, and repeats must differ."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "American Truck Historical Society"},
+                    {"title": "American Trucking Associations"}]}}
+            pages = []
+            for t in params.get("titles", "").split("|"):
+                if t == "American Truck Historical Society":
+                    pages.append({"title": t, "extract":
+                        "The American Truck Historical Society preserves and "
+                        "shares the story of the trucking industry. The "
+                        "society maintains archives of vintage truck "
+                        "photographs and restoration guides."})
+                else:
+                    pages.append({"title": t, "extract":
+                        "The American Trucking Associations advocate for "
+                        "the trucking industry in Washington. The group "
+                        "founded the National Truck Driving Championships, "
+                        "where drivers compete in precision driving."})
+            return {"query": {"pages": pages}}
+        return {"AbstractText": "The American Truck Historical Society "
+                                "preserves and shares the story of the "
+                                "trucking industry.",
+                "Heading": "American Truck Historical Society",
+                "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        first = funfacts.get_funfact("american truckers",
+                                     {"max_fact_chars": 200})
+        assert first and first["fact"], first
+        second = funfacts.get_funfact("american truckers",
+                                      {"max_fact_chars": 200})
+        assert second and second["fact"], second
+        assert first["fact"] != second["fact"], (first["fact"],
+                                                 second["fact"])
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a one-fact answer gets deepened and repeats differ")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2213,6 +2316,8 @@ def main():
     test_a_one_typo_query_still_finds_the_article()
     test_the_question_path_also_searches_wikipedia()
     test_a_misspelled_dish_still_gets_its_facts()
+    test_a_namesake_cannot_label_or_speak_for_the_subject()
+    test_a_one_fact_answer_gets_deepened_and_rotates()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

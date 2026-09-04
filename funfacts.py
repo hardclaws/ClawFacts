@@ -1123,6 +1123,8 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     core = _query_core(query)
     region = _query_region(query)
     full = " ".join(query.strip().split())
+    subj = core or full          # `full` below becomes an extract; this must
+                                 # stay what the viewer actually asked about
 
     items, seen = [], set()
 
@@ -1169,7 +1171,16 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
                         if t not in region_titles and not _text_names_other_region(t, region)]
     other_titles = [t for _, t, _ in items
                     if t not in core_titles and _title_matches_region(t, region)]
-    place = (region_titles or core_titles or [items[0][1]])[0]
+    cands = region_titles or core_titles or [items[0][1]]
+    if not region:
+        # A typed subject, not a place: "!funfact Trucking" labelled its
+        # answer "Backhaul (trucking)" - a namesake that merely carries the
+        # word - so with no region to disambiguate, prefer the article whose
+        # head word is what was asked about.
+        named = [t for t in cands if _topic_match(t, subj)]
+        if named:
+            cands = named
+    place = cands[0]
 
     extracts = {t: e for _, t, e in items}
     # The combined search+extract call is capped at 1200 chars a page, so the
@@ -1193,9 +1204,15 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
             # the article's opening statement names the requested region.
             if _text_names_other_region(extract[:250], region):
                 continue
+            # An article that does not head-word match the query ("Backhaul
+            # (trucking)" for "Trucking") may still hold usable lines, but
+            # each one must then NAME the subject. Ungated, harvest posted
+            # "Mislove also invited Deutsch ... Little Murders" - Broadway
+            # casting gossip that scored well and said nothing about trucks.
             facts = _ranked_facts(_filter_definitions(_sentences(extract)),
                                   spice=spice, limit=limit, count=8,
-                                  subject=core or full)
+                                  subject=subj,
+                                  require_subject=not _topic_match(title, subj))
             for f in facts:
                 # Sentences from an article that merely shares a word with the
                 # place ("Avon Lake, Ohio" / "Lake County, Ohio" both score 128
@@ -2381,7 +2398,7 @@ def _wikipedia_topic(query: str, spice: bool = False, limit: int = 200):
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
         return None
     qw = _topic_words(q)
-    best = None                       # (exact, extra words, search order)
+    groups = []                       # (title key, title, facts)
     for order, it in enumerate(hits):
         title, extract = it["title"], it.get("extract", "")
         if "(disambiguation)" in title.lower():
@@ -2400,9 +2417,35 @@ def _wikipedia_topic(query: str, spice: bool = False, limit: int = 200):
         # title carries beyond the query puts the thing asked for first.
         key = (0 if _fold(title) == _fold(q) else 1,
                abs(len(_topic_words(title)) - len(qw)), order)
-        if best is None or key < best[0]:
-            best = (key, title, facts)
-    return {"place": best[1], "facts": best[2]} if best else None
+        groups.append((key, title, facts))
+    if not groups:
+        return None
+    # Pool CLOSE matching articles, best title first. One article often has
+    # a single sentence that survives the filters - "american truckers" got
+    # the ATHS mission statement and nothing else, so the second !funfact
+    # posted the same line verbatim. A pool gives the rotation depth, and
+    # the best article's facts still lead. But an EXACT title match owns
+    # the subject and pools alone: searching "hobbit" also returns The
+    # Hobbit Inn, a pub in Southampton one word further out, and pooling
+    # near-misses beside the exact article would put the pub one line
+    # below Tolkien. Only when nothing exact exists do near matches (the
+    # best distance plus one word) join the pool for depth.
+    groups.sort(key=lambda g: g[0])
+    best_key = groups[0][0]
+    reach = best_key[1] + (0 if best_key[0] == 0 else 1)
+    pool, pool_norm = [], []
+    for key, _title, facts in groups:
+        if key[1] > reach:
+            continue
+        for f in facts:
+            fn = " ".join(re.sub(r"[^a-z0-9 ]", "", f.lower()).split())
+            if any(_overlap(fn, pn) > 0.7 for pn in pool_norm):
+                continue
+            pool.append(f)
+            pool_norm.append(fn)
+        if len(pool) >= 10:
+            break
+    return {"place": groups[0][1], "facts": pool}
 
 
 def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
@@ -2423,6 +2466,26 @@ def _lookup_all(location: str, options: dict, spicy: bool, limit: int):
                 if rdig:
                     result["facts"] = result["facts"] + rdig
             result["facts"] = result["facts"][:8]
+        elif len(result.get("facts", [])) < 2:
+            # A single-sentence answer - usually DuckDuckGo's Instant Answer -
+            # used to be final, so "!funfact american truckers" posted the
+            # same ATHS mission statement twice in a row. Give the topic
+            # path one chance to widen the pool with other matching
+            # articles; keep it only if it actually adds a new line.
+            try:
+                topic = _wikipedia_topic(location, spicy, limit)
+            except Exception as exc:  # never let a bad source crash the bot
+                print(f"[funfacts] topic lookup error: {exc!r}", flush=True)
+            else:
+                if topic:
+                    seen = [_norm(f) for f in result["facts"]]
+                    for f in topic["facts"]:
+                        fn = _norm(f)
+                        if any(_overlap(fn, s) > 0.7 for s in seen):
+                            continue
+                        result["facts"].append(f)
+                        seen.append(fn)
+                    result["facts"] = result["facts"][:8]
         return _package(curated, result, location, options, spicy, limit)
 
     # 2b. Not a place at all. Chat asks about anything - "grima wormtongue",
