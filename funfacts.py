@@ -677,7 +677,12 @@ def _names_subject(sentence: str, subject: str) -> bool:
     if head in low:
         return True
     # huorns/Huorn, Wormtongue/Wormtongues.
-    return len(head) >= 5 and head[:-1] in low
+    if len(head) >= 5 and head[:-1] in low:
+        return True
+    # quesobirria: the sentence spells it "Quesabirria" - one letter off the
+    # typed query, still the thing that was asked for.
+    return len(head) >= 6 and any(
+        len(w) >= 6 and _lev1(head, w) for w in low.split())
 
 
 def _is_echo(sentence: str, subject: str) -> bool:
@@ -2296,14 +2301,46 @@ def _topic_words(text: str) -> list:
             if len(w) >= 3 and w not in _TOPIC_STOP]
 
 
+def _lev1(a: str, b: str) -> bool:
+    """True when two words are one typo apart (edit distance <= 1).
+
+    "quesobirria" vs "Quesabirria": one letter, and the difference between
+    "couldn't find any fun facts" and the actual article. Only used on words
+    of six characters or more, so "cat"/"car" can never fuzzy-match.
+    """
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) <= 1
+    i = j = diff = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        else:
+            diff += 1
+            if diff > 1:
+                return False
+            if la > lb:
+                i += 1
+            else:
+                j += 1
+    return diff + (la - i) + (lb - j) <= 1
+
+
 def _topic_match(title: str, query: str) -> bool:
     """Does this article answer this question?
 
-    Matches on the FIRST significant word of each, allowing singular/plural.
-    That is what separates the article you want from the namesake:
+    Matches on the FIRST significant word of each, allowing singular/plural
+    - and, for words of six characters or more, ONE TYPO. That last part is
+    what separates the article you want from the namesake:
 
         "grima wormtongue" -> "Grima"        yes (first word matches)
         "huorns"           -> "Huorn"        yes (plural against singular)
+        "quesobirria"      -> "Quesabirria"  yes (one letter apart)
         "low watts"        -> "Watts Towers" no  (watts is the SECOND word)
 
     Matching on any shared word instead would let "low watts" through to an
@@ -2317,7 +2354,11 @@ def _topic_match(title: str, query: str) -> bool:
         return True
     short, long_ = sorted((head_t, head_q), key=len)
     # Huorn/Huorns, Wormtongue/Wormtongues - but not "cat"/"car".
-    return len(short) >= 5 and long_.startswith(short[:-1])
+    if len(short) >= 5 and long_.startswith(short[:-1]):
+        return True
+    # Quesobirria/Quesabirria: the viewer's spelling is one letter off the
+    # article's, and demanding perfection returned "no fun facts".
+    return (len(head_t) >= 6 and len(head_q) >= 6 and _lev1(head_t, head_q))
 
 
 def _wikipedia_topic(query: str, spice: bool = False, limit: int = 200):
@@ -2556,6 +2597,30 @@ def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
 # rather than guessing.
 # ---------------------------------------------------------------------------
 
+#: Words stripped from a question before it becomes a Wikipedia search:
+#: interrogatives, articles, superlatives and politeness. "whats the best
+#: usa trucking route and why" searches for "usa trucking route".
+_QSTRIP = frozenset((
+    "whats", "what", "whos", "who", "wheres", "where", "whys", "why",
+    "hows", "how", "whens", "when", "which", "is", "are", "was", "were",
+    "do", "does", "did", "the", "a", "an", "of", "and", "or", "for", "in",
+    "on", "at", "to", "best", "worst", "most", "coolest", "greatest",
+    "nicest", "scariest", "weirdest", "please", "plz", "tell", "me",
+    "about", "you", "your", "can", "could", "would", "should", "i", "my",
+    "s", "does",
+))
+
+
+def _question_subject(question: str) -> str:
+    """The searchable core of a free-form question.
+
+    A question is a sentence about a thing wrapped in interrogatives; search
+    engines do far better on the thing than on the sentence.
+    """
+    words = re.split(r"[^a-z0-9]+", _fold(question or ""))
+    return " ".join(w for w in words if w and w not in _QSTRIP)
+
+
 def _question_sources(question: str, options: dict) -> list:
     """Sentences from a web search for the question, fit to be shown.
 
@@ -2602,6 +2667,19 @@ def _question_sources(question: str, options: dict) -> list:
         else:
             for item in (data.get("results") or [])[:5]:
                 take([item.get("content") or ""])
+
+    # Wikipedia: free, keyless, and the article usually exists even when
+    # DuckDuckGo's Instant Answer comes back empty - which is its usual
+    # answer to a free-form question. Search the question's SUBJECT (the
+    # words that are not "whats/the/best/and why") and feed the model the
+    # extracts. This is the step that makes "whats the best usa trucking
+    # route and why" answerable at all.
+    try:
+        for hit in _wiki_search_extracts(_question_subject(question)
+                                         or question, limit=4):
+            take([hit.get("extract") or ""])
+    except Exception as exc:            # never let a source kill the ladder
+        print(f"[funfacts] question wikipedia failed: {exc!r}", flush=True)
 
     try:
         data = _http_get_json(DDG_API, {"q": question, "format": "json",

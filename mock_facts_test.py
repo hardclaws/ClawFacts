@@ -1816,6 +1816,95 @@ def test_a_question_is_answered_from_what_a_search_returned():
     print("[PASS] a free-form question gets an answer, from the sources")
 
 
+def test_a_one_typo_query_still_finds_the_article():
+    """'!funfact quesobirria' returned "couldn't find any fun facts" while
+    Wikipedia sat on the Quesabirria article - one letter apart. Head-word
+    matching now allows a single typo (six-plus letters only), in both the
+    article match and the sentence filter."""
+    assert funfacts._topic_match("Quesabirria", "quesobirria")
+    assert funfacts._topic_match("Quesabirria", "quesabirria")
+    assert funfacts._topic_match("Huorns", "huorn")           # plural rule
+    assert funfacts._names_subject(
+        "Quesabirria is a Mexican dish.", "quesobirria")      # sentence filter
+    # The namesake guards still hold, and short words never fuzzy-match.
+    assert not funfacts._topic_match("Watts Towers", "low watts")
+    assert not funfacts._topic_match("cat", "car")
+    print("[PASS] one typo finds the article; the guards still hold")
+
+
+def test_the_question_path_also_searches_wikipedia():
+    """'whats the best usa trucking route and why' had an LLM ready and still
+    got nothing, because the only source ladder was Tavily/keyed web search
+    plus DuckDuckGo's Instant Answer - which is empty for almost every
+    free-form question. Wikipedia is now a question source, searched by the
+    question's subject ('usa trucking route')."""
+    import llm
+
+    asked = []
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                asked.append(params.get("srsearch"))
+                return {"query": {"search": [
+                    {"title": "Trucking industry in the United States"}]}}
+            return {"query": {"pages": [{
+                "title": "Trucking industry in the United States",
+                "extract": "Interstate 80 carries trucks coast to coast "
+                           "across the United States. Route 66 was "
+                           "historically the most famous trucking route in "
+                           "the country."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}    # DDG: nothing
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "Route 66 was historically the most famous trucking route in "
+            "the country.")
+        got = funfacts._answer_question(
+            "whats the best usa trucking route and why",
+            {"llm_api_key": "k"}, 200)
+        assert got and "Route 66" in got["facts"][0], got
+        assert any("trucking route" in (a or "") for a in asked), asked
+        assert not any("whats" in (a or "") for a in asked), asked
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the question path searches Wikipedia by its subject")
+
+
+def test_a_misspelled_dish_still_gets_its_facts():
+    """End to end: 'quesobirria' against a Wikipedia that has the Quesabirria
+    article. No LLM, no keys - the topic path should carry it alone."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "Quesabirria"}]}}
+            return {"query": {"pages": [{"title": "Quesabirria",
+                "extract": "Quesabirria is a Mexican dish consisting of a "
+                           "tortilla soaked in consomme, filled with slow-"
+                           "braised meat and melted cheese. It originated in "
+                           "Tijuana in the 2010s. It became a social media "
+                           "sensation in the 2020s."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("quesobirria", {"max_fact_chars": 200})
+        assert got and got["fact"], got
+        assert "quesabirria" in got["fact"].lower(), got["fact"]
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a misspelled dish returns its article's facts")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2121,6 +2210,9 @@ def main():
     test_a_search_snippet_must_be_about_the_thing_asked()
     test_the_subject_check_allows_normal_variants()
     test_a_question_is_answered_from_what_a_search_returned()
+    test_a_one_typo_query_still_finds_the_article()
+    test_the_question_path_also_searches_wikipedia()
+    test_a_misspelled_dish_still_gets_its_facts()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

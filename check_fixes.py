@@ -484,6 +484,22 @@ def main() -> int:
         return bool(said) and "beer alpe" in said[0] \
             and "interstate" not in said[0]
 
+    def _funfact_survives_a_typo_and_answers_questions():
+        """'!funfact quesobirria' and '!funfact whats the best usa trucking
+        route and why' both returned 'couldn't find any fun facts'. Now a
+        one-typo query matches its article, and free-form questions search
+        Wikipedia (by subject) for their sources."""
+        if not funfacts._topic_match("Quesabirria", "quesobirria"):
+            return False
+        if not funfacts._names_subject(
+                "Quesabirria is a Mexican dish.", "quesobirria"):
+            return False
+        if funfacts._topic_match("Watts Towers", "low watts"):
+            return False
+        subj = funfacts._question_subject(
+            "whats the best usa trucking route and why")
+        return subj == "usa trucking route"
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -878,6 +894,8 @@ def main() -> int:
          _beef_theme_pools_are_deep_and_grammar_safe()),
         ("@names in the argument no longer swallow the theme",
          _beef_at_names_do_not_eat_the_theme()),
+        ("funfact survives a one-typo query; questions search Wikipedia",
+         _funfact_survives_a_typo_and_answers_questions()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",
