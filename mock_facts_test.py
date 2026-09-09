@@ -2008,6 +2008,112 @@ def test_a_one_fact_answer_gets_deepened_and_rotates():
     print("[PASS] a one-fact answer gets deepened and repeats differ")
 
 
+def test_engine_debris_never_reaches_chat():
+    """'!funfact Yorkshire united kingdom' posted "Yorkshire is the largest
+    county in the UK \u00b7 2." - the next list item's number, welded on by
+    the search engine. '!funfact North Yorkshire England' posted a bare
+    listicle heading, "North Yorkshire Historic Sites ; 1.". And a source
+    capped mid-sentence ended in "\u2026" inside a parenthesis that never
+    closed."""
+    # List debris is stripped; a real year at the end of a sentence is not.
+    assert funfacts._sentences(
+        "Yorkshire is the largest county in the UK \u00b7 2."
+    ) == ["Yorkshire is the largest county in the UK."]
+    assert funfacts._sentences(
+        "1. Yorkshire has a national park \u00b7 2. Yorkshire has two"
+    ) == ["Yorkshire has a national park.", "Yorkshire has two."]
+    assert funfacts._sentences("The bridge opened in 1927.") == \
+        ["The bridge opened in 1927."]
+    # A listicle heading is not a sentence, whatever its number debris.
+    assert not funfacts._ranked_facts(
+        funfacts._sentences("North Yorkshire Historic Sites ; 1."))
+    assert funfacts._is_fragment("North Yorkshire Historic Sites.")
+    assert not funfacts._is_fragment(
+        "Yorkshire is the largest county in the United Kingdom.")
+    # A truncated parenthetical is repaired to the complete clause, and a
+    # truncation that cannot be repaired is dropped, not posted half-cut.
+    got = funfacts._ranked_facts(funfacts._sentences(
+        "Typically, there is only one Mexican Train per round; rules vary "
+        "on when it can be started (some say it can be started only after "
+        "the opening turns are complete\u2026"), subject="mexican train")
+    assert got and "(" not in got[0] and "\u2026" not in got[0], got
+    assert "per round" in got[0], got
+    print("[PASS] list debris, headings and truncations never reach chat")
+
+
+def test_deep_article_text_must_name_its_subject():
+    """'!funfact Yorkshire' posted "Tostig and Hardrada were both killed and
+    their army was defeated decisively." - a History-section sentence with no
+    Yorkshire in it, true but anchorless. The lead keeps its usual rules
+    (\u201cIt is the largest county...\u201d reads fine under the heading);
+    the deep text may only contribute sentences that name the place."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "Yorkshire"}]}}
+            if "exchars" in params:            # the capped search extract
+                return {"query": {"pages": [{"title": "Yorkshire", "extract":
+                    "Yorkshire is a historic county in Northern England. "
+                    "It is the largest county in the United Kingdom."}]}}
+            return {"query": {"pages": [{"title": "Yorkshire", "extract":
+                "Yorkshire is a historic county in Northern England. "
+                "Tostig and Hardrada were both killed and their army was "
+                "defeated decisively at Stamford Bridge. Yorkshire contains "
+                "the Yorkshire Dales, a national park famed for its "
+                "limestone scenery."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        seen = []
+        for _ in range(3):                     # exercise the rotation too
+            got = funfacts.get_funfact("Yorkshire", {"max_fact_chars": 200})
+            assert got and got["fact"], got
+            assert "Tostig" not in got["fact"], got["fact"]
+            assert "yorkshire" in got["fact"].lower(), got["fact"]
+            seen.append(got["fact"])
+        assert len(set(seen)) >= 2, seen        # the pool has depth
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] deep article text must name its subject")
+
+
+def test_an_answer_cannot_open_on_a_bare_pronoun():
+    """'!funfact why do look fatter on camera?' was answered with "It is
+    entirely psychological if you think a photo of you looks far worse than
+    your reflection." It-who? The question is gone from the room by the time
+    the answer posts; an answer names the thing or is not posted."""
+    import llm
+    _DDG = {"AbstractText": "Phone camera lenses sit close to the face, and "
+            "lens distortion stretches the nose. It is entirely "
+            "psychological if you think a photo looks far worse than your "
+            "reflection.", "RelatedTopics": []}
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _DDG
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "It is entirely psychological if you think a photo of you "
+            "looks far worse than your reflection.")
+        assert funfacts._answer_question(
+            "why do look fatter on camera?", {"llm_api_key": "k"}, 200) \
+            is None, "pronoun-first answer posted"
+        llm.answer_question = lambda q, src, cfg: (
+            "Lens distortion stretches the nose because phone camera "
+            "lenses sit close to the face.")
+        got = funfacts._answer_question(
+            "why do look fatter on camera?", {"llm_api_key": "k"}, 200)
+        assert got and "Lens distortion" in got["facts"][0], got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] an answer cannot open on a bare pronoun")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2318,6 +2424,9 @@ def main():
     test_a_misspelled_dish_still_gets_its_facts()
     test_a_namesake_cannot_label_or_speak_for_the_subject()
     test_a_one_fact_answer_gets_deepened_and_rotates()
+    test_engine_debris_never_reaches_chat()
+    test_deep_article_text_must_name_its_subject()
+    test_an_answer_cannot_open_on_a_bare_pronoun()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

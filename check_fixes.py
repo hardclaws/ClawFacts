@@ -517,6 +517,34 @@ def main() -> int:
         topic_src = inspect.getsource(funfacts._wikipedia_topic)
         return "groups.sort" in topic_src and "reach" in topic_src
 
+    def _funfact_sentences_stand_alone():
+        """Yorkshire was answered with an anchorless History line ("Tostig
+        and Hardrada were both killed..."), a listicle number ("... UK \u00b7
+        2."), a bare heading ("North Yorkshire Historic Sites ; 1."), a
+        truncated parenthetical ("...complete\u2026") and a pronoun-first
+        answer ("It is entirely psychological..."). None of those shapes may
+        reach chat again."""
+        import inspect
+        if funfacts._sentences(
+                "Yorkshire is the largest county in the UK \u00b7 2."
+        ) != ["Yorkshire is the largest county in the UK."]:
+            return False
+        if not funfacts._is_fragment("North Yorkshire Historic Sites."):
+            return False
+        if funfacts._ranked_facts(funfacts._sentences(
+                "North Yorkshire Historic Sites ; 1.")):
+            return False
+        got = funfacts._sentences(
+            "Only one Mexican Train is built per round (some say it starts "
+            "after the opening turns are complete\u2026")
+        if not got or "(" in got[0] or "\u2026" in got[0]:
+            return False
+        if "it|they|he|she" not in inspect.getsource(
+                funfacts._answer_question):
+            return False
+        wiki_src = inspect.getsource(funfacts._wikipedia)
+        return "deep" in wiki_src and "require_subject=True" in wiki_src
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -915,6 +943,8 @@ def main() -> int:
          _funfact_survives_a_typo_and_answers_questions()),
         ("funfact namesakes cannot speak for the subject; pools rotate",
          _funfact_namesakes_and_variety()),
+        ("funfact sentences stand alone (debris, headings, anchors, pronouns)",
+         _funfact_sentences_stand_alone()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

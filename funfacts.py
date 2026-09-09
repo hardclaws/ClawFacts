@@ -329,6 +329,17 @@ def _is_fragment(sentence: str) -> bool:
         return True
     if t.endswith("?"):
         return True
+    # Title Case In Every Content Word is a heading, not a sentence:
+    # "North Yorkshire Historic Sites" is a listicle's section name, and it
+    # reached chat because "Sites" ends in -s and satisfies the verb check
+    # below. Prose keeps its lowercase function words ("is the largest
+    # county in the"), so real sentences are never all-title-case.
+    words = re.findall(r"\b[A-Za-z]{2,}\b", t)
+    content = [w for w in words if w.lower() not in (
+        "the", "a", "an", "of", "in", "on", "at", "to", "and", "or", "by",
+        "for", "is", "was", "it", "its", "as")]
+    if len(words) >= 3 and content and all(w[:1].isupper() for w in content):
+        return True
     # A short run of words with no verb in it is a caption, not a sentence:
     # "Historic Landmark plaque." The verb check is only trusted on short
     # strings, because the verb list has false negatives and a long sentence
@@ -485,6 +496,52 @@ def _sentence_split(paragraph: str) -> list:
     return out
 
 
+#: What search engines glue onto a real sentence. "1. Yorkshire is the
+#: largest county in the UK \u00b7 2." is one item of a numbered list scraped
+#: off a listicle: a marker in front, the next item's number welded to the
+#: back. Neither belongs in chat.
+_LEAD_MARK = re.compile(r"^(?:\d{1,2}[.)]|[-\u2013\u2014\u2022\u00b7|])\s+")
+_TRAIL_DEBRIS = re.compile(r"\s*[\u00b7\u2022|;]\s*\d{1,2}[.)]?\s*$")
+_ELLIPSIS_END = re.compile(r"(?:\u2026|\.\.\.)\s*$")
+#: A sentence cut mid-thought often stops on a joining word; the repair
+#: below trims it, so "...rules vary on when it can be started and" does not
+#: become a "complete" sentence ending in "and".
+_DANGLING_TAIL = re.compile(
+    r"\s*\b(?:and|or|but|nor|the|a|an|of|in|on|at|to|with|for|by|from|as|"
+    r"is|are|was|were|that|which|who|whose|their|its|his|her|they|it|he|"
+    r"she|than|so|such|while|when|where|after|before|during)\s*$",
+    re.IGNORECASE)
+
+
+def _tidy_sentence(s: str) -> str:
+    """Strip engine debris from one split sentence, repairing truncations.
+
+    Returns "" for anything that cannot stand as a sentence. The caller drops
+    it; every later filter (fragment, junk, grounding) sees the cleaned text.
+    """
+    s = _LEAD_MARK.sub("", (s or "").strip())
+    # A source capped mid-sentence ends in an ellipsis, usually inside a
+    # parenthesis that never closed: "...can be started (some say it can be
+    # started only after the opening turns are complete\u2026". Strip the
+    # ellipsis, cut at the unclosed parenthesis, and the complete clause
+    # survives; what cannot be repaired returns "" and is never posted
+    # half-finished.
+    s = _ELLIPSIS_END.sub("", s).rstrip()
+    if s.count("(") > s.count(")"):
+        s = s[:s.rfind("(")].rstrip(" ;,-")
+    if s.count("\u201c") > s.count("\u201d"):
+        s = s[:s.rfind("\u201c")].rstrip(" ;,-")
+    s = _TRAIL_DEBRIS.sub("", s).rstrip()
+    if not s or s.endswith(":"):
+        return ""
+    if s[-1] not in ".!?'\"\u201d":
+        s = _DANGLING_TAIL.sub("", s).rstrip(" ;,-")
+        if len(s) < 12:
+            return ""
+        s += "."
+    return s
+
+
 def _sentences(text: str) -> list:
     """Split raw extract text into clean, readable sentences."""
     # Search APIs hand back HTML entities ("Jan &amp; Dean"); the chat should
@@ -502,7 +559,7 @@ def _sentences(text: str) -> list:
         if not re.search(r"[.!?]", para) and len(para) < 45:
             continue
         for s in _sentence_split(para):
-            s = s.strip()
+            s = _tidy_sentence(s)
             if len(s) >= 12 and not _COORD.match(s) and not _BIO.match(s):
                 out.append(s)
     return out
@@ -1186,11 +1243,19 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     # The combined search+extract call is capped at 1200 chars a page, so the
     # place's own article arrived lead-only. Re-fetch just that one article in
     # full: Cuba MO's World's Largest Rocking Chair, Bette Davis and Amelia
-    # Earhart all sit below character 1200.
+    # Earhart all sit below character 1200. The full text does NOT replace
+    # the lead in extracts - the own-article harvest below runs ungated, and
+    # lead sentences like "It is the largest county in the United Kingdom"
+    # are fine under the place's heading. The deep text (history sections
+    # and the like) is mined separately, and only for sentences that NAME
+    # the place: "Tostig and Hardrada were both killed and their army was
+    # defeated decisively" is a true Yorkshire fact with no Yorkshire in
+    # it, and it reached chat exactly that way.
+    deep = ""
     if place and not _wiki_blocked():
         full = _wiki_extract(place, exchars=0)
         if len(full) > len(extracts.get(place, "")):
-            extracts[place] = full
+            deep = full
     pool, pool_norm = [], []
 
     def harvest(titles, require_core=False):
@@ -1236,6 +1301,18 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
         harvest(same_name_titles[:3])
     if len(pool) < 3:
         harvest(other_titles[:3], require_core=True)
+    if deep:
+        # The deep text only contributes sentences that name the place (see
+        # above); the lead, harvested above, already carries its ungated
+        # sentences.
+        for f in _ranked_facts(_filter_definitions(_sentences(deep)),
+                               spice=spice, limit=limit, count=8, subject=subj,
+                               require_subject=True):
+            fn = " ".join(re.sub(r"[^a-z0-9 ]", "", f.lower()).split())
+            if any(_overlap(fn, pn) > 0.7 for pn in pool_norm):
+                continue
+            pool.append((_score(f, spice), f))
+            pool_norm.append(fn)
 
     if not pool:
         return None
@@ -2826,6 +2903,12 @@ def _answer_question(question: str, opts: dict, limit: int):
         if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
             continue
         if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
+            continue
+        # "It is entirely psychological if you think a photo of you looks
+        # far worse than your reflection." The pronoun's antecedent was the
+        # question, and the question is gone from the room by the time the
+        # answer posts. An answer names the thing or is not posted.
+        if re.match(r"^(?:it|they|he|she)\b", ln, re.IGNORECASE):
             continue
         if _is_echo(ln, question):
             continue
