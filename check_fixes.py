@@ -545,6 +545,25 @@ def main() -> int:
         wiki_src = inspect.getsource(funfacts._wikipedia)
         return "deep" in wiki_src and "require_subject=True" in wiki_src
 
+    def _funfact_countries_and_substrings():
+        """'Yorkshire united kingdom' fell through to a one-line listicle
+        because no country ever counted as a trailing region, and the
+        camera question matched its 'source' on 'look' inside 'looks'."""
+        if funfacts._query_core("Yorkshire united kingdom") != "yorkshire":
+            return False
+        if funfacts._query_region(
+                "Yorkshire united kingdom") != "united kingdom":
+            return False
+        if funfacts._names_subject(
+                "a photo of you looks far worse",
+                "why do look fatter on camera?"):
+            return False
+        if not funfacts._names_subject("Huorns are tree-beings.", "huorns"):
+            return False
+        import inspect
+        return "question.split()" in inspect.getsource(
+            funfacts._answer_question)
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -945,6 +964,8 @@ def main() -> int:
          _funfact_namesakes_and_variety()),
         ("funfact sentences stand alone (debris, headings, anchors, pronouns)",
          _funfact_sentences_stand_alone()),
+        ("funfact countries strip; substrings do not name the subject",
+         _funfact_countries_and_substrings()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

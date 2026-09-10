@@ -2114,6 +2114,47 @@ def test_an_answer_cannot_open_on_a_bare_pronoun():
     print("[PASS] an answer cannot open on a bare pronoun")
 
 
+def test_countries_strip_and_substrings_do_not_name():
+    """Two holes a walkthrough of the live queries caught. 'Yorkshire united
+    kingdom' kept the whole string as its place core, so the Yorkshire
+    article scored 20 of the 70 the title gate needs and a one-line listicle
+    answered instead of the article. And 'why do look fatter on camera?'
+    matched its source on the substring 'look' inside 'looks', so a
+    pronoun-first abstract posted as a fact that named nothing."""
+    assert funfacts._query_core("Yorkshire united kingdom") == "yorkshire"
+    assert funfacts._query_region("Yorkshire united kingdom") == \
+        "united kingdom"
+    assert funfacts._query_core("Cuba Missouri") == "cuba"      # unchanged
+    assert not funfacts._names_subject(
+        "It is entirely psychological if you think a photo of you looks "
+        "far worse than your reflection.", "why do look fatter on camera?")
+    # Real naming still passes: exact word, hyphenated, plural.
+    assert funfacts._names_subject("Yorkshire is the largest county.", "yorkshire")
+    assert funfacts._names_subject("The Yorkshire-born pilot flew on.", "yorkshire")
+    assert funfacts._names_subject("Huorns are tree-beings.", "huorns")
+    # And an answered question is headed by the question, not "Look:".
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: {
+        "AbstractText": "Phone camera lenses sit close to the face, and "
+                        "lens distortion stretches the nose.",
+        "RelatedTopics": []}
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "The lens sits close to the face, and lens distortion "
+            "stretches the nose.")
+        got = funfacts._answer_question("why do look fatter on camera?",
+                                        {"llm_api_key": "k"}, 200)
+        assert got and got["place"] == "why do look fatter on camera?", got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] countries strip; substrings do not name; a question "
+          "heads itself")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2427,6 +2468,7 @@ def main():
     test_engine_debris_never_reaches_chat()
     test_deep_article_text_must_name_its_subject()
     test_an_answer_cannot_open_on_a_bare_pronoun()
+    test_countries_strip_and_substrings_do_not_name()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

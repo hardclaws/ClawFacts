@@ -731,7 +731,13 @@ def _names_subject(sentence: str, subject: str) -> bool:
     # posted that; the thing asked about is the first word, the same rule
     # _topic_match uses when it picks an article.
     head = words[0]
-    if head in low:
+    # A WORD, not a substring: the question "why do look fatter on camera?"
+    # has the head word "look", and `head in low` matched the "looks" inside
+    # the answer's "if you think a photo of you looks far worse" - so a
+    # sentence that never named the thing counted as naming it, and posted.
+    # Word boundaries still cross hyphens and possessives ("Yorkshire-born",
+    # "trucking's"), so real naming sentences are unaffected.
+    if re.search(r"\b" + re.escape(head) + r"\b", low):
         return True
     # huorns/Huorn, Wormtongue/Wormtongues.
     if len(head) >= 5 and head[:-1] in low:
@@ -869,13 +875,20 @@ def _split_trailing_region(query: str):
     cosmetic problem: with no region, 'Cuba, Missouri' scores 118 and the
     island nation scores 120, so the country outranks the town, and every
     region guard in this module switches itself off.
+
+    Countries count too: 'Yorkshire united kingdom' kept the whole string as
+    its core, the Yorkshire article then scored 20 of the 3 words it shared
+    with the title, and the lookup fell through to a search engine's
+    one-line listicle.
     """
     words = query.strip().split()
     if len(words) < 2:
         return "", ""
-    known = set(_US_STATES) | set(_US_STATE_BY_NAME) | set(_CA_PROVINCES) \
-        | set(_CA_PROVINCE_BY_NAME)
-    for n in (2, 1):                      # "north carolina" before "carolina"
+    known = (set(_US_STATES) | set(_US_STATE_BY_NAME) | set(_CA_PROVINCES)
+             | set(_CA_PROVINCE_BY_NAME) | set(_COUNTRIES)
+             | set(_COUNTRIES.values()))
+    # "united arab emirates" before "united kingdom" before "carolina".
+    for n in (3, 2, 1):
         if len(words) <= n:
             continue
         cand = " ".join(words[-n:]).lower().strip(".")
@@ -2924,8 +2937,12 @@ def _answer_question(question: str, opts: dict, limit: int):
               f"{len(sources)} source line(s) - posting nothing rather than "
               f"something unsupported: {question[:60]}", flush=True)
         return None
-    words = _topic_words(question)
-    topic = words[0].capitalize() if words else "Answer"
+    # The header is the question, not its first content word: "why do look
+    # fatter on camera?" headed its answer "FunFact | Look:". A question is
+    # its own best label; long ones are trimmed at a word boundary.
+    topic = " ".join(question.split())
+    if len(topic) > 60:
+        topic = topic[:60].rsplit(" ", 1)[0] + "\u2026"
     print(f"[funfacts] answered a question from {len(sources)} source "
           f"line(s): {question[:60]}", flush=True)
     return {"place": topic, "facts": lines[:4]}
