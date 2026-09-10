@@ -565,6 +565,48 @@ def _sentences(text: str) -> list:
     return out
 
 
+#: "The largest county by area" - a superlative welded to an administrative
+#: unit is a size statement, not a story. It counts as a strong word below
+#: (the word "largest" is in _STRONG), and that is how "Yorkshire is... the
+#: largest by area in the United Kingdom" outranked the Harrying of the
+#: North: 8 points to 4. Only the administrative kind is demoted - the
+#: world's largest rocking chair is a curiosity, not a size statement.
+_SCALE_STAT = re.compile(
+    r"\b(?:second|third|fourth|fifth|most|least)?[\s-]*"
+    r"(?:largest|smallest|biggest|longest|tallest|highest)"
+    r"[^.]{0,25}\b(?:county|counties|state|states|province|territory|"
+    r"municipality|city|town|township|borough|parish|district|region|"
+    r"population|area)\b",
+    re.IGNORECASE,
+)
+#: "X is a ceremonial county in ..." - the what-is-it line. It answers
+#: "what is it", never "what is interesting about it", yet it names the
+#: subject and so outscored every story. Administrative nouns only: a
+#: quesobirria IS a Mexican dish, and that definition is the fact.
+_DEF_LEAD = re.compile(
+    r"^[^,.]{0,60}?\bis\s+(?:a|an)\s+(?:\w+[\s-]){0,2}"
+    r"(?:county|city|town|village|state|province|country|region|borough|"
+    r"municipality|prefecture|district)\b",
+    re.IGNORECASE,
+)
+#: "contains two national parks and three areas of outstanding natural
+#: beauty" - an inventory, not a story. Triggered by a containing-verb, a
+#: counted list, and a join: the world's largest rocking chair has no
+#: numbers and is a curiosity. "including X and Y" is the same shape
+#: without the numbers - tourism-brochure enumeration.
+_INVENTORY = re.compile(
+    r"\b(?:contains?|includes?|comprises?|consists? of|boasts?|"
+    r"is home to)\b[^.]{0,60}?\b(?:two|three|four|five|six|seven|eight|"
+    r"nine|ten|\d+)\b[^.]{0,80}\b(?:and|,)\b|"
+    r"\bincluding\b[^.]{0,70}\band\b",
+    re.IGNORECASE,
+)
+#: A dated sentence is a story; a size statement with a date in it usually
+#: has more going on than the size. (_YEAR itself is defined once, down by
+#: the grounding section, where it checks model answers for invented dates -
+#: decades count there too, so "in the 2010s" is a story here as well.)
+
+
 def _score(sentence: str, spice: bool = False) -> int:
     """Interest score. In spicy mode the score encodes the fallback ladder:
     spicy facts (brothels/crime/…) rank first, then weird/bizarre facts, then
@@ -573,6 +615,21 @@ def _score(sentence: str, spice: bool = False) -> int:
     if spice:
         score += 1000 * len(_SPICY.findall(sentence))
         score += 100 * len(_WEIRD.findall(sentence))
+    # A size statement ranks below every story: "!funfact Yorkshire" opened
+    # with "the largest by area in the United Kingdom" while the wool trade
+    # and the Harrying of the North sat under it. Dated and world-record
+    # superlatives are exempt - "the world's largest X" is a curiosity, and
+    # a size line carrying a year has more in it than the size.
+    low = sentence.lower()
+    if _SCALE_STAT.search(sentence) and not _YEAR.search(sentence) \
+            and "world" not in low:
+        score -= 6
+    if _DEF_LEAD.match(sentence):
+        score -= 4
+    if _INVENTORY.search(sentence):
+        score -= 4
+    if _YEAR.search(sentence):
+        score += 2
     # Slight penalty for sentences that start with a bare pronoun — they read
     # as context-less when pulled out of the article ("Some are listed ...").
     if re.match(r"^(some|it|they|this|these|those|there|their|he|she|his|her|its)\b",
@@ -703,8 +760,23 @@ def _subject_score(sentence: str, subject: str) -> int:
     if not words:
         return 0
     low = sentence.lower()
-    hit = sum(1 for w in words if w in low)
+    hit = sum(1 for w in words if _word_names(w, low))
     return 4 * hit if hit else -6
+
+
+def _word_names(word: str, low: str) -> bool:
+    """Does `low` (a folded sentence) name `word` - as a whole word, as a
+    plural, or one typo apart? The rules of _names_subject, per word, so the
+    ranking bonus and the boolean gate can never disagree: "!funfact
+    quesobirria" matched its article through the gate and then had every
+    sentence of it penalised, because the bonus still demanded the exact
+    substring."""
+    if re.search(r"\b" + re.escape(word) + r"\b", low):
+        return True
+    if len(word) >= 5 and word[:-1] in low:
+        return True
+    return len(word) >= 6 and any(
+        len(w) >= 6 and _lev1(word, w) for w in low.split())
 
 
 def _names_subject(sentence: str, subject: str) -> bool:
@@ -730,22 +802,7 @@ def _names_subject(sentence: str, subject: str) -> bool:
     # article about the Watts Towers in Los Angeles, and any-word matching
     # posted that; the thing asked about is the first word, the same rule
     # _topic_match uses when it picks an article.
-    head = words[0]
-    # A WORD, not a substring: the question "why do look fatter on camera?"
-    # has the head word "look", and `head in low` matched the "looks" inside
-    # the answer's "if you think a photo of you looks far worse" - so a
-    # sentence that never named the thing counted as naming it, and posted.
-    # Word boundaries still cross hyphens and possessives ("Yorkshire-born",
-    # "trucking's"), so real naming sentences are unaffected.
-    if re.search(r"\b" + re.escape(head) + r"\b", low):
-        return True
-    # huorns/Huorn, Wormtongue/Wormtongues.
-    if len(head) >= 5 and head[:-1] in low:
-        return True
-    # quesobirria: the sentence spells it "Quesabirria" - one letter off the
-    # typed query, still the thing that was asked for.
-    return len(head) >= 6 and any(
-        len(w) >= 6 and _lev1(head, w) for w in low.split())
+    return _word_names(words[0], low)
 
 
 def _is_echo(sentence: str, subject: str) -> bool:
@@ -840,6 +897,12 @@ _CA_PROVINCES = {
 _COUNTRIES = {
     "usa": "united states", "us": "united states", "uk": "united kingdom",
     "uae": "united arab emirates", "nz": "new zealand",
+    # The UK's constituent countries are regions viewers type without
+    # commas: "North Yorkshire England" kept the whole string as its place
+    # core, the article then failed the 70-point title gate, and the answer
+    # came from a one-line shallow extract instead of the article.
+    "england": "england", "scotland": "scotland", "wales": "wales",
+    "northern ireland": "northern ireland", "ireland": "ireland",
 }
 
 
@@ -1231,8 +1294,23 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     # name, then — only if we still have almost nothing — dip into the
     # county/state/neighbour articles too.
     core_words = core.split()
+    # A compound entity that happens to start with the same word is not the
+    # thing asked about: "Yorkshire and the Humber" is a region, not the
+    # county, and its "It comprises most of Yorkshire plus Lincolnshire"
+    # read, under a Yorkshire heading, like the county had eaten Lincs.
+    # Such titles fall back to the only-when-thin other-titles harvest.
+    def compound_namesake(t: str) -> bool:
+        # "Yorkshire and the Humber" for "Yorkshire": shares the word, is a
+        # different entity. Excluded from the same-name harvest below AND
+        # from the thin-pool fallback after it - its sentences name the
+        # place, so require_core alone never stopped them.
+        return (len(core_words) < len(_topic_words(t))
+                and " and " in t.lower())
+
     core_titles = [t for _, t, _ in items
-                   if core and all(w in _title_tokens(t).split() for w in core_words)]
+                   if core and all(w in _title_tokens(t).split()
+                                   for w in core_words)
+                   and not compound_namesake(t)]
     # Prefer the article that is actually in the requested region; only dip
     # into same-named places in other states (e.g. "Lakemont, Washington" when
     # the viewer asked for Lakemont, PA) if we have almost nothing better.
@@ -1240,7 +1318,8 @@ def _wikipedia(query: str, spice: bool = False, limit: int = 200):
     same_name_titles = [t for t in core_titles
                         if t not in region_titles and not _text_names_other_region(t, region)]
     other_titles = [t for _, t, _ in items
-                    if t not in core_titles and _title_matches_region(t, region)]
+                    if t not in core_titles and _title_matches_region(t, region)
+                    and not compound_namesake(t)]
     cands = region_titles or core_titles or [items[0][1]]
     if not region:
         # A typed subject, not a place: "!funfact Trucking" labelled its

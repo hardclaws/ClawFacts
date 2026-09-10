@@ -2155,6 +2155,100 @@ def test_countries_strip_and_substrings_do_not_name():
           "heads itself")
 
 
+def test_stories_outrank_sizes_inventory_and_definitions():
+    """'!funfact Yorkshire' opened with "the largest by area in the United
+    Kingdom" while the Harrying of the North sat under it, because
+    "largest" is a strong word and being a story was worth nothing. Size
+    statements, what-is-it leads and inventories now rank below stories -
+    demoted, not deleted, so a pool with only a size line still answers."""
+    story = ("The Harrying of the North that followed devastated much of "
+             "Yorkshire.")
+    dull = [
+        "Yorkshire is a historic county in Northern England and the largest "
+        "by area in the United Kingdom.",
+        "North Yorkshire is a ceremonial county in Northern England.",
+        "Yorkshire contains two national parks and three areas of "
+        "outstanding natural beauty.",
+        "Within the borders of Yorkshire are unspoiled countryside, "
+        "including the Yorkshire Dales and the North York Moors.",
+    ]
+    for d in dull:
+        assert funfacts._score(d) < funfacts._score(story), d
+    # A dated sentence is a story.
+    assert funfacts._score(
+        "North Yorkshire was formed in 1974 and covers the old county."
+    ) > funfacts._score("North Yorkshire covers the old county.")
+    # Curiosities are NOT size statements.
+    assert funfacts._score(
+        "Cuba, Missouri is home to the world's largest rocking chair."
+    ) >= 6
+    # And a dish's definition is its fact - only administrative nouns are
+    # demoted, so quesobirria is never punished for being food.
+    assert funfacts._score(
+        "Quesabirria is a Mexican dish consisting of a tortilla soaked in "
+        "consomme.") == 0
+    # Demoted, not deleted: a pool with nothing else still answers.
+    assert funfacts._ranked_facts(
+        ["Siberia is the largest region by area in Russia."],
+        subject="siberia"), "size-only pool came back empty"
+    print("[PASS] stories outrank sizes, inventory and definitions")
+
+
+def test_a_compound_entity_is_not_the_subject():
+    """"It comprises most of Yorkshire plus North and North East
+    Lincolnshire" posted under a Yorkshire heading - the county had
+    apparently eaten Lincolnshire. The line came from "Yorkshire and the
+    Humber", a different entity that merely starts with the same word;
+    compound titles are not same-name articles."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "Yorkshire"},
+                    {"title": "Yorkshire and the Humber"}]}}
+            pages = []
+            for t in params.get("titles", "").split("|"):
+                if t == "Yorkshire":
+                    pages.append({"title": t, "extract":
+                        "Yorkshire is a historic county in Northern "
+                        "England. The Harrying of the North that followed "
+                        "devastated much of Yorkshire. Yorkshire was later "
+                        "the heartland of England's wool trade, which made "
+                        "Leeds and Bradford wealthy mill towns."})
+                else:
+                    pages.append({"title": t, "extract":
+                        "Yorkshire and the Humber is one of the nine "
+                        "official regions of England. It comprises most of "
+                        "Yorkshire plus North and North East Lincolnshire."})
+            return {"query": {"pages": pages}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        r = funfacts._wikipedia("Yorkshire")
+        assert r and r["place"] == "Yorkshire", r
+        assert not any("Lincolnshire" in f for f in r["facts"]), r["facts"]
+        assert any("Harrying" in f or "wool trade" in f for f in r["facts"])
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a compound entity cannot speak for the subject")
+
+
+def test_uk_constituent_countries_strip_as_regions():
+    """"North Yorkshire England" kept the whole string as its place core, so
+    the article failed the title gate and the answer came from a one-line
+    shallow extract. England, Scotland, Wales and Ireland now strip like
+    states do."""
+    assert funfacts._query_core("North Yorkshire England") == "north yorkshire"
+    assert funfacts._query_region("North Yorkshire England") == "england"
+    assert funfacts._query_core("Edinburgh Scotland") == "edinburgh"
+    assert funfacts._query_core("Snowdonia Wales") == "snowdonia"
+    assert funfacts._query_core("Cuba Missouri") == "cuba"  # unchanged
+    print("[PASS] England/Scotland/Wales strip like state names")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2469,6 +2563,9 @@ def main():
     test_deep_article_text_must_name_its_subject()
     test_an_answer_cannot_open_on_a_bare_pronoun()
     test_countries_strip_and_substrings_do_not_name()
+    test_stories_outrank_sizes_inventory_and_definitions()
+    test_a_compound_entity_is_not_the_subject()
+    test_uk_constituent_countries_strip_as_regions()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

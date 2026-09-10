@@ -564,6 +564,33 @@ def main() -> int:
         return "question.split()" in inspect.getsource(
             funfacts._answer_question)
 
+    def _funfact_stories_first():
+        """Size statements, what-is-it leads and inventories outranked every
+        story ("the largest by area in the United Kingdom" beat the Harrying
+        of the North), and compound entities spoke for the subject. Stories
+        now lead; demoted lines survive only when nothing better exists."""
+        story = ("The Harrying of the North that followed devastated much "
+                 "of Yorkshire.")
+        for dull in (
+                "Yorkshire is the largest county by area in the UK.",
+                "North Yorkshire is a ceremonial county in Northern "
+                "England.",
+                "Yorkshire contains two national parks and three areas of "
+                "natural beauty.",
+                "Countryside, including the Dales and the Moors, fills it."):
+            if funfacts._score(dull) >= funfacts._score(story):
+                return False
+        if funfacts._score(
+                "Cuba is home to the world's largest rocking chair.") < 6:
+            return False
+        if funfacts._score(
+                "Quesabirria is a Mexican dish of braised meat.") != 0:
+            return False
+        if funfacts._query_core("North Yorkshire England") != \
+                "north yorkshire":
+            return False
+        return True
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -966,6 +993,8 @@ def main() -> int:
          _funfact_sentences_stand_alone()),
         ("funfact countries strip; substrings do not name the subject",
          _funfact_countries_and_substrings()),
+        ("funfact stories outrank sizes, inventory and definitions",
+         _funfact_stories_first()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",
