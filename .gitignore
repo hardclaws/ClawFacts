@@ -16,3 +16,6 @@ custom_commands.json
 
 # the beef game scoreboard and !revenge windows
 beef_state.json
+
+# The chat AI's memory (runtime data, not code)
+chat_memory.db*
