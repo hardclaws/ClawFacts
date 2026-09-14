@@ -565,7 +565,7 @@ def main() -> int:
         if not funfacts._names_subject("Huorns are tree-beings.", "huorns"):
             return False
         import inspect
-        return "question.split()" in inspect.getsource(
+        return "_question_place" in inspect.getsource(
             funfacts._answer_question)
 
     def _funfact_stories_first():
@@ -734,6 +734,26 @@ def main() -> int:
         if funfacts._ranked_facts([hype], subject="longest truck"):
             return False
         return True
+
+    def _funfact_records_miner():
+        """The longest-truck question declined outright after the hype
+        refusals: the model path dead-ends and nothing else could answer.
+        The article's own record sentences are posted directly now - with
+        or without an LLM. And 'Feb of 2018' caption dates never post."""
+        if not hasattr(funfacts, "_mine_records"):
+            return False
+        if funfacts._question_subject(
+                "what is the longest truck in the world transporting goods"
+                ) != "longest truck transporting goods":
+            return False
+        if not funfacts._is_junk_seed(
+                "These fingerling potatoes were planted on Feb of 2018."):
+            return False
+        if funfacts._is_junk_seed("The harvest began in February 2018."):
+            return False
+        import inspect
+        return "_mine_records" in inspect.getsource(
+            funfacts._answer_question)
 
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
@@ -1153,6 +1173,8 @@ def main() -> int:
          _funfact_cuts_are_clean()),
         ("funfact refuses hype; demonyms are not names",
          _funfact_hype_and_demonyms()),
+        ("funfact mines the records when the model will not answer",
+         _funfact_records_miner()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

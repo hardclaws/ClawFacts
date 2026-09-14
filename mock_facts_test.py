@@ -2629,6 +2629,69 @@ def test_the_question_search_tries_simpler_subjects():
     print("[PASS] the question search falls back to simpler subjects")
 
 
+def test_the_records_miner_answers_when_the_model_will_not():
+    """Round six: the question now declined - the model path dead-ends (hype
+    refused, decline) and nothing else could answer. The article's own
+    record sentences need no model, so they are posted directly. With no
+    LLM configured at all, a superlative question still gets its records."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                if params.get("srsearch") == "longest truck":
+                    return {"query": {"search": [{"title": "Road train"}]}}
+                return {"query": {"search": []}}
+            if params.get("exchars"):
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train is a trucking vehicle."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train is a trucking vehicle used to move freight. "
+                "In 2006 a driver pulled 113 trailers for 1,235 metres, "
+                "which still stands as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    Q = "what is the longest truck in the world transporting goods"
+    try:
+        # "world" is filler now: the subject is the searchable core.
+        assert funfacts._question_subject(Q) == "longest truck transporting goods"
+        # A model that only produces hype: the miner answers instead.
+        llm.is_configured = lambda o: True
+        llm.answer_question = lambda q, src, cfg: (
+            "Get ready to meet the world's longest truck \u2014 an "
+            "absolute beast!")
+        got = funfacts._answer_question(Q, {"llm_api_key": "k"}, 200)
+        assert got and "1,235" in got["facts"][0], got
+        assert got["place"] == Q, got
+        # And with no LLM at all, the records still answer.
+        llm.is_configured = lambda o: False
+        got = funfacts._answer_question(Q, {}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the records miner answers when the model will not")
+
+
+def test_caption_dates_never_post():
+    """"These fingerling potatoes were planted on Feb of 2018." - a photo
+    caption. Prose writes "in February 2018"; "Month of Year" without a
+    day is a caption's shorthand, and it reached chat as the entire fact
+    about fingerling potatoes."""
+    assert funfacts._is_junk_seed(
+        "These fingerling potatoes were planted on Feb of 2018.")
+    assert not funfacts._ranked_facts(
+        ["These fingerling potatoes were planted on Feb of 2018."],
+        subject="fingerling potatoes")
+    assert not funfacts._is_junk_seed(
+        "The harvest began in February 2018.")
+    assert not funfacts._is_junk_seed("The mill opened in 1892.")
+    print("[PASS] caption dates never post")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2956,6 +3019,8 @@ def main():
     test_a_long_fact_is_cut_at_a_clause_never_a_dangler()
     test_hype_answers_and_demonyms_do_not_count()
     test_the_question_search_tries_simpler_subjects()
+    test_the_records_miner_answers_when_the_model_will_not()
+    test_caption_dates_never_post()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

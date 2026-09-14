@@ -163,7 +163,12 @@ _JUNK_SEED = re.compile(
     # The standard NRHP boilerplate is a list of buildings, not a fact, and it
     # scored 5 for 'national register' — outranking Cuba MO's World's Largest
     # Rocking Chair and its Bette Davis / Amelia Earhart visits.
-    r"\bare listed on the national register\b",
+    r"\bare listed on the national register\b|"
+    # "planted on Feb of 2018" - caption grammar. Prose writes "in February
+    # 2018"; "Month of Year" without a day is a photo caption's shorthand,
+    # and it reached chat as the whole fact about fingerling potatoes.
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]* "
+    r"of (?:1[0-9]{3}|20[0-4][0-9])\b",
     re.IGNORECASE,
 )
 
@@ -2993,7 +2998,7 @@ _QSTRIP = frozenset((
     "whats", "what", "whos", "who", "wheres", "where", "whys", "why",
     "hows", "how", "whens", "when", "which", "is", "are", "was", "were",
     "do", "does", "did", "the", "a", "an", "of", "and", "or", "for", "in",
-    "on", "at", "to", "best", "worst", "most", "coolest", "greatest",
+    "on", "at", "to", "best", "worst", "most", "coolest", "greatest", "world",
     "nicest", "scariest", "weirdest", "please", "plz", "tell", "me",
     "about", "you", "your", "can", "could", "would", "should", "i", "my",
     "s", "does",
@@ -3021,6 +3026,69 @@ def _question_subject(question: str) -> str:
     """
     words = re.split(r"[^a-z0-9]+", _fold(question or ""))
     return " ".join(w for w in words if w and w not in _QSTRIP)
+
+
+def _question_wiki_hits(subject: str):
+    """Search Wikipedia for a question subject, trying shorter heads.
+
+    "longest truck transporting goods" is four words of question glued
+    together and finds nothing; "longest truck" finds the article. First
+    variant with results wins, so the full subject keeps its chance.
+    """
+    variants = [subject]
+    words = subject.split()
+    if len(words) > 3:
+        variants.append(" ".join(words[:3]))
+    if len(words) > 2:
+        variants.append(" ".join(words[:2]))
+    for v in variants:
+        hits = _wiki_search_extracts(v, limit=4)
+        if hits:
+            return hits
+    return []
+
+
+def _question_place(question: str) -> str:
+    """The header for an answered question: itself, trimmed at a word."""
+    topic = " ".join(question.split())
+    if len(topic) > 60:
+        topic = topic[:60].rsplit(" ", 1)[0] + "\u2026"
+    return topic
+
+
+def _mine_records(subject: str):
+    """The article's own record sentences - an answer that needs no model.
+
+    Six rounds of the longest-truck question showed the model path can
+    dead-end (hype answers, clickbait sources, a decline), and the records
+    were sitting in Wikipedia the whole time. For a superlative question the
+    sentence with the digits IS the answer; it does not need rephrasing.
+    Returns (facts, article title) or ([], "").
+    """
+    try:
+        hits = _question_wiki_hits(subject)
+        if not hits:
+            return [], ""
+        title = hits[0]["title"]
+        deep = _wiki_extract(title, exchars=0)
+        if not deep:
+            return [], ""
+        keep = []
+        for f in _ranked_facts(_sentences(deep), count=6):
+            if not _DIGIT.search(f):
+                continue
+            if not (_SUPERLATIVE.search(f) or _RECORD_CLAIM.search(f)
+                    or _YEAR.search(f)):
+                continue
+            if _is_contentless_claim(f):
+                continue
+            keep.append(f)
+            if len(keep) >= 3:
+                break
+        return keep, title
+    except Exception as exc:          # never let the miner break answering
+        print(f"[funfacts] record mining failed: {exc!r}", flush=True)
+        return [], ""
 
 
 def _question_sources(question: str, options: dict) -> list:
@@ -3093,22 +3161,8 @@ def _question_sources(question: str, options: dict) -> list:
     # are fed FIRST: the model reads only the first 8 source lines.
     hits = []
     try:
-        subj = _question_subject(question) or question
-        # "longest truck world transporting goods" is six words of question
-        # glued together, and Wikipedia finds nothing for it - which left
-        # the model with clickbait as its only sources. Try the shorter
-        # heads of the subject too ("longest truck"); first variant with
-        # results wins, so this costs nothing when the full subject works.
-        variants = [subj]
-        words = subj.split()
-        if len(words) > 3:
-            variants.append(" ".join(words[:3]))
-        if len(words) > 2:
-            variants.append(" ".join(words[:2]))
-        for v in variants:
-            hits = _wiki_search_extracts(v, limit=4)
-            if hits:
-                break
+        hits = _question_wiki_hits(_question_subject(question)
+                                   or question)
     except Exception as exc:            # never let a source kill the ladder
         print(f"[funfacts] question wikipedia failed: {exc!r}", flush=True)
     if hits:
@@ -3189,6 +3243,16 @@ def _answer_question(question: str, opts: dict, limit: int):
                   "OPENROUTER_API_KEY), or point llm_base_url at a local "
                   "Ollama. Until then !funfact only answers things with a "
                   "Wikipedia article.", flush=True)
+        # A superlative question still gets its answer: the article's own
+        # record sentences need no model, only Wikipedia.
+        if _SPECIFIC_Q.search(question):
+            facts, src = _mine_records(_question_subject(question)
+                                       or question)
+            if facts:
+                print(f"[funfacts] answered from the record lines of "
+                      f"{src} (no LLM needed)", flush=True)
+                return {"place": _question_place(question),
+                        "facts": facts[:4]}
         return None
     sources = _question_sources(question, opts)
     if not sources:
@@ -3262,6 +3326,14 @@ def _answer_question(question: str, opts: dict, limit: int):
     # noun or claim appears in the answer unless it appeared in a source.
     lines = _grounded_filter(lines, question, question, sources,
                              paraphrase=True)
+    if not lines and specific:
+        # The model would not produce a concrete answer. The records are in
+        # the article; post them directly rather than decline.
+        facts, src = _mine_records(_question_subject(question) or question)
+        if facts:
+            print(f"[funfacts] answered from the record lines of {src}",
+                  flush=True)
+            lines = facts
     if not lines:
         print(f"[funfacts] the answer did not survive grounding against its "
               f"{len(sources)} source line(s) - posting nothing rather than "
@@ -3270,12 +3342,9 @@ def _answer_question(question: str, opts: dict, limit: int):
     # The header is the question, not its first content word: "why do look
     # fatter on camera?" headed its answer "FunFact | Look:". A question is
     # its own best label; long ones are trimmed at a word boundary.
-    topic = " ".join(question.split())
-    if len(topic) > 60:
-        topic = topic[:60].rsplit(" ", 1)[0] + "\u2026"
     print(f"[funfacts] answered a question from {len(sources)} source "
           f"line(s): {question[:60]}", flush=True)
-    return {"place": topic, "facts": lines[:4]}
+    return {"place": _question_place(question), "facts": lines[:4]}
 
 
 def get_funfact(location: str, options=None):
