@@ -670,6 +670,24 @@ def main() -> int:
             return False
         return True
 
+    def _funfact_headings_and_captions():
+        """Split from its glued list, the section heading "World's longest
+        road trains." posted alone (sentence case beats the title-case
+        rule, and "trains" passes the verb catch-all), and "this mighty
+        truck is named ..." posted as a caption. Headings need a closed
+        verb or a digit; captions are rejected outright."""
+        if not funfacts._is_fragment("World's longest road trains."):
+            return False
+        if not funfacts._is_fragment("Notable people."):
+            return False
+        if funfacts._is_fragment("Huorns are tree-beings."):
+            return False
+        caption = ("One of the longest trucks in the world, this mighty "
+                   "truck is named Lindsay Transport B Double.")
+        if funfacts._ranked_facts([caption], subject="longest truck"):
+            return False
+        return True
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1082,6 +1100,8 @@ def main() -> int:
          _funfact_no_promises_or_teasers()),
         ("funfact record claims need figures; middot glue splits",
          _funfact_record_claims_split()),
+        ("funfact headings and captions never post",
+         _funfact_headings_and_captions()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

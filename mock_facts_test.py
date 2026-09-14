@@ -2497,6 +2497,36 @@ def test_record_claims_and_glued_lists_never_post():
           "splits")
 
 
+def test_headings_in_sentence_case_and_captions_never_post():
+    """Round four. Split free of its glued list, "World's longest road
+    trains." posted alone: title case missed it ("longest" is lowercase)
+    and "trains" passes the verb catch-all. And "this mighty truck is
+    named Lindsay Transport B Double" is an image caption in promotional
+    voice - a name, so the contentless gate passed it, but not a fact."""
+    for heading in ("World's longest road trains.", "Notable people.",
+                    "Historic sites."):
+        assert funfacts._is_fragment(heading), heading
+    for prose in ("eBay is an online marketplace.",
+                  "Yorkshire is the largest county in the UK.",
+                  "Huorns are tree-beings."):
+        assert not funfacts._is_fragment(prose), prose
+    caption = ("One of the longest trucks in the world, this mighty truck "
+               "is named Lindsay Transport B Double.")
+    assert not funfacts._ranked_facts([caption], subject="longest truck")
+    assert not funfacts._ranked_facts(
+        ["This massive rig carries ore across the outback."],
+        subject="longest truck")
+    # End to end: the glued list resolves to its records, never its heading.
+    glued = ("World's longest road trains \u00b7 In 1989, a trucker named "
+             "\"Buddo\" tugged 12 trailers down the main street of Winton. "
+             "\u00b7 In 1993, \"Plugger\" Bowden took the record.")
+    ranked = funfacts._ranked_facts(funfacts._sentences(glued),
+                                    subject="longest truck")
+    assert ranked and any("Buddo" in f for f in ranked), ranked
+    assert not any("World's longest road trains" in f for f in ranked), ranked
+    print("[PASS] sentence-case headings and caption voice never post")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2820,6 +2850,7 @@ def main():
     test_the_dig_finds_records_the_question_does_not_name()
     test_teasers_and_splices_never_post()
     test_record_claims_and_glued_lists_never_post()
+    test_headings_in_sentence_case_and_captions_never_post()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

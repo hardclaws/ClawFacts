@@ -286,6 +286,36 @@ _HAS_VERB = re.compile(
     re.IGNORECASE,
 )
 
+#: The closed verb list of _HAS_VERB without its open-ended catch-alls
+#: ("[a-z]{3,}s" matches "trains" and "Sites" - nouns, not verbs). Heading
+#: checks use THIS: "World's longest road trains." carries no finite verb a
+#: real sentence needs.
+_VERBS_CLOSED = re.compile(
+    r"\b(?:is|are|was|were|be|been|being|has|have|had|does|did|do|can|could|"
+    r"will|would|shall|should|may|might|must|became|becomes|become|"
+    r"contains?|contained|includes?|included|lies|lay|stood|stands?|"
+    r"opened|opens?|closed|built|founded|established|named|renamed|serves?|"
+    r"served|held|holds?|won|began|begins?|ended|ends?|reached|reaches?|"
+    r"killed|died|born|lived|worked|played|led|produced|produces?|received|"
+    r"gave|made|took|found|created|used|known|called|shown|seen|taken|"
+    r"written|given|set|put|let|said|told|brought|bought|taught|"
+    r"thought|sought|fought|caught|shares?|boasts?|hosts?|sits?|marks?|"
+    r"spans?|covers?|keeps?|offers?|features?|consists?|comprises?|dates?|"
+    r"runs?|leads?|adds?|gives?|takes?|sees?|says?|shows?|tells?|notes?|"
+    r"lists?|means?|seems?|looks?|feels?|carries?|matches?)\b",
+    re.IGNORECASE,
+)
+_SUPERLATIVE = re.compile(
+    r"\b(?:longest|shortest|biggest|largest|smallest|tallest|highest|"
+    r"lowest|oldest|newest|fastest|slowest|richest|deadliest|weirdest|"
+    r"greatest|strangest|heaviest|widest|deepest)\b", re.IGNORECASE)
+#: Caption voice: "this mighty truck is named ...". A demonstrative plus a
+#: promotional adjective - the sentence was written to sit under a photo.
+_PROMO = re.compile(
+    r"\b(?:this|the)\s+(?:mighty|massive|giant|huge|incredible|amazing|"
+    r"epic|stunning|jaw-dropping|awe-inspiring|behemoth|colossal|"
+    r"legendary)\s+\w+\b", re.IGNORECASE)
+
 #: A sentence that only enumerates rankings. Scores high, because every ordinal
 #: is a strong word, and is the least interesting thing an article can say:
 #: "Illinois has the fifth-largest GDP, the sixth-largest population, and the
@@ -374,6 +404,15 @@ def _is_fragment(sentence: str) -> bool:
         "the", "a", "an", "of", "in", "on", "at", "to", "and", "or", "by",
         "for", "is", "was", "it", "its", "as")]
     if len(words) >= 3 and content and all(w[:1].isupper() for w in content):
+        return True
+    # "World's longest road trains." - a Wikipedia section heading in
+    # SENTENCE case, freed from its glued list. Title case missed it
+    # ("longest" is lowercase) and "trains" satisfies the verb catch-all
+    # below. But a heading this short carries no closed-class verb (is,
+    # are, has, stands...) and no digit - prose that short always has one.
+    if (len(t) < 45 and not _DIGIT.search(t)
+            and not _VERBS_CLOSED.search(t)
+            and (len(words) <= 5 or _SUPERLATIVE.search(t))):
         return True
     # A short run of words with no verb in it is a caption, not a sentence:
     # "Historic Landmark plaque." The verb check is only trusted on short
@@ -885,7 +924,7 @@ def _ranked_facts(sentences: list, spice: bool = False,
         if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
                 or _LOCATION_ONLY.match(s) or _is_dangling(s)
                 or _is_fragment(s) or _is_boring(s) or _TEASE.match(s)
-                or _is_contentless_claim(s)):
+                or _is_contentless_claim(s) or _PROMO.search(s)):
             continue
         # Search snippets have no title gate: unlike the Wikipedia path, which
         # picks an article by title first, whatever the engine returned is the
@@ -3104,6 +3143,7 @@ def _answer_question(question: str, opts: dict, limit: int):
                 continue
             if (_is_dangling(ln) or _is_fragment(ln) or _is_boring(ln)
                     or _TEASE.match(ln) or _is_contentless_claim(ln)
+                    or _PROMO.search(ln)
                     or re.search(r"\s[·•]\s", ln)):
                 continue
             # "It is entirely psychological if you think a photo of you
