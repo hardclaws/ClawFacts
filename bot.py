@@ -1917,9 +1917,9 @@ class TwitchBot:
                 mention_last=self._chat_ai_mention_last,
                 mention_cd=float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)),
-                chime_cd=float(self.cfg.get("chat_ai_cooldown", 600)),
+                chime_cd=float(self.cfg.get("chat_ai_cooldown", 120)),
                 times=self._chat_ai_times,
-                max_hour=int(self.cfg.get("chat_ai_max_hour", 6)),
+                max_hour=int(self.cfg.get("chat_ai_max_hour", 20)),
                 buffer_len=buffer_len,
                 min_chat=int(self.cfg.get("chat_ai_min_chat", 5))):
             return
