@@ -583,7 +583,9 @@ _ELLIPSIS_END = re.compile(r"(?:\u2026|\.\.\.)\s*$")
 _DANGLING_TAIL = re.compile(
     r"\s*\b(?:and|or|but|nor|the|a|an|of|in|on|at|to|with|for|by|from|as|"
     r"is|are|was|were|that|which|who|whose|their|its|his|her|they|it|he|"
-    r"she|than|so|such|while|when|where|after|before|during)\s*$",
+    r"she|than|so|such|while|when|where|after|before|during|toward|towards|"
+    r"into|onto|over|under|near|across|along|around|between|through|"
+    r"without|within|beyond|up|down|out|off)\s*$",
     re.IGNORECASE)
 
 
@@ -772,14 +774,38 @@ def trim_to_fit(text: str, limit: int) -> str:
         if kept:
             out = " ".join(kept)
             return out if out.endswith((".", "!", "?")) else out + "."
-    for sep in ("; ", " — ", ", "):
-        head = text[:limit]
-        if sep not in head:
+    # One long sentence. Cut it at the LONGEST clause boundary that fits,
+    # not the first: the Seligman fact's only comma cut ended at 98 of 200
+    # characters, the old 55% threshold rejected it, and the word chop that
+    # won left "...to the Cafe and the gift…" - a dangler where a fact
+    # should be. The longest cut keeps the most of the actual story.
+    best = ""
+    for sep in ("; ", " — ", ", but ", ", and ", ", which ", ", "):
+        head = text[:limit + 1]
+        idx = head.rfind(sep)
+        if idx == -1:
             continue
-        cut = head.rsplit(sep, 1)[0].rstrip(" ,;:-—")
-        if len(cut) >= int(limit * 0.55):
-            return cut + "…"
-    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—") + "…"
+        cut = head[:idx].rstrip(" ,;:-—")
+        if len(cut) > len(best):
+            best = cut
+    if len(best) >= int(limit * 0.40):
+        return best + "…"
+
+    def strip_danglers(t: str) -> str:
+        # "and the", "of the", "which was" - a cut that ends on a connector
+        # is not a sentence, and posting the connector proves the chop.
+        while True:
+            new = _DANGLING_TAIL.sub("", t).rstrip(" ,;:-—")
+            if new == t:
+                return t
+            t = new
+
+    # Last resort: a word-boundary cut, with every dangling connector
+    # stripped - it ends on a noun or it does not post.
+    cut = strip_danglers(text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—"))
+    if len(cut) >= 30:
+        return cut + "…"
+    return (best or cut) + "…"
 
 
 def _trim(text: str, limit: int) -> str:

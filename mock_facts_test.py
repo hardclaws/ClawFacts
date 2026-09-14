@@ -2527,6 +2527,33 @@ def test_headings_in_sentence_case_and_captions_never_post():
     print("[PASS] sentence-case headings and caption voice never post")
 
 
+def test_a_long_fact_is_cut_at_a_clause_never_a_dangler():
+    """'!funfact Seligman, AZ' posted "...were built to attract tourists to
+    the Cafe and the\u2026" - the fact's only comma cut landed at 98 of 200
+    characters, the 55% threshold rejected it, and the word chop left "and
+    the" dangling. The longest clause cut wins now, and a word cut strips
+    every dangling connector before it posts."""
+    fact = ('The "Seligman Depot" and the "1860 Arizona Territorial Jail" '
+            'are not authentic historical buildings, but owned by the '
+            'Roadkill Cafe owners and were built to attract tourists to the '
+            'Cafe and the gift shop next door.')
+    got = funfacts._fit_fact(fact, 200, {})      # no LLM: the fallback path
+    assert got.endswith("are not authentic historical buildings\u2026"), got
+    assert "and the" not in got.split("buildings")[-1], got
+    assert len(got) <= 200, len(got)
+    # A cut with no clause boundary in range ends on a noun, not "beyond".
+    chop = ("The bridge carried coal trucks eastward toward the furnaces "
+            "and the loading docks beyond the river bend every single "
+            "winter morning without fail.")
+    got = funfacts._trim(chop, 90)
+    assert got.endswith("loading docks\u2026"), got
+    assert not got.endswith(("and the\u2026", "beyond\u2026", "the\u2026")), got
+    # Whole sentences are still packed first when they fit.
+    assert funfacts._trim("One. Two two. Three three three.", 15) == \
+        "One. Two two."
+    print("[PASS] a long fact is cut at a clause, never a dangler")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2851,6 +2878,7 @@ def main():
     test_teasers_and_splices_never_post()
     test_record_claims_and_glued_lists_never_post()
     test_headings_in_sentence_case_and_captions_never_post()
+    test_a_long_fact_is_cut_at_a_clause_never_a_dangler()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

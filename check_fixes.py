@@ -688,6 +688,26 @@ def main() -> int:
             return False
         return True
 
+    def _funfact_cuts_are_clean():
+        """Seligman posted '...to the Cafe and the\u2026' - the 55% clause
+        threshold rejected the only comma cut and the word chop left a
+        dangler. The longest clause cut wins, and word cuts strip dangling
+        connectors."""
+        fact = ('The "Seligman Depot" and the "1860 Arizona Territorial '
+                'Jail" are not authentic historical buildings, but owned '
+                'by the Roadkill Cafe owners and were built to attract '
+                'tourists to the Cafe.')
+        got = funfacts._fit_fact(fact, 120, {})
+        if not got.endswith("historical buildings\u2026"):
+            return False
+        if " and the" in got[-12:]:
+            return False
+        chop = ("The bridge carried coal trucks eastward toward the "
+                "furnaces and the loading docks beyond the river bend "
+                "every single winter morning.")
+        got = funfacts._trim(chop, 90)
+        return got.endswith("loading docks\u2026")
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1102,6 +1122,8 @@ def main() -> int:
          _funfact_record_claims_split()),
         ("funfact headings and captions never post",
          _funfact_headings_and_captions()),
+        ("funfact cuts land on clauses, never danglers",
+         _funfact_cuts_are_clean()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",
