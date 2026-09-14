@@ -255,6 +255,54 @@ The voice is `bot_personality` in `config.json` — your words, your
 rules — and the built-in default is Doc: a dry-witted old trucker who
 has been everywhere twice.
 
+### It remembers its viewers
+
+While the chat AI is enabled, one small SQLite file (`memory_db_path`,
+default `chat_memory.db`) holds two things: the recent chat log (pruned
+after 90 days — raw material, never fed to the model wholesale) and
+distilled per-viewer facts. After the bot talks with someone, the model
+quietly extracts the durable stuff — work, vehicles, pets, hobbies,
+plans, strong preferences — and those facts are injected into its
+prompts from then on. That is what "remembers conversations from any
+point in time" actually looks like at channel scale: not recall of every
+line, but the handful of facts that make a reply feel personal.
+
+Deliberate limits: only public chat is recorded, and only while
+`chat_ai_enabled` is true — the feature owns its data. Health details,
+politics, religion, finances and anything intimate are never kept
+(that rule is in the extraction prompt). Every viewer is capped at 25
+facts, oldest first off the end. And `!forget <viewer>` (moderators,
+works while the bot is off) erases every memory **and** every logged
+line for that viewer, then says how much it dropped.
+
+### Running it on a local Ollama
+
+The whole chat AI runs on a local model — no key, no rate limits, no
+per-message cost, nothing leaving the box. On a mini PC with 32GB RAM
+and no discrete GPU (e.g. a UM560 XT), an 8B model at Q4 quantisation
+answers in a few seconds, which is fine for a few lines an hour:
+
+```
+ollama pull llama3.1:8b
+```
+
+then in `config.json`:
+
+```json
+"llm_api_key": "",
+"llm_base_url": "http://localhost:11434/v1",
+"llm_model": "llama3.1:8b",
+"chat_ai_timeout": 15
+```
+
+`chat_ai_timeout` gets a bump on CPU because model loading counts
+against it. Two more tips: set `OLLAMA_KEEP_ALIVE=30m` for the Ollama
+service so the first chime-in after a quiet spell isn't spent loading
+the model back into RAM, and if lines feel slow, `llama3.2:3b` is much
+faster on CPU and still fine for one-liners. The architecture is
+provider-agnostic — swap back to a hosted key any time by editing the
+same three fields.
+
 ## Where facts come from
 
 `"fact_source"` picks one of two engines:

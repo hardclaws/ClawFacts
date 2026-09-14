@@ -803,6 +803,36 @@ def main() -> int:
             return False
         return '"chime"' in _bot_src
 
+    def _chat_ai_remembers_and_forgets():
+        """The chat AI's memory: a log pruned to 90 days, distilled
+        per-viewer facts injected into its prompts, a 25-fact cap, and
+        !forget (mods) erasing a viewer entirely. Nothing is recorded
+        while the feature is off."""
+        import memory as _mem
+        import tempfile as _tf
+        import os as _os
+        m = _mem.Memory(_os.path.join(_tf.mkdtemp(), "m.db"))
+        if not m.ok:
+            return False
+        m.remember("kvack", ["sleeps on the floor by choice"])
+        if m.recall(["kvack"]) != [("kvack", "sleeps on the floor by choice")]:
+            return False
+        if m.purge("kvack") != 1 or m.recall(["kvack"]):
+            return False
+        if _mem.parse_facts("NOTHING WORTH KEEPING") != []:
+            return False
+        if _mem.parse_facts("- drives a Kenworth") != ["drives a Kenworth"]:
+            return False
+        import chatai as _ch
+        prompt = _ch.user_prompt([("a", "hi")], "a", "hello",
+                                 memories=[("kvack",
+                                            "sleeps on the floor")])
+        if "sleeps on the floor" not in prompt:
+            return False
+        if "FORGET_COMMANDS" not in _bot_src:
+            return False
+        return '"memory_db_path"' in _bot_src
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1225,6 +1255,8 @@ def main() -> int:
          _funfact_records_miner()),
         ("chat AI: !ask + chime-ins, bounded and safe (off by default)",
          _chat_ai_bounded_and_safe()),
+        ("chat AI remembers viewers; !forget erases them",
+         _chat_ai_remembers_and_forgets()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

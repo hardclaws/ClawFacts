@@ -44,6 +44,7 @@ import extras
 import reminders as reminders_mod
 import chatai
 import haul as haul_mod
+import memory as memory_mod
 import names as names_mod
 import trucker as trucker_mod
 import beef as beef_mod
@@ -102,6 +103,8 @@ BEEF_STATS_WORDS = {"stats", "stat", "score", "scoreboard", "leaderboard",
                     "top", "lb"}
 # !cmd lets a moderator define new commands in chat, with no restart.
 CMD_COMMANDS = {"cmd", "customcmd"}
+# !forget <viewer> - wipe the chat AI's memory of that viewer (mods).
+FORGET_COMMANDS = {"forget"}
 
 # Everything a moderator must not be able to redefine. Without this, "!help"
 # typed by a moderator would silently stop meaning help.
@@ -177,6 +180,10 @@ DEFAULTS = {
     "chat_ai_timeout": 8.0,
     "chat_ai_names": ["doc", "docbot"],
     "bot_personality": "",
+    # The chat AI's memory: one SQLite file. Messages are pruned after
+    # 90 days; distilled per-viewer facts stay until a mod runs
+    # !forget <viewer>, which erases everything held about them.
+    "memory_db_path": "chat_memory.db",
     # Shout out whoever raids in, and let a moderator trigger one with !so.
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
@@ -397,6 +404,13 @@ class TwitchBot:
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
         self._chat_ai_names.add((self.nick or "").lower())
+        # Long-term memory for the chat AI. The object exists even when
+        # the feature is off (!forget still works on old data), but
+        # nothing is ever RECORDED unless chat_ai_enabled is true: the
+        # feature owns its data.
+        self._memory = memory_mod.Memory(
+            cfg.get("memory_db_path") or memory_mod.DB_PATH)
+        self._memory.prune()
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -756,6 +770,8 @@ class TwitchBot:
                     (nick, " ".join((message or "").split())[:200]))
                 if len(self._chat_buf) > 60:
                     del self._chat_buf[:len(self._chat_buf) - 60]
+            if self.cfg.get("chat_ai_enabled", False):
+                self._memory.note(nick, login, message)
             kind = self._chat_ai_kind(nick, badges, message)
             if kind:
                 self._maybe_chime(nick, login, kind, message)
@@ -812,6 +828,12 @@ class TwitchBot:
         # !haul update it stays reachable while the bot is switched off.
         if command in CMD_COMMANDS:
             self._cmd_command(nick, badges, argument)
+            return
+
+        # !forget <viewer> erases the chat AI's memory of someone. A
+        # moderation command, reachable while the bot is switched off.
+        if command in FORGET_COMMANDS:
+            self._forget_command(nick, badges, argument)
             return
 
         if self.paused:
@@ -2040,10 +2062,13 @@ class TwitchBot:
         import llm as llm_mod
         persona = self.cfg.get("bot_personality", "") or \
             chatai.DEFAULT_PERSONA
+        speakers = [n for n, _ in lines[-6:]] + [nick]
+        memories = self._memory.recall(speakers) if self._memory.ok else []
         try:
             raw = llm_mod.chat_reply(
                 chatai.system_prompt(persona),
-                chatai.user_prompt(lines, nick, text), self._opts)
+                chatai.user_prompt(lines, nick, text, memories),
+                self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
             return None
@@ -2067,6 +2092,32 @@ class TwitchBot:
                                if now - t < 3600] + [now]
         self._say(self._fit(f"@{nick} ", line))
         self._log(f"chat ai replied to {nick}")
+        self._distill(nick, self._chat_ai_snapshot())
+
+    def _distill(self, nick: str, lines: list) -> None:
+        """After talking, remember what is durable about the viewer.
+
+        Runs on the worker thread, after the reply has posted, so the
+        extra model call never delays a line of chat. Bounded for free:
+        it only runs after a chime or an !ask, both already throttled.
+        """
+        import llm as llm_mod
+        if not self._memory.ok or not llm_mod.is_configured(self._opts):
+            return
+        theirs = [(n, t) for n, t in lines if (n or "").lower()
+                  == (nick or "").lower()]
+        if not theirs:
+            return
+        try:
+            raw = llm_mod.chat_reply(
+                memory_mod.DISTILL_RULES,
+                memory_mod.distill_prompt(nick, theirs), self._opts)
+        except Exception as exc:
+            self._log(f"memory distill error: {exc!r}")
+            return
+        facts = memory_mod.parse_facts(raw)
+        if facts:
+            self._memory.remember(nick, facts)
 
     def _reply_ask(self, nick: str, argument: str) -> None:
         """!ask <anything> - the persona answers, falling back to facts.
@@ -2081,13 +2132,31 @@ class TwitchBot:
             self._say(f"@{nick} ask me anything - a question or a topic.")
             return
         if llm_mod.is_configured(self._opts):
-            line = self._chat_ai_line(self._chat_ai_snapshot(), nick, q)
+            snapshot = self._chat_ai_snapshot()
+            line = self._chat_ai_line(snapshot, nick, q)
             if line:
                 self._say(self._fit(f"@{nick} ", line))
                 self._log(f"chat ai answered {nick}")
+                self._distill(nick, snapshot)
                 return
         result = get_funfact(q, self._opts)
         self._reply(nick, q, result)
+
+    def _forget_command(self, nick: str, badges: str, argument: str) -> None:
+        """!forget <viewer> - erase every memory and logged message held
+        about one viewer. Moderators only, silent for viewers."""
+        who = (argument or "").strip().lstrip("@")
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            self._log(f"!forget {who!r} from {nick} ignored - not a mod")
+            return
+        if not who:
+            self._say(f"@{nick} forget who? !forget <viewer>")
+            return
+        dropped = self._memory.purge(who)
+        self._say(f"@{nick} done - nothing remembered about {who} "
+                  f"({dropped} fact{'s' if dropped != 1 else ''} and all "
+                  f"their logged lines, gone).")
+        self._log(f"memory purged for {who} by {nick}")
 
     def _say_help(self, nick: str, badges: str = "") -> None:
         prefix = self.cfg.get("prefix", "!")

@@ -64,9 +64,19 @@ def system_prompt(persona: str = "") -> str:
     return (persona or DEFAULT_PERSONA).strip() + "\n" + _RULES
 
 
-def user_prompt(lines: list, nick: str, text: str) -> str:
-    """What the model sees: the room, the moment, and the ask."""
-    out = ["Recent chat:"]
+def user_prompt(lines: list, nick: str, text: str,
+                memories: list = None) -> str:
+    """What the model sees: what it remembers, the room, the moment, the
+    ask. Memories are [(nick, fact)] - the distilled facts about the
+    people present, which is what makes the reply feel like it knows
+    them."""
+    out = []
+    if memories:
+        out.append("What you remember about people here (from past chat,"
+                   " may be stale):")
+        out.extend(f"- {n}: {f}" for n, f in memories[:8])
+        out.append("")
+    out.append("Recent chat:")
     out.extend(f"{n}: {t}" for n, t in lines[-15:])
     out.append("")
     out.append(f"{nick} just said: {text}")
