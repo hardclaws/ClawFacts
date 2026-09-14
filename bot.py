@@ -172,12 +172,18 @@ DEFAULTS = {
     # chat_ai_cooldown, and nothing exceeds chat_ai_max_hour lines an hour.
     # !cb off silences it for the session, like the other chatter.
     "chat_ai_enabled": False,
-    "chat_ai_cooldown": 600,
+    "chat_ai_cooldown": 120,
     "chat_ai_mention_cooldown": 60,
-    "chat_ai_chance": 0.25,
-    "chat_ai_max_hour": 6,
+    "chat_ai_chance": 0.4,
+    "chat_ai_max_hour": 20,
     "chat_ai_min_chat": 5,
     "chat_ai_timeout": 8.0,
+    # The quiet-room half: when nobody has spoken for chat_ai_quiet_seconds,
+    # the bot opens the conversation itself (a question, a hook) rather than
+    # waiting for a message to react to - at most once per
+    # chat_ai_quiet_cooldown, inside the same hourly cap.
+    "chat_ai_quiet_seconds": 90,
+    "chat_ai_quiet_cooldown": 150,
     # Qwen3-family models "think" before answering, which on CPU turns a
     # one-line reply into a half-minute stall. true appends Qwen3's
     # documented /no_think soft switch to every prompt. No effect on
@@ -403,7 +409,8 @@ class TwitchBot:
         # keep it from ever being the loudest voice in chat.
         self._chat_buf = []                        # [(nick, text), ...]
         self._chat_lock = threading.Lock()
-        self._chat_ai_last = 0.0                   # last attempt, any kind
+        self._chat_ai_last = 0.0                   # last unprompted line
+        self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_names = set(
             str(n).lower() for n in
@@ -1831,6 +1838,10 @@ class TwitchBot:
                 self._idle_chat_tick()
             except Exception as exc:
                 self._log(f"idle-chat error: {exc!r}")
+            try:
+                self._chat_ai_tick()
+            except Exception as exc:
+                self._log(f"chat-ai error: {exc!r}")
 
     def _tick_reminders(self) -> int:
         """One pass of the reminder clock. Returns how many it posted."""
@@ -2045,8 +2056,9 @@ class TwitchBot:
                 paused=self.paused,
                 ambient_off=self._cb_ambient_off,
                 kind=kind, roll=random.random(),
-                chance=float(self.cfg.get("chat_ai_chance", 0.25)),
+                chance=float(self.cfg.get("chat_ai_chance", 0.4)),
                 now=time.time(), last=self._chat_ai_last,
+                mention_last=self._chat_ai_mention_last,
                 mention_cd=float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)),
                 chime_cd=float(self.cfg.get("chat_ai_cooldown", 600)),
@@ -2062,8 +2074,10 @@ class TwitchBot:
         with self._chat_lock:
             return list(self._chat_buf)
 
-    def _chat_ai_line(self, lines: list, nick: str, text: str):
-        """Compose one cleaned line, or None. Shared by chime and !ask."""
+    def _chat_ai_line(self, lines: list, nick: str, text: str,
+                      quiet: bool = False):
+        """Compose one cleaned line, or None. Shared by chime, !ask and
+        the quiet-room opener."""
         import llm as llm_mod
         persona = self.cfg.get("bot_personality", "") or \
             chatai.DEFAULT_PERSONA
@@ -2072,7 +2086,8 @@ class TwitchBot:
         try:
             raw = llm_mod.chat_reply(
                 chatai.system_prompt(persona),
-                chatai.user_prompt(lines, nick, text, memories),
+                chatai.user_prompt(lines, nick, text, memories,
+                                   quiet=quiet),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2081,23 +2096,68 @@ class TwitchBot:
             return None
         return chatai.clean_line(raw)
 
-    def _do_chime(self, nick: str, text: str) -> None:
-        """A bot-initiated line of chat, composed off the read loop."""
-        now = time.time()
+    def _chat_ai_tick(self, now: float = None) -> bool:
+        """The quiet-room half of the chat AI.
+
+        A chime-in can only trigger off someone's message - which is
+        impossible when the room has gone silent, exactly when the bot
+        should be doing the talking. This runs on the idle keeper's
+        heartbeat: after chat_ai_quiet_seconds of silence, it queues one
+        conversation opener, at most once per chat_ai_quiet_cooldown and
+        inside the same hourly cap. The attempt is marked AT ENQUEUE, so
+        a busy worker can never double-fire it.
+        """
+        if not self.cfg.get("chat_ai_enabled", False):
+            return False
+        if self.paused or self._cb_ambient_off:
+            return False
+        now = time.time() if now is None else now
+        if now - self._last_chat < float(self.cfg.get(
+                "chat_ai_quiet_seconds", 90)):
+            return False                # chat is alive; the message path rules
         if now - self._chat_ai_last < float(self.cfg.get(
-                "chat_ai_mention_cooldown", 60)):
-            return                      # the room moved on while we queued
-        line = self._chat_ai_line(self._chat_ai_snapshot(), nick, text)
-        # Failed attempts back off too, or every following message would
-        # pay for another model call.
+                "chat_ai_quiet_cooldown", 150)):
+            return False
+        if len([t for t in self._chat_ai_times if now - t < 3600]) >= int(
+                self.cfg.get("chat_ai_max_hour", 20)):
+            return False
         self._chat_ai_last = now
+        self._jobs.put(("", "", "", "chime", ""))
+        return True
+
+    def _do_chime(self, nick: str, text: str) -> None:
+        """A bot-initiated line of chat, composed off the read loop.
+
+        An empty nick is the quiet-room opener: posted bare (nobody to
+        @), and no memory distill (nobody talked).
+        """
+        quiet = not (nick or "").strip()
+        if not quiet:
+            now = time.time()
+            if now - self._chat_ai_mention_last < float(self.cfg.get(
+                    "chat_ai_mention_cooldown", 60)):
+                return                  # the room moved on while we queued
+        line = self._chat_ai_line(self._chat_ai_snapshot(),
+                                  nick or "chat", text, quiet=quiet)
+        # Failed attempts back off too, or every following message would
+        # pay for another model call. Mentions back off mentions; openers
+        # were already marked at enqueue.
+        now = time.time()
+        if quiet:
+            self._chat_ai_last = now
+        else:
+            self._chat_ai_mention_last = now
         if not line:
             return
         self._chat_ai_times = [t for t in self._chat_ai_times
                                if now - t < 3600] + [now]
-        self._say(self._fit(f"@{nick} ", line))
-        self._log(f"chat ai replied to {nick}")
-        self._distill(nick, self._chat_ai_snapshot())
+        if quiet:
+            self._say(self._fit("", line))
+            self._log("chat ai opened the quiet room")
+        else:
+            self._say(self._fit(f"@{nick} ", line))
+            self._log(f"chat ai replied to {nick}")
+            self._distill(nick, self._chat_ai_snapshot())
 
     def _distill(self, nick: str, lines: list) -> None:
         """After talking, remember what is durable about the viewer.

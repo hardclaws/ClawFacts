@@ -66,7 +66,7 @@ def test_a_mention_gets_one_bounded_reply():
         # The reply is prefixed by the bot, never by the model: a model
         # line carrying an @mention of its own is dropped whole.
         llm.chat_reply = lambda s, u, c: "@kvack you would not believe it"
-        b._chat_ai_last = 0.0
+        b._chat_ai_mention_last = 0.0
         b._on_message("kvack", "#t", "doc honestly", "kvack", "")
         _drain(b)
         assert len(b.said) == 1, b.said
@@ -103,7 +103,8 @@ def test_chime_ins_are_gated():
         assert b._jobs.empty(), "chimed in inside the long cooldown"
         # The hourly cap is absolute - mentions included.
         b._chat_ai_last = 0.0
-        b._chat_ai_times = [time.time() - 10] * 6
+        b._chat_ai_times = [time.time() - 10] * bot_mod.DEFAULTS[
+            "chat_ai_max_hour"]
         b._on_message("kvack", "#t", "doc tell them", "kvack", "")
         assert b._jobs.empty(), "spoke past the hourly cap"
         # Paused (!bot off) and !cb off both silence it.
@@ -170,7 +171,7 @@ def test_unsafe_or_lazy_lines_never_post():
         b._on_message("kvack", "#t", "doc say something", "kvack", "")
         _drain(b)
         assert b.said == [], b.said
-        assert b._chat_ai_last > 0, "a decline did not back off"
+        assert b._chat_ai_mention_last > 0, "a decline did not back off"
         b._on_message("kvack", "#t", "doc try again", "kvack", "")
         assert b._jobs.empty(), "re-asked the model inside the cooldown"
     finally:
@@ -267,7 +268,7 @@ def test_the_bot_remembers_and_forgets():
         got = b._memory.recall(["kvack"])
         assert ("kvack", "sleeps on the floor by choice") in got, got
         # The next time the bot speaks, it remembers.
-        b._chat_ai_last = 0.0
+        b._chat_ai_mention_last = 0.0
         b._on_message("kvack", "#t", "doc you know what im saying",
                       "kvack", "")
         _drain(b)
@@ -283,6 +284,60 @@ def test_the_bot_remembers_and_forgets():
     finally:
         llm.chat_reply = orig
     print("[PASS] the bot remembers its viewers, and a mod can forget them")
+
+
+def test_the_quiet_room_gets_a_conversation_opener():
+    """The other half of conversational: a chime-in can only trigger off
+    someone's message, which is impossible when the room has gone silent -
+    exactly when the bot should be doing the talking. After
+    chat_ai_quiet_seconds of silence the keeper queues one opener: posted
+    bare (nobody to @), at most once per chat_ai_quiet_cooldown, inside
+    the same hourly cap, and never while paused or !cb-off."""
+    b = _bot(llm_api_key="k")
+    seen = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c: (seen.append(u) or
+                                      "Anyone else ever lose a whole day "
+                                      "to a weigh station line?")
+    try:
+        now = time.time()
+        # Chat alive: no opener.
+        b._last_chat = now - 10
+        assert not b._chat_ai_tick(now=now)
+        # Quiet: one opener, posted bare, prompt says the room is quiet.
+        b._last_chat = now - 500
+        assert b._chat_ai_tick(now=now)
+        _drain(b)
+        assert b.said and not b.said[0].startswith("@"), b.said
+        assert any("gone quiet" in u for u in seen), "model not told"
+        # The quiet cooldown holds for a second tick.
+        b._last_chat = now - 900
+        assert not b._chat_ai_tick(now=now + 30)
+        # ...but a mention still works; the bot just spoke, so the
+        # mention cooldown governs, not the quiet one.
+        b._on_message("kvack", "#t", "doc good one", "kvack", "")
+        _drain(b)
+        assert len(b.said) == 2, b.said
+        # Paused and !cb off both stop the openers.
+        b._last_chat = now - 900
+        b._chat_ai_last = 0.0
+        b.paused = True
+        assert not b._chat_ai_tick(now=now + 600)
+        b.paused = False
+        b._cb_ambient_off = True
+        assert not b._chat_ai_tick(now=now + 600)
+        b._cb_ambient_off = False
+        # The hourly cap applies here too.
+        b._chat_ai_times = [now] * bot_mod.DEFAULTS["chat_ai_max_hour"]
+        assert not b._chat_ai_tick(now=now + 900)
+        b._chat_ai_times = []
+        # And a disabled chat AI never opens.
+        b2 = _bot(chat_ai_enabled=False)
+        b2._last_chat = now - 900
+        assert not b2._chat_ai_tick(now=now)
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a quiet room gets a conversation opener, bounded")
 
 
 def test_nothing_is_recorded_while_the_feature_is_off():
@@ -309,6 +364,7 @@ def main():
     test_ask_answers_with_persona_then_facts()
     test_memory_roundtrip_and_forget()
     test_the_bot_remembers_and_forgets()
+    test_the_quiet_room_gets_a_conversation_opener()
     test_nothing_is_recorded_while_the_feature_is_off()
     print("\nALL PASSED \u2714")
     return 0

@@ -235,11 +235,20 @@ works without a key.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
   so it cannot be wound up like a toy.
-- **Chime-ins** — on a busy channel it occasionally adds a line of its
-  own: a moment must win a `chat_ai_chance` roll, the room must have at
-  least `chat_ai_min_chat` recent messages, and `chat_ai_cooldown`
-  seconds must have passed since its last unprompted line. Nothing —
-  mentions included — exceeds `chat_ai_max_hour` lines an hour.
+- **Chime-ins** — on a busy channel it adds a line of its own: a moment
+  must win a `chat_ai_chance` roll, the room must have at least
+  `chat_ai_min_chat` recent messages, and `chat_ai_cooldown` seconds
+  must have passed since its last unprompted line.
+- **Quiet-room openers** — when nobody has spoken for
+  `chat_ai_quiet_seconds`, the bot opens the conversation itself (a
+  question for chat, a hook from its trucking life), at most once per
+  `chat_ai_quiet_cooldown`. A chime-in can only trigger off someone's
+  message, which is impossible in a silent room — exactly when the bot
+  should be doing the talking. Mention replies run on their own clock,
+  so a human answering an opener five seconds later gets a reply, not a
+  cooldown wall.
+- Nothing — mentions, chime-ins and openers included — exceeds
+  `chat_ai_max_hour` lines an hour, and `!cb off` silences all of it.
 - **`!cb off`** silences it for the session, like the other chatter.
 
 What it will never do, by prompt *and* by output filter: tease people

@@ -783,13 +783,16 @@ def main() -> int:
         # Every gate, one at a time.
         base = dict(enabled=True, paused=False, ambient_off=False,
                     kind="mention", roll=0.0, chance=0.25, now=1000.0,
-                    last=0.0, mention_cd=60, chime_cd=600, times=[],
-                    max_hour=6, buffer_len=10, min_chat=5)
+                    last=0.0, mention_last=0.0, mention_cd=60, chime_cd=600,
+                    times=[], max_hour=6, buffer_len=10, min_chat=5)
+        # A quiet opener must not mute a mention: separate clocks.
+        if not _ch.should_speak(**{**base, "last": 990.0}):
+            return False
         if not _ch.should_speak(**base):
             return False
         for key, value in (("paused", True), ("enabled", False),
                            ("ambient_off", True), ("kind", None),
-                           ("last", 990.0), ("times", [900.0] * 6)):
+                           ("mention_last", 990.0), ("times", [900.0] * 6)):
             if _ch.should_speak(**{**base, key: value}):
                 return False
         chime = {**base, "kind": "chime", "roll": 0.9}
@@ -797,6 +800,8 @@ def main() -> int:
             return False
         if not _ch.should_speak(**{**chime, "roll": 0.1}):
             return False
+        if _ch.should_speak(**{**chime, "roll": 0.1, "last": 990.0}):
+            return False                      # chimes wait out their clock
         if _ch.should_speak(**{**chime, "roll": 0.1, "buffer_len": 2}):
             return False
         if "_reply_ask" not in _bot_src:

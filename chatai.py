@@ -65,21 +65,30 @@ def system_prompt(persona: str = "") -> str:
 
 
 def user_prompt(lines: list, nick: str, text: str,
-                memories: list = None) -> str:
+                memories: list = None, quiet: bool = False) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
-    them."""
+    them. `quiet` is the dead-room case: no one said anything, and the
+    bot's job is to get the conversation going."""
     out = []
     if memories:
         out.append("What you remember about people here (from past chat,"
                    " may be stale):")
         out.extend(f"- {n}: {f}" for n, f in memories[:8])
         out.append("")
-    out.append("Recent chat:")
+    out.append("Recent chat (it has gone quiet):" if quiet
+               else "Recent chat:")
     out.extend(f"{n}: {t}" for n, t in lines[-15:])
     out.append("")
-    out.append(f"{nick} just said: {text}")
+    if quiet:
+        out.append(
+            "Nobody has spoken for a while. Say ONE line to get the "
+            "conversation going - a question for chat, a hook from your "
+            "trucking life, or an observation. Nothing like your last "
+            "few lines.")
+    else:
+        out.append(f"{nick} just said: {text}")
     out.append("")
     out.append("Your line:")
     return "\n".join(out)
@@ -124,20 +133,24 @@ def declined(raw: str) -> bool:
 
 def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
                  kind: str | None, roll: float, chance: float,
-                 now: float, last: float, mention_cd: float,
-                 chime_cd: float, times: list, max_hour: int,
-                 buffer_len: int, min_chat: int) -> bool:
+                 now: float, last: float, mention_last: float,
+                 mention_cd: float, chime_cd: float, times: list,
+                 max_hour: int, buffer_len: int, min_chat: int) -> bool:
     """May the bot speak right now? Pure, so every gate is testable.
 
     Mention replies are cheap (someone addressed the bot by name) and only
-    wait out the short cooldown. Chime-ins are the bot's own initiative:
-    they must win the probability roll, the room must have enough chatter
-    to be worth joining, and they wait out the long cooldown.
+    wait out the short cooldown, on their OWN clock: a quiet-room opener
+    followed five seconds later by a human answering the bot is exactly
+    the conversation the feature exists for, and sharing one clock with
+    the openers used to mute it for a minute. Chime-ins are the bot's own
+    initiative: they must win the probability roll, the room must have
+    enough chatter to be worth joining, and they wait out the long
+    cooldown.
     """
     if not enabled or paused or ambient_off or kind is None:
         return False
     if kind == MENTION:
-        if now - last < mention_cd:
+        if now - mention_last < mention_cd:
             return False
     else:
         if roll >= chance:
