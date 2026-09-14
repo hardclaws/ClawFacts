@@ -2342,6 +2342,124 @@ def test_a_contentless_answer_is_not_posted():
     print("[PASS] a contentless answer is retried, then refused")
 
 
+def test_the_fact_path_cannot_answer_a_promise():
+    """The promise came back even after the answer gate: a search snippet
+    ("The longest road train in history still holds the world record.")
+    passes every FACT filter, so the fact path served it and the question
+    path - the only place with the contentless gate - never ran. A
+    contentless pool for a specific question is now no pool at all."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": []}}
+            return {"query": {"pages": []}}
+        return {
+            "AbstractText": "The longest road train in history still holds "
+                            "the world record.",
+            "Heading": "", "Answer": "",
+            "RelatedTopics": [{"Text":
+                "meet the world's longest truck \u2026 a 175-foot road "
+                "train powered by over 1,000 horsepower."}],
+        }
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        seen_by_model = []
+
+        def model(q, src, cfg):
+            seen_by_model.extend(src)
+            return ("A 175-foot road train powered by over 1,000 "
+                    "horsepower.")
+        llm.answer_question = model
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k", "max_fact_chars": 200})
+        assert got and got["fact"], got
+        assert "world record" not in got["fact"], got["fact"]
+        assert "175-foot" in got["fact"], got["fact"]
+        assert "\u2026" not in got["fact"] and "meet" not in \
+            got["fact"].lower(), got["fact"]
+        # the ugly teaser still reached the model as a SOURCE - its numbers
+        # are exactly what grounds the answer - but it never posts as-is.
+        assert any("175-foot" in s for s in seen_by_model), seen_by_model
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the fact path cannot answer a specific question with a "
+          "promise")
+
+
+def test_the_dig_finds_records_the_question_does_not_name():
+    """The deep dig only took sentences sharing the question's words - but
+    the sentence that answers "longest truck" says "pulled 113 trailers",
+    not "truck" or "longest", so the model was still answering from web
+    teasers. Dated, record-styled sentences are dug up too now."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "Road train"}]}}
+            if params.get("exchars"):
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train is a trucking vehicle used to move "
+                    "freight."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train is a trucking vehicle used to move freight. "
+                "In 2006 a driver pulled 113 trailers for 1,235 metres, "
+                "which still stands as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        seen_by_model = []
+
+        def model(q, src, cfg):
+            seen_by_model.extend(src)
+            return ("In 2006 a driver pulled 113 trailers for 1,235 "
+                    "metres, which still stands as the record.")
+        llm.answer_question = model
+        got = funfacts._answer_question(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k"}, 200)
+        assert got and "1,235" in got["facts"][0], got
+        assert any("1,235" in s for s in seen_by_model), seen_by_model
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the dig finds records the question does not name")
+
+
+def test_teasers_and_splices_never_post():
+    """"meet the world's longest truck \u2026 a 175-foot road train powered
+    by over 1,000 horsepower." posted as an answer: lowercase, spliced by an
+    interior ellipsis, and pitched like an advert. Facts and answers start
+    with a capital and read as one sentence; sources may stay ugly, because
+    the model rephrases them and their numbers are what grounds the
+    answer."""
+    teaser = ("meet the world's longest truck \u2026 a 175-foot road train "
+              "powered by over 1,000 horsepower.")
+    assert funfacts._is_fragment(teaser)
+    assert not funfacts._ranked_facts([teaser], subject="longest truck")
+    assert not funfacts._ranked_facts(
+        ["Meet the world's longest truck, a 175-foot road train."],
+        subject="longest truck")            # capitalised pitch, same fate
+    assert funfacts._is_fragment(
+        "He pulled 113 trailers \u2026 for 1,235 metres.")  # spliced
+    assert not funfacts._is_fragment(
+        "eBay is an online marketplace.")    # brands keep a lowercase start
+    print("[PASS] teasers and splices never post")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2661,6 +2779,9 @@ def main():
     test_uk_constituent_countries_strip_as_regions()
     test_the_question_path_digs_past_the_lead()
     test_a_contentless_answer_is_not_posted()
+    test_the_fact_path_cannot_answer_a_promise()
+    test_the_dig_finds_records_the_question_does_not_name()
+    test_teasers_and_splices_never_post()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

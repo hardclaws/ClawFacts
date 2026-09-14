@@ -628,6 +628,25 @@ def main() -> int:
         return "nothing specific" in inspect.getsource(
             funfacts._answer_question)
 
+    def _funfact_no_promises_or_teasers():
+        """The promise returned via the fact path (a snippet passes every
+        fact filter, so the gated question path never ran), and the retry
+        produced a scraped teaser ('meet the world's longest truck ...').
+        A contentless pool for a specific question is no pool, and teasers
+        never post - though they may feed the model as sources."""
+        teaser = ("meet the world's longest truck \u2026 a 175-foot road "
+                  "train powered by over 1,000 horsepower.")
+        if not funfacts._is_fragment(teaser):
+            return False
+        if funfacts._is_fragment("eBay is an online marketplace."):
+            return False
+        if not funfacts._TEASE.match("Meet the world's longest truck."):
+            return False
+        import inspect
+        if "contentless" not in inspect.getsource(funfacts.get_funfact):
+            return False
+        return "_STRONG" in inspect.getsource(funfacts._question_sources)
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1036,6 +1055,8 @@ def main() -> int:
          _lead_moderators_are_moderators()),
         ("funfact specific questions get specific answers",
          _funfact_specific_answers()),
+        ("funfact posts neither promises nor teasers",
+         _funfact_no_promises_or_teasers()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

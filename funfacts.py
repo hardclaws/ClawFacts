@@ -310,6 +310,15 @@ _CONCEPT_DEF = re.compile(
 )
 
 
+#: Marketing openers - "meet the world's longest truck", "check out the
+#: ...". A scraped pitch for an article, never a fact. Rejected as a FACT
+#: and as an ANSWER, but NOT as a source: the teaser often carries the very
+#: numbers the model needs, and the answer it writes from them is clean.
+_TEASE = re.compile(
+    r"^(?:meet|check out|look no further|introducing|behold)\b",
+    re.IGNORECASE)
+
+
 def _is_dangling(sentence: str) -> bool:
     """True when the sentence leans on the paragraph it was cut from."""
     return bool(_DANGLE_START.match(sentence) or _ANAPHOR.search(sentence))
@@ -328,6 +337,13 @@ def _is_fragment(sentence: str) -> bool:
         # A list item cut out of a bulleted list. Never a sentence.
         return True
     if t.endswith("?"):
+        return True
+    # "meet the world's longest truck \u2026 a 175-foot road train" - a
+    # scraped teaser. Prose starts with a capital (brands like eBay keep an
+    # internal capital) and does not stop halfway through to resume.
+    if re.match(r"^[a-z]", t) and not re.match(r"[a-z]+[A-Z]", t):
+        return True
+    if re.search(r"\s(?:\u2026|\.\.\.)\s", t):
         return True
     # Title Case In Every Content Word is a heading, not a sentence:
     # "North Yorkshire Historic Sites" is a listicle's section name, and it
@@ -842,7 +858,7 @@ def _ranked_facts(sentences: list, spice: bool = False,
         # "it is located near..." line, SEO boilerplate or a namesake person.
         if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
                 or _LOCATION_ONLY.match(s) or _is_dangling(s)
-                or _is_fragment(s) or _is_boring(s)):
+                or _is_fragment(s) or _is_boring(s) or _TEASE.match(s)):
             continue
         # Search snippets have no title gate: unlike the Wikipedia path, which
         # picks an article by title first, whatever the engine returned is the
@@ -2884,8 +2900,15 @@ def _question_sources(question: str, options: dict) -> list:
                 sentence = " ".join(sentence.split())
                 if not sentence or sentence.lower() in seen:
                     continue
-                if (_is_junk_seed(sentence) or _is_dangling(sentence)
-                        or _is_fragment(sentence) or _is_boring(sentence)):
+                # A source is grist, not a message: it must be a sentence
+                # ending in a period (a page title ending in '?' is not
+                # one), but it may be lowercase, spliced or teaser-shaped -
+                # the model rephrases it, the answer filter does the
+                # presenting, and killing an ugly source here is how the
+                # numbers in it disappear from under a grounded answer.
+                if (len(sentence) < 12 or not re.search(r"[.!]$", sentence)
+                        or _is_junk_seed(sentence) or _is_dangling(sentence)
+                        or _is_boring(sentence)):
                     continue
                 seen.add(sentence.lower())
                 out.append(sentence)
@@ -2943,9 +2966,19 @@ def _question_sources(question: str, options: dict) -> list:
         if deep:
             qwords = {w for w in re.split(r"[^a-z0-9]+", _fold(question))
                       if len(w) >= 4}
+            # Question words first, but the sentence that answers "longest
+            # truck" may share none of them - the records say "pulled 113
+            # trailers", not "truck" or "longest". A dated, record-styled
+            # sentence is question-relevant too. Best lines first, capped:
+            # the model reads only the first few sources.
+            picked = []
             for s in _sentences(deep):
                 if any(w in _fold(s) for w in qwords):
-                    take([s])
+                    picked.append((2, s))
+                elif _DIGIT.search(s) and _STRONG.search(s):
+                    picked.append((1, s))
+            for _rank, s in sorted(picked, key=lambda p: -p[0])[:6]:
+                take([s])
         for hit in hits:
             take([hit.get("extract") or ""])
 
@@ -3042,7 +3075,8 @@ def _answer_question(question: str, opts: dict, limit: int):
                 continue
             if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
                 continue
-            if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
+            if (_is_dangling(ln) or _is_fragment(ln) or _is_boring(ln)
+                    or _TEASE.match(ln)):
                 continue
             # "It is entirely psychological if you think a photo of you
             # looks far worse than your reflection." The pronoun's
@@ -3120,6 +3154,19 @@ def get_funfact(location: str, options=None):
                 result = _lookup_all(location.strip(), opts, spicy, limit)
         if result is None:
             result = _lookup_all(location.strip(), opts, spicy, limit)
+        # A specific question must not be answered by the fact path with a
+        # promise either: a search snippet ("The longest road train in
+        # history still holds the world record.") passes every fact filter,
+        # and with facts in hand the question path below never runs. A
+        # contentless pool is no pool - let the question path answer.
+        if (result and result.get("facts")
+                and _SPECIFIC_Q.search(location)
+                and not any(_DIGIT.search(f) or _CAP_MID.search(f, 1)
+                            for f in result["facts"])):
+            print("[funfacts] the fact path found only contentless lines "
+                  "for a specific question - answering it properly",
+                  flush=True)
+            result = None
         # 4. Not a place and not a thing with an article - a question. Answer
         #    it from the search results, grounded in them, rather than saying
         #    nothing. Skipped in spicy mode, which has its own path.
