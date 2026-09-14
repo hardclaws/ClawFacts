@@ -35,6 +35,7 @@
     "doc",
     "docbot"
   ],
+  "_chat_ai_names": "Words that address the bot in chat and get a reply. The bot's own nick (the \"nick\" field above) is ALWAYS a trigger too, automatically - with nick \"TruckingWithDocBot\", typing TruckingWithDocBot, doc or docbot all work. Matching is on word boundaries and case-insensitive, so 'doc' does not fire inside 'dockyard'.",
   "bot_personality": "",
   "memory_db_path": "chat_memory.db",
   "_memory_db": "The chat AI's memory (one SQLite file). While chat_ai_enabled is true, chat is logged (pruned after 90 days) and the bot distills durable per-viewer facts after it talks - work, pets, hobbies, plans, preferences. Health, politics, religion, finances and anything intimate are never kept. A moderator can erase a viewer entirely with !forget <viewer>.",
