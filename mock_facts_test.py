@@ -2460,6 +2460,43 @@ def test_teasers_and_splices_never_post():
     print("[PASS] teasers and splices never post")
 
 
+def test_record_claims_and_glued_lists_never_post():
+    """Round three of the longest-truck question. The promise STILL posted:
+    the pool held the promise plus a dated record, so the pool-level gate
+    was satisfied, and the promise outranked the real record 13 points to 6
+    ("longest", "world" and "record" are all strong words). A record claim
+    with no figure and no name in it is junk in its own right now. And the
+    retry produced "World's longest road trains \u00b7 In 1989, ... \u00b7
+    In 1993, ..." - a section heading and list items glued by middots,
+    which also blocked sentence splitting."""
+    promise = ("The longest road train in history still holds the world "
+               "record.")
+    buddo = ("In 1989, a trucker named \"Buddo\" tugged 12 trailers down "
+             "the main street of Winton.")
+    assert funfacts._is_contentless_claim(promise)
+    assert not funfacts._is_contentless_claim(buddo)      # digit + name
+    assert not funfacts._is_contentless_claim(
+        "His record still stands in Winton.")             # named
+    assert not funfacts._ranked_facts([promise], subject="longest truck")
+    # With the promise gone, the real record leads the pool.
+    assert funfacts._ranked_facts([promise, buddo],
+                                  subject="longest truck")[0] == buddo
+    # A middot-joined blob splits into its parts; the heading dies as a
+    # fragment, the records survive, and no line carries the glue.
+    glued = ("World's longest road trains \u00b7 In 1989, a trucker named "
+             "\"Buddo\" tugged 12 trailers down the main street of Winton. "
+             "\u00b7 In 1993, \"Plugger\" Bowden took the record.")
+    sents = funfacts._sentences(glued)
+    assert len(sents) >= 2, sents
+    assert not any("\u00b7" in s for s in sents), sents
+    assert any("Buddo" in s for s in sents), sents
+    assert not funfacts._ranked_facts(sents, subject="longest truck") or \
+        all("World's longest road trains" != f for f in
+            funfacts._ranked_facts(sents, subject="longest truck"))
+    print("[PASS] record claims without figures are junk; middot glue "
+          "splits")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2782,6 +2819,7 @@ def main():
     test_the_fact_path_cannot_answer_a_promise()
     test_the_dig_finds_records_the_question_does_not_name()
     test_teasers_and_splices_never_post()
+    test_record_claims_and_glued_lists_never_post()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

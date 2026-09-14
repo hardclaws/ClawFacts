@@ -310,6 +310,25 @@ _CONCEPT_DEF = re.compile(
 )
 
 
+#: A sentence that claims a record exists without stating it: "The longest
+#: road train in history still holds the world record." It outscores the
+#: real record every time - "longest", "world" and "record" are all strong
+#: words - so it won the pool and posted, teasing an answer instead of being
+#: one. With a digit or a name in it, the same claim is a real fact
+#: ("In 1993, \"Plugger\" Bowden took the record.").
+_RECORD_CLAIM = re.compile(
+    r"\b(?:world record|holds? the record|held the record|still holds?|"
+    r"stands? as the record|record for|took the record|set the record|"
+    r"broke the record|record still)\b", re.IGNORECASE)
+
+
+def _is_contentless_claim(sentence: str) -> bool:
+    """True for a record claim with no figure and no name in it."""
+    if not _RECORD_CLAIM.search(sentence):
+        return False
+    return not (_DIGIT.search(sentence) or _CAP_MID.search(sentence, 1))
+
+
 #: Marketing openers - "meet the world's longest truck", "check out the
 #: ...". A scraped pitch for an article, never a fact. Rejected as a FACT
 #: and as an ANSWER, but NOT as a source: the teaser often carries the very
@@ -574,10 +593,17 @@ def _sentences(text: str) -> list:
         # Skip short, punctuation-free lines (Wikipedia section headings).
         if not re.search(r"[.!?]", para) and len(para) < 45:
             continue
-        for s in _sentence_split(para):
-            s = _tidy_sentence(s)
-            if len(s) >= 12 and not _COORD.match(s) and not _BIO.match(s):
-                out.append(s)
+        # "World's longest road trains · In 1989, ... · In 1993, ..."
+        # A spaced middot is a list join, and it BLOCKS sentence splitting
+        # (the split needs ". capital", not ". · capital") - so a heading
+        # and two records arrived as one glued blob. Split on the join
+        # first: the heading dies as a fragment, the records live.
+        for chunk in re.split(r"\s+[·•]\s+", para):
+            for s in _sentence_split(chunk):
+                s = _tidy_sentence(s)
+                if len(s) >= 12 and not _COORD.match(s) \
+                        and not _BIO.match(s):
+                    out.append(s)
     return out
 
 
@@ -858,7 +884,8 @@ def _ranked_facts(sentences: list, spice: bool = False,
         # "it is located near..." line, SEO boilerplate or a namesake person.
         if (_is_filler(s) or _is_junk_seed(s) or _is_person_stub(s)
                 or _LOCATION_ONLY.match(s) or _is_dangling(s)
-                or _is_fragment(s) or _is_boring(s) or _TEASE.match(s)):
+                or _is_fragment(s) or _is_boring(s) or _TEASE.match(s)
+                or _is_contentless_claim(s)):
             continue
         # Search snippets have no title gate: unlike the Wikipedia path, which
         # picks an article by title first, whatever the engine returned is the
@@ -3076,7 +3103,8 @@ def _answer_question(question: str, opts: dict, limit: int):
             if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
                 continue
             if (_is_dangling(ln) or _is_fragment(ln) or _is_boring(ln)
-                    or _TEASE.match(ln)):
+                    or _TEASE.match(ln) or _is_contentless_claim(ln)
+                    or re.search(r"\s[·•]\s", ln)):
                 continue
             # "It is entirely psychological if you think a photo of you
             # looks far worse than your reflection." The pronoun's

@@ -647,6 +647,29 @@ def main() -> int:
             return False
         return "_STRONG" in inspect.getsource(funfacts._question_sources)
 
+    def _funfact_record_claims_split():
+        """The promise outscored the real record 13 to 6 and posted even
+        with a dated line in the pool, and the retry posted a heading and
+        two list items glued by middots. A figureless record claim is junk
+        in its own right, and middot joins are split like sentences."""
+        promise = ("The longest road train in history still holds the "
+                   "world record.")
+        if not funfacts._is_contentless_claim(promise):
+            return False
+        if funfacts._ranked_facts([promise], subject="longest truck"):
+            return False
+        buddo = ("In 1989, a trucker named \"Buddo\" tugged 12 trailers "
+                 "down the main street of Winton.")
+        if funfacts._is_contentless_claim(buddo):
+            return False
+        glued = ("World's longest road trains \u00b7 In 1989, Buddo tugged "
+                 "12 trailers down the main street of Winton. \u00b7 In "
+                 "1993, Plugger Bowden took the record.")
+        sents = funfacts._sentences(glued)
+        if len(sents) < 2 or any("\u00b7" in s for s in sents):
+            return False
+        return True
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1057,6 +1080,8 @@ def main() -> int:
          _funfact_specific_answers()),
         ("funfact posts neither promises nor teasers",
          _funfact_no_promises_or_teasers()),
+        ("funfact record claims need figures; middot glue splits",
+         _funfact_record_claims_split()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",
