@@ -806,6 +806,14 @@ def main() -> int:
             return False
         if "_reply_ask" not in _bot_src:
             return False
+        # !ask is a core command, enqueued like !funfact whatever the
+        # chat-AI and fun-command switches say.
+        if 'command in ("funfact", "ask")' not in _bot_src:
+            return False
+        # ...and its answers never record memory while the AI is off.
+        _distill_src = _bot_src.split("def _distill")[1].split("def ")[0]
+        if "chat_ai_enabled" not in _distill_src:
+            return False
         return '"chime"' in _bot_src
 
     def _chat_ai_remembers_and_forgets():

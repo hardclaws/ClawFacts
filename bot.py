@@ -830,7 +830,10 @@ class TwitchBot:
             return
 
         extras_enabled = bool(self.cfg.get("fun_commands", True))
-        if command == "funfact" or command in HELP_COMMANDS \
+        # !ask is a core command like !funfact and !whois: always available,
+        # whatever fun_commands or chat_ai_enabled are set to. Without an LLM
+        # it answers from the fact engine, so it is never a paid-only command.
+        if command in ("funfact", "ask") or command in HELP_COMMANDS \
                 or command in WHOIS_COMMANDS \
                 or command in TWITCH_COMMANDS:
             pass
@@ -2031,6 +2034,8 @@ class TwitchBot:
         it only runs after a chime or an !ask, both already throttled.
         """
         import llm as llm_mod
+        if not self.cfg.get("chat_ai_enabled", False):
+            return              # !ask works with the AI off; memory does not
         if not self._memory.ok or not llm_mod.is_configured(self._opts):
             return
         theirs = [(n, t) for n, t in lines if (n or "").lower()
@@ -2098,8 +2103,8 @@ class TwitchBot:
             f"{prefix}riddle - a riddle; the answer follows shortly",
             f"{prefix}wyr - a would-you-rather",
             f"{prefix}haul - what the truck is hauling right now",
-            f"{prefix}ask anything - the bot answers, in its own voice"
-            if self.cfg.get("chat_ai_enabled", False) else None,
+            f"{prefix}ask anything - the bot answers, in its own voice "
+            "(or with a real fact)",
             f"{prefix}whois <name> - who that person is",
             f"{prefix}twitch <name> - who that Twitch channel is",
             f"{prefix}cb - the bot talks on the radio, or yells at a car"

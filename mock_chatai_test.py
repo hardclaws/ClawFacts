@@ -42,11 +42,15 @@ def _bot(**over):
 
 
 def _drain(b):
-    """Route chime jobs the way the worker thread would."""
+    """Route chime and ask jobs the way the worker thread would."""
     while not b._jobs.empty():
         nick, login, badges, command, argument = b._jobs.get()
         if command == "chime":
             b._do_chime(nick, argument)
+        elif command == "ask":
+            b._reply_ask(nick, argument)
+        elif command == "say":
+            b._say(argument)
 
 
 def test_a_mention_gets_one_bounded_reply():
@@ -352,6 +356,54 @@ def test_the_quiet_room_gets_a_conversation_opener():
     print("[PASS] a quiet room gets a conversation opener, bounded")
 
 
+def test_ask_is_a_command_not_a_feature():
+    """!ask is wired like !funfact and !whois: enqueued from _on_message
+    whatever chat_ai_enabled and fun_commands say, in the help whatever
+    the config says - and it answers with the fact engine when no LLM is
+    configured. The regression this pins: !ask was once fully built but
+    never in the classifier, so live chat silently dropped it."""
+    b = _bot(chat_ai_enabled=False, fun_commands=False, llm_api_key="")
+    orig_fact = bot_mod.get_funfact
+    try:
+        bot_mod.get_funfact = lambda q, o: {
+            "place": "Road train",
+            "fact": "A driver pulled 113 trailers for 1,235 metres."}
+        b._on_message("kvack", "#t",
+                      "!ask whats the longest truck in the world",
+                      "kvack", "")
+        assert not b._jobs.empty(), "!ask was not enqueued"
+        _drain(b)
+        assert b.said and "113 trailers" in b.said[0], b.said
+        b._say_help("kvack", "")
+        _drain(b)
+        assert any("ask anything" in s for s in b.said), b.said
+    finally:
+        bot_mod.get_funfact = orig_fact
+
+    # With an LLM configured it answers in persona even with the chat AI
+    # off - a command, like !funfact using the LLM writer - but records
+    # NOTHING: no logged lines, no distilled facts.
+    b2 = _bot(chat_ai_enabled=False, llm_api_key="k")
+    orig_reply = llm.chat_reply
+    try:
+        llm.chat_reply = lambda s, u, c: (
+            "Road trains. I have opinions, none of them printable.")
+        b2._on_message("hollieburgin", "#t", "!ask best truck?",
+                       "hollieburgin", "")
+        _drain(b2)
+        assert b2.said and b2.said[0].startswith(
+            "@hollieburgin Road trains."), b2.said
+        msgs = b2._memory._db.execute(
+            "SELECT COUNT(*) FROM messages").fetchall()[0][0]
+        mems = b2._memory._db.execute(
+            "SELECT COUNT(*) FROM memories").fetchall()[0][0]
+        assert msgs == 0 and mems == 0, (msgs, mems)
+    finally:
+        llm.chat_reply = orig_reply
+    print("[PASS] !ask is a command: always on, keyless fallback, "
+          "records nothing while the AI is off")
+
+
 def test_nothing_is_recorded_while_the_feature_is_off():
     b = _bot(chat_ai_enabled=False, llm_api_key="")
     orig = llm.chat_reply
@@ -377,6 +429,7 @@ def main():
     test_memory_roundtrip_and_forget()
     test_the_bot_remembers_and_forgets()
     test_the_quiet_room_gets_a_conversation_opener()
+    test_ask_is_a_command_not_a_feature()
     test_nothing_is_recorded_while_the_feature_is_off()
     print("\nALL PASSED \u2714")
     return 0

@@ -224,14 +224,18 @@ keyless APIs and can be disabled with `"fun_commands": false`.
 
 ## The chat AI: !ask, replies and chime-ins
 
-Off by default — flip `"chat_ai_enabled": true` in `config.json` and the
-bot can hold its own in chat. It needs the `llm_*` fields (any provider,
-including local Ollama) for the personality; everything else about it
-works without a key.
+`!ask` itself is a core command like `!funfact` and `!whois`: always
+available, whatever the config says. The autonomous half — replies,
+chime-ins, quiet-room openers, the memory — is off by default; flip
+`"chat_ai_enabled": true` in `config.json` to turn it on. The `llm_*`
+fields (any provider, including local Ollama) supply the personality;
+everything else works without a key.
 
 - **`!ask anything`** — the persona answers. No LLM key configured? The
   ask falls through to the fact engine's question path, which answers
-  real questions from Wikipedia alone.
+  real questions from Wikipedia alone. It is not gated on
+  `chat_ai_enabled` — it is a command, not the chatter — but while the
+  chat AI is off its answers record nothing to memory.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
   so it cannot be wound up like a toy.
