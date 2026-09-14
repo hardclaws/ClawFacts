@@ -216,10 +216,44 @@ Quick-and-dirty local alternatives:
 | `!reminder 60mins …`  | Post a message later. **Moderators only.**                    |
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
+| `!ask anything`       | The bot answers in its own voice (see the chat AI below).     |
 
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
 keyless APIs and can be disabled with `"fun_commands": false`.
+
+## The chat AI: !ask, replies and chime-ins
+
+Off by default — flip `"chat_ai_enabled": true` in `config.json` and the
+bot can hold its own in chat. It needs the `llm_*` fields (any provider,
+including local Ollama) for the personality; everything else about it
+works without a key.
+
+- **`!ask anything`** — the persona answers. No LLM key configured? The
+  ask falls through to the fact engine's question path, which answers
+  real questions from Wikipedia alone.
+- **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
+  the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
+  so it cannot be wound up like a toy.
+- **Chime-ins** — on a busy channel it occasionally adds a line of its
+  own: a moment must win a `chat_ai_chance` roll, the room must have at
+  least `chat_ai_min_chat` recent messages, and `chat_ai_cooldown`
+  seconds must have passed since its last unprompted line. Nothing —
+  mentions included — exceeds `chat_ai_max_hour` lines an hour.
+- **`!cb off`** silences it for the session, like the other chatter.
+
+What it will never do, by prompt *and* by output filter: tease people
+(only topics), post insults, threats or anything creepy, joke about
+illness or grief, state facts it is not sure of (it points at `!funfact`
+instead), guess anything personal about a viewer, or post links,
+@mentions or more than two emoji. A model with nothing worth saying
+replies `NOTHING TO SAY` and the bot stays quiet — a decline still
+starts the cooldown, so it never hammers the API. The streamer's own
+messages never trigger it: he already has the floor.
+
+The voice is `bot_personality` in `config.json` — your words, your
+rules — and the built-in default is Doc: a dry-witted old trucker who
+has been everywhere twice.
 
 ## Where facts come from
 

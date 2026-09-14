@@ -22,6 +22,7 @@ def main() -> int:
     import bot as _bot
     import customcmds as _cc_mod
     import shoutout as _so
+    import llm as _llm2
 
     def _fresh():
         return _cc_mod.CommandSet(
@@ -755,6 +756,53 @@ def main() -> int:
         return "_mine_records" in inspect.getsource(
             funfacts._answer_question)
 
+    def _chat_ai_bounded_and_safe():
+        """The chat AI: !ask with a persona, mention replies, and chime-ins
+        gated by roll, room size, cooldowns and an hourly cap. Off by
+        default, one cleaned line at a time, and the model is told the
+        rules a regex cannot check."""
+        import chatai as _ch
+        import bot as _bot
+        if _bot.DEFAULTS.get("chat_ai_enabled") is not False:
+            return False
+        if not callable(getattr(_llm2, "chat_reply", None)):
+            return False
+        if _ch.clean_line("check config.json for details") is not None:
+            return False
+        if _ch.clean_line("@kvack look at this") is not None:
+            return False
+        if _ch.clean_line("x" * 300) is not None:
+            return False
+        if _ch.clean_line("Graphics are free with the job.") is None:
+            return False
+        if not _ch.declined("NOTHING TO SAY"):
+            return False
+        rules = _ch.system_prompt("")
+        if "NOTHING TO SAY" not in rules or "never people" not in rules:
+            return False
+        # Every gate, one at a time.
+        base = dict(enabled=True, paused=False, ambient_off=False,
+                    kind="mention", roll=0.0, chance=0.25, now=1000.0,
+                    last=0.0, mention_cd=60, chime_cd=600, times=[],
+                    max_hour=6, buffer_len=10, min_chat=5)
+        if not _ch.should_speak(**base):
+            return False
+        for key, value in (("paused", True), ("enabled", False),
+                           ("ambient_off", True), ("kind", None),
+                           ("last", 990.0), ("times", [900.0] * 6)):
+            if _ch.should_speak(**{**base, key: value}):
+                return False
+        chime = {**base, "kind": "chime", "roll": 0.9}
+        if _ch.should_speak(**chime):
+            return False
+        if not _ch.should_speak(**{**chime, "roll": 0.1}):
+            return False
+        if _ch.should_speak(**{**chime, "roll": 0.1, "buffer_len": 2}):
+            return False
+        if "_reply_ask" not in _bot_src:
+            return False
+        return '"chime"' in _bot_src
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1175,6 +1223,8 @@ def main() -> int:
          _funfact_hype_and_demonyms()),
         ("funfact mines the records when the model will not answer",
          _funfact_records_miner()),
+        ("chat AI: !ask + chime-ins, bounded and safe (off by default)",
+         _chat_ai_bounded_and_safe()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

@@ -169,7 +169,8 @@ def _build_body(model: str, user_prompt: str, system: str = None) -> str:
     return json.dumps(body).encode("utf-8")
 
 
-def _request(base: str, key: str, body: bytes) -> str:
+def _request(base: str, key: str, body: bytes,
+             timeout: float = 60.0) -> str:
     headers = {
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
@@ -183,14 +184,48 @@ def _request(base: str, key: str, body: bytes) -> str:
         headers["HTTP-Referer"] = "https://localhost"
         headers["X-Title"] = "TruckingWithDoc FunFact Bot"
     req = urllib.request.Request(base + "/chat/completions", data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8", "replace"))
     return (data["choices"][0]["message"]["content"] or "").strip()
 
 
 def _call(base: str, model: str, key: str, user_prompt: str,
-          system: str = None) -> str:
-    return _request(base, key, _build_body(model, user_prompt, system))
+          system: str = None, timeout: float = 60.0) -> str:
+    return _request(base, key, _build_body(model, user_prompt, system),
+                    timeout=timeout)
+
+
+def chat_reply(system: str, user: str, cfg: dict) -> str | None:
+    """One line of chat personality, or None on any failure.
+
+    The persona's own endpoint: same provider fallbacks and circuit
+    breaker as everything else, but a SHORT timeout - a chime-in that
+    arrives a minute after the moment it was for is worse than silence,
+    and chat will not wait for it.
+    """
+    if not is_configured(cfg) or _unavailable():
+        return None
+    key = (cfg.get("llm_api_key") or "").strip()
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    model = cfg.get("llm_model") or (
+        OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    try:
+        timeout = max(2.0, min(float(cfg.get("chat_ai_timeout") or 8.0),
+                                30.0))
+    except (TypeError, ValueError):
+        timeout = 8.0
+    if cfg.get("debug"):
+        print(f"[llm] POST {base}/chat/completions  model={model} "
+              f"(chat, timeout {timeout}s)", flush=True)
+        print(f"[llm] ---- chat prompt ----\n{user}", flush=True)
+    try:
+        return _call(base, model, key, user, system, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        _disable(exc.code)
+        return None
+    except Exception as exc:
+        print(f"[llm] chat error: {exc!r}", flush=True)
+        return None
 
 
 def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:

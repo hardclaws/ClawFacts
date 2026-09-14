@@ -222,7 +222,8 @@ def test_bad_config_is_reported_plainly():
                     if l.strip().startswith('"_llm_options"')) + 1
     assert f"line {expected}, column 3" in text, text
     # And it must be pointing at a real line of that file, not a guess.
-    assert bad[expected - 1].strip().startswith('"access_control"'), bad[expected - 1]
+    assert bad[expected - 1].strip().startswith('"chat_ai_enabled"'), \
+        bad[expected - 1]
     assert "does not end with a comma" in text, text
     print("[PASS] a broken config.json names the line and stops the restart loop")
 

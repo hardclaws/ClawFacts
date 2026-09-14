@@ -42,6 +42,7 @@ import auth
 import access
 import extras
 import reminders as reminders_mod
+import chatai
 import haul as haul_mod
 import names as names_mod
 import trucker as trucker_mod
@@ -51,6 +52,7 @@ import beefllm
 import shoutout as shoutout_mod
 import customcmds as customcmds_mod
 import whois
+import funfacts
 from funfacts import get_funfact, trim_to_fit
 
 HOST = "irc.chat.twitch.tv"
@@ -158,6 +160,23 @@ DEFAULTS = {
     # The car yelling is the loudest thing the bot does, so it gets its own
     # switch. False leaves the three CB voices and drops the WINDOW one.
     "cb_yell_enabled": True,
+    # The chat AI: an optional persona that answers !ask, replies when
+    # addressed by name, and occasionally chimes in on a busy channel.
+    # OFF by default - flip chat_ai_enabled to let the bot hold its own in
+    # chat. Every line it posts is one short cleaned line, rate-limited:
+    # mention replies wait out chat_ai_mention_cooldown, unprompted
+    # chime-ins must win a chat_ai_chance roll and wait out
+    # chat_ai_cooldown, and nothing exceeds chat_ai_max_hour lines an hour.
+    # !cb off silences it for the session, like the other chatter.
+    "chat_ai_enabled": False,
+    "chat_ai_cooldown": 600,
+    "chat_ai_mention_cooldown": 60,
+    "chat_ai_chance": 0.25,
+    "chat_ai_max_hour": 6,
+    "chat_ai_min_chat": 5,
+    "chat_ai_timeout": 8.0,
+    "chat_ai_names": ["doc", "docbot"],
+    "bot_personality": "",
     # Shout out whoever raids in, and let a moderator trigger one with !so.
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
@@ -367,6 +386,17 @@ class TwitchBot:
         self._beef_seen = beefstats_mod.RecentChatters()
         self._so_lock = threading.Lock()    # one shoutout per raid
         self._so_theme_cache = ("generic", 0.0)   # (theme, valid until)
+        # The chat AI's ear and throttle. The buffer is what the room is
+        # saying (commands and the bot's own lines aside); the timestamps
+        # keep it from ever being the loudest voice in chat.
+        self._chat_buf = []                        # [(nick, text), ...]
+        self._chat_lock = threading.Lock()
+        self._chat_ai_last = 0.0                   # last attempt, any kind
+        self._chat_ai_times = []                   # lines posted, last hour
+        self._chat_ai_names = set(
+            str(n).lower() for n in
+            (cfg.get("chat_ai_names") or ["doc", "docbot"]))
+        self._chat_ai_names.add((self.nick or "").lower())
         self._opts = {                      # passed through to funfacts
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
@@ -459,6 +489,13 @@ class TwitchBot:
                 time.sleep(1.3 - gap)
             self._send(f"PRIVMSG {self.channel} :{text}")
             self._last_say = time.time()
+            # The chat AI hears the bot's own lines, so it can tell what
+            # it has already said and does not repeat itself.
+            with self._chat_lock:
+                self._chat_buf.append((self.nick or "bot",
+                                       " ".join(text.split())[:200]))
+                if len(self._chat_buf) > 60:
+                    del self._chat_buf[:len(self._chat_buf) - 60]
 
     # ---- startup diagnostics -------------------------------------------
     def _note_own_state(self, tags: dict) -> None:
@@ -710,6 +747,18 @@ class TwitchBot:
         # ever decides whether an @-tag would reach somebody - never who gets
         # named in a feud - and it is kept in memory, not in a file.
         self._beef_seen.note(nick)
+        # The chat AI's ear. Runs before the command check: most of what
+        # it should hear is plain chatter, which never starts with the
+        # prefix. Cheap by design - a list append and, rarely, a job.
+        if (nick or "").lower() != (self.nick or "").lower():
+            with self._chat_lock:
+                self._chat_buf.append(
+                    (nick, " ".join((message or "").split())[:200]))
+                if len(self._chat_buf) > 60:
+                    del self._chat_buf[:len(self._chat_buf) - 60]
+            kind = self._chat_ai_kind(nick, badges, message)
+            if kind:
+                self._maybe_chime(nick, login, kind, message)
         prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
@@ -1891,6 +1940,13 @@ class TwitchBot:
                     self._say(argument)
                     continue
 
+                # A bot-initiated chat-AI line: not a viewer command, so
+                # the access gate (per-user cooldowns) does not apply - it
+                # has its own cooldowns, set in _maybe_chime/_do_chime.
+                if command == "chime":
+                    self._do_chime(nick, argument)
+                    continue
+
                 # Every command shares the one per-user schedule: !joke and
                 # !funfact draw on the same budget, so the cheap commands
                 # cannot be used to flood either.
@@ -1905,6 +1961,8 @@ class TwitchBot:
                 if command == "funfact":
                     result = get_funfact(argument, self._opts)
                     self._reply(nick, argument, result)
+                elif command == "ask":
+                    self._reply_ask(nick, argument)
                 elif command in WHOIS_COMMANDS:
                     self._reply_whois(nick, argument)
                 elif command in TWITCH_COMMANDS:
@@ -1926,6 +1984,111 @@ class TwitchBot:
             finally:
                 self._jobs.task_done()
 
+    # ---- the chat AI --------------------------------------------------
+    def _chat_ai_kind(self, nick: str, badges: str, message: str) -> str | None:
+        """What kind of chat-AI moment is this, if any?
+
+        None for everything the bot should let pass: commands, the
+        streamer's own lines (he has the floor), anything explicit, and
+        text too short to be worth a line.
+        """
+        text = (message or "").strip()
+        if len(text) < 3 or text.startswith(self.cfg.get("prefix", "!")):
+            return None
+        if "broadcaster/1" in (badges or ""):
+            return None
+        if funfacts._EXPLICIT.search(text) \
+                or funfacts._TASTELESS.search(text):
+            return None
+        m = chatai.mention_kind(text, self._chat_ai_names)
+        return m or chatai.CHIME
+
+    def _maybe_chime(self, nick: str, login: str, kind: str,
+                     message: str) -> None:
+        """Gate the moment, then hand the composing to a worker.
+
+        The LLM call takes seconds and must never block the read loop; a
+        job does the waiting. Failed attempts bump _chat_ai_last too (in
+        _do_chime), so a declining model cannot be billed in a loop.
+        """
+        with self._chat_lock:
+            buffer_len = len(self._chat_buf)
+        if not chatai.should_speak(
+                enabled=bool(self.cfg.get("chat_ai_enabled", False)),
+                paused=self.paused,
+                ambient_off=self._cb_ambient_off,
+                kind=kind, roll=random.random(),
+                chance=float(self.cfg.get("chat_ai_chance", 0.25)),
+                now=time.time(), last=self._chat_ai_last,
+                mention_cd=float(self.cfg.get(
+                    "chat_ai_mention_cooldown", 60)),
+                chime_cd=float(self.cfg.get("chat_ai_cooldown", 600)),
+                times=self._chat_ai_times,
+                max_hour=int(self.cfg.get("chat_ai_max_hour", 6)),
+                buffer_len=buffer_len,
+                min_chat=int(self.cfg.get("chat_ai_min_chat", 5))):
+            return
+        self._jobs.put((nick, login or (nick or "").lower(), "",
+                        "chime", message))
+
+    def _chat_ai_snapshot(self) -> list:
+        with self._chat_lock:
+            return list(self._chat_buf)
+
+    def _chat_ai_line(self, lines: list, nick: str, text: str):
+        """Compose one cleaned line, or None. Shared by chime and !ask."""
+        import llm as llm_mod
+        persona = self.cfg.get("bot_personality", "") or \
+            chatai.DEFAULT_PERSONA
+        try:
+            raw = llm_mod.chat_reply(
+                chatai.system_prompt(persona),
+                chatai.user_prompt(lines, nick, text), self._opts)
+        except Exception as exc:
+            self._log(f"chat ai error: {exc!r}")
+            return None
+        if chatai.declined(raw):
+            return None
+        return chatai.clean_line(raw)
+
+    def _do_chime(self, nick: str, text: str) -> None:
+        """A bot-initiated line of chat, composed off the read loop."""
+        now = time.time()
+        if now - self._chat_ai_last < float(self.cfg.get(
+                "chat_ai_mention_cooldown", 60)):
+            return                      # the room moved on while we queued
+        line = self._chat_ai_line(self._chat_ai_snapshot(), nick, text)
+        # Failed attempts back off too, or every following message would
+        # pay for another model call.
+        self._chat_ai_last = now
+        if not line:
+            return
+        self._chat_ai_times = [t for t in self._chat_ai_times
+                               if now - t < 3600] + [now]
+        self._say(self._fit(f"@{nick} ", line))
+        self._log(f"chat ai replied to {nick}")
+
+    def _reply_ask(self, nick: str, argument: str) -> None:
+        """!ask <anything> - the persona answers, falling back to facts.
+
+        Without an LLM (or when the persona declines) the fact engine's
+        question path answers instead - it works from Wikipedia alone, so
+        !ask never becomes a paid-only command.
+        """
+        import llm as llm_mod
+        q = (argument or "").strip()
+        if not q:
+            self._say(f"@{nick} ask me anything - a question or a topic.")
+            return
+        if llm_mod.is_configured(self._opts):
+            line = self._chat_ai_line(self._chat_ai_snapshot(), nick, q)
+            if line:
+                self._say(self._fit(f"@{nick} ", line))
+                self._log(f"chat ai answered {nick}")
+                return
+        result = get_funfact(q, self._opts)
+        self._reply(nick, q, result)
+
     def _say_help(self, nick: str, badges: str = "") -> None:
         prefix = self.cfg.get("prefix", "!")
         lines = [
@@ -1937,6 +2100,8 @@ class TwitchBot:
             f"{prefix}riddle - a riddle; the answer follows shortly",
             f"{prefix}wyr - a would-you-rather",
             f"{prefix}haul - what the truck is hauling right now",
+            f"{prefix}ask anything - the bot answers, in its own voice"
+            if self.cfg.get("chat_ai_enabled", False) else None,
             f"{prefix}whois <name> - who that person is",
             f"{prefix}twitch <name> - who that Twitch channel is",
             f"{prefix}cb - the bot talks on the radio, or yells at a car"
