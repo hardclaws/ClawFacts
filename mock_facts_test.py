@@ -2554,6 +2554,81 @@ def test_a_long_fact_is_cut_at_a_clause_never_a_dangler():
     print("[PASS] a long fact is cut at a clause, never a dangler")
 
 
+def test_hype_answers_and_demonyms_do_not_count():
+    """Round five: "Get ready to meet the world's longest truck \u2014 an
+    absolute beast tearing across the wild Australian outback!" The hook
+    word was not at the start (so the teaser filter missed it), and the
+    only capitalised word after the first was "Australian" - a demonym,
+    an adjective of place, which counted as a name. A name is what the
+    question asks for; "Australian outback" is not it."""
+    import llm
+    hype = ("Get ready to meet the world's longest truck \u2014 an "
+            "absolute beast tearing across the wild Australian outback!")
+    assert funfacts._TEASE.match(hype)
+    assert funfacts._PROMO.search(hype)
+    assert not funfacts._has_specific(hype)
+    assert not funfacts._ranked_facts([hype], subject="longest truck")
+    # A place is a name; its adjective is not. Digits always are.
+    assert funfacts._has_specific("The record was set in Australia.")
+    assert not funfacts._has_specific("The Australian record stands.")
+    assert funfacts._has_specific(
+        "In 1989, a trucker named \"Buddo\" tugged 12 trailers.")
+    assert funfacts._is_contentless_claim("The Australian record still "
+                                          "stands.")
+    assert not funfacts._is_contentless_claim(
+        "His record still stands in Winton.")
+    # A model that only produces hype is declined, not indulged.
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: {
+        "AbstractText": "The world's longest truck runs in Australia.",
+        "RelatedTopics": []}
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: hype
+        assert funfacts._answer_question(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k"}, 200) is None, "hype was posted"
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] hype answers are declined; demonyms are not names")
+
+
+def test_the_question_search_tries_simpler_subjects():
+    """The question search used the full subject - "longest truck world
+    transporting goods", six words of question glued together - and
+    Wikipedia finds nothing for it, so the model's only sources were
+    clickbait. The shorter heads of the subject are tried too."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                if params.get("srsearch") == "longest truck":
+                    return {"query": {"search": [
+                        {"title": "Road train"}]}}
+                return {"query": {"search": []}}
+            if params.get("exchars"):
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train is a trucking vehicle."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train is a trucking vehicle. In 2006 a driver "
+                "pulled 113 trailers for 1,235 metres, which still stands "
+                "as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        srcs = funfacts._question_sources(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k"})
+        assert any("1,235" in s for s in srcs), srcs
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] the question search falls back to simpler subjects")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2879,6 +2954,8 @@ def main():
     test_record_claims_and_glued_lists_never_post()
     test_headings_in_sentence_case_and_captions_never_post()
     test_a_long_fact_is_cut_at_a_clause_never_a_dangler()
+    test_hype_answers_and_demonyms_do_not_count()
+    test_the_question_search_tries_simpler_subjects()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

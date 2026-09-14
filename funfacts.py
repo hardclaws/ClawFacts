@@ -314,7 +314,10 @@ _SUPERLATIVE = re.compile(
 _PROMO = re.compile(
     r"\b(?:this|the)\s+(?:mighty|massive|giant|huge|incredible|amazing|"
     r"epic|stunning|jaw-dropping|awe-inspiring|behemoth|colossal|"
-    r"legendary)\s+\w+\b", re.IGNORECASE)
+    r"legendary)\s+\w+\b|"
+    r"\b(?:an?|the)\s+(?:absolute|utter|complete)\s+"
+    r"(?:beast|monster|machine|leviathan|titan|unit)\b",
+    re.IGNORECASE)
 
 #: A sentence that only enumerates rankings. Scores high, because every ordinal
 #: is a strong word, and is the least interesting thing an article can say:
@@ -340,6 +343,40 @@ _CONCEPT_DEF = re.compile(
 )
 
 
+#: Demonyms - "Australian outback", "American truckers". A capitalised
+#: nationality is an adjective of place, not the name of the thing asked
+#: for; counting one as "a name" let "an absolute beast tearing across the
+#: wild Australian outback!" past the contentless gate.
+_DEMONYMS = frozenset((
+    "american", "arab", "asian", "african", "australian", "austrian",
+    "belgian", "brazilian", "british", "canadian", "chinese", "croatian",
+    "cuban", "czech", "danish", "dutch", "egyptian", "english", "european",
+    "finnish", "french", "german", "greek", "hungarian", "indian",
+    "indonesian", "irish", "italian", "japanese", "korean", "mexican",
+    "norwegian", "polish", "portuguese", "queensland", "romanian",
+    "russian", "scottish", "serbian", "spanish", "swedish", "swiss",
+    "tasmanian", "thai", "turkish", "ukrainian", "vietnamese", "welsh",
+))
+
+
+def _has_specific(sentence: str) -> bool:
+    """Does the line carry a concrete specific - a figure, a date, or the
+    NAME of a thing? "What's it called" is the question; "Australian" is
+    not an answer to it. Australia is (a place); Australian is not.
+    """
+    if _DIGIT.search(sentence):
+        return True
+    for pos, cap in ((m.start(), m.group())
+                     for m in re.finditer(r"\b[A-Z][a-z]+", sentence)):
+        if pos == 0:
+            continue                  # capitalised by sentence position
+        w = cap.lower()
+        if w in _DEMONYMS or w[:-1] in _DEMONYMS:
+            continue
+        return True
+    return False
+
+
 #: A sentence that claims a record exists without stating it: "The longest
 #: road train in history still holds the world record." It outscores the
 #: real record every time - "longest", "world" and "record" are all strong
@@ -356,7 +393,7 @@ def _is_contentless_claim(sentence: str) -> bool:
     """True for a record claim with no figure and no name in it."""
     if not _RECORD_CLAIM.search(sentence):
         return False
-    return not (_DIGIT.search(sentence) or _CAP_MID.search(sentence, 1))
+    return not _has_specific(sentence)
 
 
 #: Marketing openers - "meet the world's longest truck", "check out the
@@ -364,7 +401,9 @@ def _is_contentless_claim(sentence: str) -> bool:
 #: and as an ANSWER, but NOT as a source: the teaser often carries the very
 #: numbers the model needs, and the answer it writes from them is clean.
 _TEASE = re.compile(
-    r"^(?:meet|check out|look no further|introducing|behold)\b",
+    r"^(?:get ready|prepare to|buckle up|hold on to your|feast your eyes|"
+    r"you'?re about to|guess what|meet|check out|look no further|"
+    r"introducing|behold)\b",
     re.IGNORECASE)
 
 
@@ -3054,8 +3093,22 @@ def _question_sources(question: str, options: dict) -> list:
     # are fed FIRST: the model reads only the first 8 source lines.
     hits = []
     try:
-        hits = _wiki_search_extracts(_question_subject(question)
-                                     or question, limit=4)
+        subj = _question_subject(question) or question
+        # "longest truck world transporting goods" is six words of question
+        # glued together, and Wikipedia finds nothing for it - which left
+        # the model with clickbait as its only sources. Try the shorter
+        # heads of the subject too ("longest truck"); first variant with
+        # results wins, so this costs nothing when the full subject works.
+        variants = [subj]
+        words = subj.split()
+        if len(words) > 3:
+            variants.append(" ".join(words[:3]))
+        if len(words) > 2:
+            variants.append(" ".join(words[:2]))
+        for v in variants:
+            hits = _wiki_search_extracts(v, limit=4)
+            if hits:
+                break
     except Exception as exc:            # never let a source kill the ladder
         print(f"[funfacts] question wikipedia failed: {exc!r}", flush=True)
     if hits:
@@ -3195,7 +3248,7 @@ def _answer_question(question: str, opts: dict, limit: int):
             # record." No digit, no date, no name outside the sentence's
             # first word - a promise that an answer exists, posted as the
             # answer.
-            if specific and not (_DIGIT.search(ln) or _CAP_MID.search(ln, 1)):
+            if specific and not _has_specific(ln):
                 continue
             fact = _trim(ln, limit)
             if fact:
@@ -3265,8 +3318,7 @@ def get_funfact(location: str, options=None):
         # contentless pool is no pool - let the question path answer.
         if (result and result.get("facts")
                 and _SPECIFIC_Q.search(location)
-                and not any(_DIGIT.search(f) or _CAP_MID.search(f, 1)
-                            for f in result["facts"])):
+                and not any(_has_specific(f) for f in result["facts"])):
             print("[funfacts] the fact path found only contentless lines "
                   "for a specific question - answering it properly",
                   flush=True)
