@@ -841,8 +841,18 @@ def _fit_fact(fact: str, limit: int, opts: dict) -> str:
                 s = s2[0] if s2 else ""
                 if s and len(s) <= limit:
                     return s
+                # These two used to fail silently, and a trimmed fact
+                # posted with no way to tell why from the console.
+                if not s:
+                    print("[funfacts] summarize rejected by grounding - "
+                          "trimming instead", flush=True)
+                else:
+                    print(f"[funfacts] summarize came back {len(s)} chars "
+                          f"(limit {limit}) - trimming instead", flush=True)
         except Exception as exc:
             print(f"[funfacts] llm summarize failed: {exc!r}", flush=True)
+    # No LLM, the LLM is rate-limited (see the [llm] cooldown line), or the
+    # reword did not survive its checks: the clause-boundary trim.
     return _trim(fact, limit)
 
 
