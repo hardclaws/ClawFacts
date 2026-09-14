@@ -611,6 +611,23 @@ def main() -> int:
         return "lead_moderator/1" in inspect.getsource(
             _bot.TwitchBot._note_own_state)
 
+    def _funfact_specific_answers():
+        """The 'longest truck' question was answered with 'The longest road
+        train in history still holds the world record.' - no number, no
+        name, no date, because the records live below the lead cap the
+        model was given. The question path digs into the full article now,
+        and a specific question refuses contentless answers."""
+        import inspect
+        if not funfacts._SPECIFIC_Q.search("what is the longest truck"):
+            return False
+        if funfacts._SPECIFIC_Q.search("what temperature does it stop"):
+            return False
+        if "_wiki_extract" not in inspect.getsource(
+                funfacts._question_sources):
+            return False
+        return "nothing specific" in inspect.getsource(
+            funfacts._answer_question)
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1017,6 +1034,8 @@ def main() -> int:
          _funfact_stories_first()),
         ("lead moderators count as moderators everywhere",
          _lead_moderators_are_moderators()),
+        ("funfact specific questions get specific answers",
+         _funfact_specific_answers()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

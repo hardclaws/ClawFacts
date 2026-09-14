@@ -2249,6 +2249,99 @@ def test_uk_constituent_countries_strip_as_regions():
     print("[PASS] England/Scotland/Wales strip like state names")
 
 
+def test_the_question_path_digs_past_the_lead():
+    """'!funfact what is the longest semi truck with trailer attached' got
+    "The longest road train in history still holds the world record." - a
+    promise, not an answer. The records sit far below the 1200-character
+    lead cap of the batched extract, so the model never saw a number. The
+    top article's full text is fetched now and its question-relevant
+    sentences are fed to the model first."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "Road train"}]}}
+            if params.get("exchars"):            # capped batched extract
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train or land train is a trucking vehicle used "
+                    "to move freight."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train or land train is a trucking vehicle used to "
+                "move freight. In 2006, a driver in Glynde, South Australia "
+                "pulled 113 trailers with a Volvo FH16 for 1,235 metres, "
+                "which still stands as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        reached = []
+
+        def model(q, src, cfg):
+            reached.extend(s for s in src if "1,235" in s)
+            return ("In 2006, a driver in Glynde, South Australia pulled "
+                    "113 trailers with a Volvo FH16 for 1,235 metres.")
+        llm.answer_question = model
+        got = funfacts._answer_question(
+            "what is the longest semi truck with trailer attached",
+            {"llm_api_key": "k"}, 200)
+        assert got and "1,235 metres" in got["facts"][0], got
+        assert reached, "the deep record sentence never reached the model"
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the question path digs past the lead for the records")
+
+
+def test_a_contentless_answer_is_not_posted():
+    """"The longest road train in history still holds the world record."
+    contains no number, no name, no date. For a specific question that is
+    a refusal wearing an answer's clothes: the model is asked once more
+    with the demand made explicit, and if it still has nothing concrete
+    the bot declines rather than posts it."""
+    import llm
+    _DDG = {"AbstractText": "The record for the longest road train was set "
+            "in Australia.", "RelatedTopics": []}
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _DDG
+    llm.is_configured = lambda o: True
+    try:
+        calls = []
+
+        def stubborn(q, src, cfg):
+            calls.append(q)
+            return ("The longest road train in history still holds the "
+                    "world record.")
+        llm.answer_question = stubborn
+        assert funfacts._answer_question(
+            "what is the longest semi truck with trailer attached",
+            {"llm_api_key": "k"}, 200) is None, "a promise was posted"
+        assert len(calls) == 2, calls        # asked once more, then gave up
+
+        calls.clear()
+
+        def cooperative(q, src, cfg):
+            calls.append(q)
+            if len(calls) == 1:
+                return ("The longest road train in history still holds the "
+                        "world record.")
+            return "The record for the longest road train was set in Australia."
+        llm.answer_question = cooperative
+        got = funfacts._answer_question(
+            "what is the longest semi truck with trailer attached",
+            {"llm_api_key": "k"}, 200)
+        assert got and "Australia" in got["facts"][0], got
+        assert len(calls) == 2, calls        # the retry produced the answer
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] a contentless answer is retried, then refused")
+
+
 def test_an_answer_may_not_add_what_the_sources_do_not_say():
     """The whole point of the search step. A plausible number that appears in
     no source is the classic failure, and it reads better than the truth."""
@@ -2566,6 +2659,8 @@ def main():
     test_stories_outrank_sizes_inventory_and_definitions()
     test_a_compound_entity_is_not_the_subject()
     test_uk_constituent_countries_strip_as_regions()
+    test_the_question_path_digs_past_the_lead()
+    test_a_contentless_answer_is_not_posted()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()
     test_no_model_means_no_answer_rather_than_a_guess()

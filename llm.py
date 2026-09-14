@@ -351,6 +351,8 @@ ANSWER_SYSTEM = (
     "- If the sources do not actually answer the question, reply with exactly\n"
     "  NOTHING RELIABLE and nothing else.\n"
     "- Never name a person, channel or thing the sources do not name.\n"
+    "- Give the concrete fact itself - the name, number, date or place the "
+    "sources state - never a statement that the answer exists.\n"
     "- One line, no numbering, no preamble, no 'according to'.\n"
 )
 

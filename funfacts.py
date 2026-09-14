@@ -2843,6 +2843,19 @@ _QSTRIP = frozenset((
 ))
 
 
+#: A question with a superlative or a "how much" has an answer containing a
+#: number, a date or a name. Anything else is a promise that an answer
+#: exists. "What temperature does condensation stop" is deliberately NOT
+#: here: its honest answer names a concept, not a figure.
+_SPECIFIC_Q = re.compile(
+    r"\b(?:longest|shortest|biggest|largest|smallest|tallest|fastest|"
+    r"slowest|oldest|newest|first|last|most|how many|how much|how long|"
+    r"how far|how old|how tall|when|who|which)\b", re.IGNORECASE)
+#: A capitalised word after the first is a proper noun; a digit is a figure.
+_CAP_MID = re.compile(r"\b[A-Z][a-z]{2,}\b")
+_DIGIT = re.compile(r"\d")
+
+
 def _question_subject(question: str) -> str:
     """The searchable core of a free-form question.
 
@@ -2906,12 +2919,35 @@ def _question_sources(question: str, options: dict) -> list:
     # words that are not "whats/the/best/and why") and feed the model the
     # extracts. This is the step that makes "whats the best usa trucking
     # route and why" answerable at all.
+    #
+    # The records that answer a "longest/biggest/oldest" question live DEEP
+    # in the article, far below the 1200-character lead cap of the batched
+    # extract. The model was handed an article whose Records section it
+    # could not see, and answered "The longest road train in history still
+    # holds the world record." - a promise with no number in it. So the top
+    # hit's full text is fetched too, and its question-relevant sentences
+    # are fed FIRST: the model reads only the first 8 source lines.
+    hits = []
     try:
-        for hit in _wiki_search_extracts(_question_subject(question)
-                                         or question, limit=4):
-            take([hit.get("extract") or ""])
+        hits = _wiki_search_extracts(_question_subject(question)
+                                     or question, limit=4)
     except Exception as exc:            # never let a source kill the ladder
         print(f"[funfacts] question wikipedia failed: {exc!r}", flush=True)
+    if hits:
+        deep = ""
+        try:
+            deep = _wiki_extract(hits[0]["title"], exchars=0)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+                ValueError):
+            deep = ""
+        if deep:
+            qwords = {w for w in re.split(r"[^a-z0-9]+", _fold(question))
+                      if len(w) >= 4}
+            for s in _sentences(deep):
+                if any(w in _fold(s) for w in qwords):
+                    take([s])
+        for hit in hits:
+            take([hit.get("extract") or ""])
 
     try:
         data = _http_get_json(DDG_API, {"q": question, "format": "json",
@@ -2971,42 +3007,66 @@ def _answer_question(question: str, opts: dict, limit: int):
         print(f"[funfacts] no usable source lines for the question: "
               f"{question[:60]}", flush=True)
         return None
-    try:
-        text = llm.answer_question(question, sources, opts)
-    except Exception as exc:
-        print(f"[funfacts] answer error: {exc!r}", flush=True)
-        return None
-    if not text:
-        print("[funfacts] the LLM returned nothing - check the [llm] lines "
-              "above for a rejected key (401/403) or no credits (402).",
-              flush=True)
-        return None
-    if "NOTHING RELIABLE" in text.upper():
-        print(f"[funfacts] the model declined to answer from its sources: "
-              f"{question[:60]}", flush=True)
-        return None
+    # A specific question ("longest...", "how many...") deserves a specific
+    # answer: a number, a date or a name. If the first attempt is a promise
+    # with none of those, ask once more with the demand made explicit; if
+    # the model still has nothing concrete, decline rather than post it.
+    specific = bool(_SPECIFIC_Q.search(question))
+    attempts = [question]
+    if specific:
+        attempts.append(question + " Answer with the specific name, number "
+                        "or date the sources give - not a statement that "
+                        "the answer exists.")
     lines = []
-    for ln in text.splitlines():
-        ln = ln.strip().strip('"\u201c\u201d')
-        ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
-        ln = ln.replace("**", "").replace("`", "").strip()
-        if not ln or _META_LINE.match(ln):
-            continue
-        if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
-            continue
-        if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
-            continue
-        # "It is entirely psychological if you think a photo of you looks
-        # far worse than your reflection." The pronoun's antecedent was the
-        # question, and the question is gone from the room by the time the
-        # answer posts. An answer names the thing or is not posted.
-        if re.match(r"^(?:it|they|he|she)\b", ln, re.IGNORECASE):
-            continue
-        if _is_echo(ln, question):
-            continue
-        fact = _trim(ln, limit)
-        if fact:
-            lines.append(fact)
+    for i, attempt in enumerate(attempts):
+        try:
+            text = llm.answer_question(attempt, sources, opts)
+        except Exception as exc:
+            print(f"[funfacts] answer error: {exc!r}", flush=True)
+            return None
+        if not text:
+            print("[funfacts] the LLM returned nothing - check the [llm] "
+                  "lines above for a rejected key (401/403) or no credits "
+                  "(402).", flush=True)
+            return None
+        if "NOTHING RELIABLE" in text.upper():
+            print(f"[funfacts] the model declined to answer from its "
+                  f"sources: {question[:60]}", flush=True)
+            return None
+        lines = []
+        for ln in text.splitlines():
+            ln = ln.strip().strip('"\u201c\u201d')
+            ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
+            ln = ln.replace("**", "").replace("`", "").strip()
+            if not ln or _META_LINE.match(ln):
+                continue
+            if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
+                continue
+            if _is_dangling(ln) or _is_fragment(ln) or _is_boring(ln):
+                continue
+            # "It is entirely psychological if you think a photo of you
+            # looks far worse than your reflection." The pronoun's
+            # antecedent was the question, and the question is gone from
+            # the room by the time the answer posts. An answer names the
+            # thing or is not posted.
+            if re.match(r"^(?:it|they|he|she)\b", ln, re.IGNORECASE):
+                continue
+            if _is_echo(ln, question):
+                continue
+            # "The longest road train in history still holds the world
+            # record." No digit, no date, no name outside the sentence's
+            # first word - a promise that an answer exists, posted as the
+            # answer.
+            if specific and not (_DIGIT.search(ln) or _CAP_MID.search(ln, 1)):
+                continue
+            fact = _trim(ln, limit)
+            if fact:
+                lines.append(fact)
+        if lines:
+            break
+        if specific and i == 0:
+            print("[funfacts] the answer named nothing specific - asking "
+                  "once more", flush=True)
     # Grounded against the very text the model was given: no year, proper
     # noun or claim appears in the answer unless it appeared in a source.
     lines = _grounded_filter(lines, question, question, sources,
