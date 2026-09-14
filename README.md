@@ -905,36 +905,14 @@ So every game has a live source and a floor:
 
 ### Waking up a quiet channel
 
-Ten minutes with nobody saying anything, and the bot posts one of the five
-entertainment commands at random to give chat something to react to:
-
-```
-[04:12:31] chat idle for 600s - posting !smk
-ShagMarryKill [male] | Harrison Ford (actor), Viggo Mortensen (actor), Pedro Pascal (actor) - shag one, marry one, kill one.
-```
-
-```json
-"idle_chat_enabled": true,
-"idle_chat_minutes": 10,
-"idle_chat_commands": ["smk", "riddle", "joke", "randomfact", "wyr"]
-```
-
-Anything **anyone** says resets the clock — not just commands, and not just
-messages the bot acts on. The clock also resets after each post, so it is one
-per quiet window rather than one every time the checker wakes up.
-
-**It only fires while the channel is actually streaming.** A bot posting jokes
-into an offline room every ten minutes is not a feature; it is a channel that
-looks broken when the streamer comes back. The live check uses
-`GET /helix/streams`, which needs no scope, so the token the bot already holds
-is enough — no extra `--login`.
-
-Where the check cannot be settled (no token, no `client_id`, Twitch
-unreachable) it posts anyway. A missed check must not silently switch the
-feature off, and "unknown" is not the same as "offline".
-
-`!bot off` silences it, as does `"fun_commands": false`. An `!riddle` posted
-this way still reveals its answer on the timer.
+The old idle poster (ten minutes of silence, then a random `!smk` or
+`!joke`) is gone. The chat AI owns the quiet moments now: after
+`chat_ai_quiet_seconds` of silence Doc opens the conversation himself —
+a question for chat, a hook from his trucking life. See
+[The chat AI](#the-chat-ai-ask-replies-and-chime-ins). Like the old
+poster, openers only fire while the channel is actually streaming
+(scope-free `GET /helix/streams`); where the check cannot be settled
+they fire anyway — unknown is not offline.
 
 ### Rewrites cannot add character
 
@@ -1295,8 +1273,8 @@ needed.
 
 ## Truck talk on the radio
 
-The bot can mutter to itself on the CB while you stream. Three voices, picked
-at random each time so chat cannot learn the tone either:
+`!cb` makes the bot talk on the radio, on demand. Three voices, picked at
+random each time so chat cannot learn the tone either:
 
 Every line is prefixed with which mode the bot is in, so it is never ambiguous
 whether this is radio traffic or somebody hanging out of the window at a car:
@@ -1360,28 +1338,20 @@ disappears from `!help`.
 file:
 
 ```
-!cb off      - silence the random chatter (mods and broadcaster only)
+!cb off      - silence the bot's own chatter (mods and broadcaster only)
 !cb on       - bring it back
 !cb status   - which state it is in
 ```
 
-`!cb off` lasts until the next restart; `cb_chatter_enabled` in config.json is
-the permanent setting. That is the same split `!bot off` uses. A viewer who
-types `!cb off` gets no answer at all, so the switch cannot become a spam
-vector — and unlike `!bot off`, it does not silence anything else.
+`!cb off` lasts until the next restart. It silences the chat AI's own
+chatter — the chime-ins and the quiet-room openers — while `!cb` itself
+keeps working on demand. That is the same split `!bot off` uses. A viewer
+who types `!cb off` gets no answer at all, so the switch cannot become a
+spam vector — and unlike `!bot off`, it does not silence anything else.
 
-**The timing is deliberately not a fixed period.** `cb_chatter_minutes` is an
-*average*: the gap before each post is re-rolled between 40% and 200% of it, so
-a 25-minute setting produces gaps anywhere from 10 to 50 minutes and chat
-cannot settle into a rhythm. The lower bound also means it can never fire twice
-in quick succession.
-
-Three things hold it back:
-
-* **The channel has to be streaming.** Same live check as the idle poster.
-* **It will not talk over an active conversation.** If anyone has spoken in
-  the last 60 seconds it waits and tries again shortly.
-* **`!bot off` silences it**, along with everything else.
+The bot no longer posts radio lines unprompted: the ambient CB chatter and
+the idle-chat poster are gone from the build, and the chat AI owns the
+quiet moments.
 
 ### Why there is no API for this
 
@@ -1792,7 +1762,6 @@ appends fake joke comments.
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
 | `mock_whois_test.py` | Offline `!whois` / `!twitch` tests.             |
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
-| `mock_idle_test.py`  | Offline idle-chat tests.                        |
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
 | `mock_beef_test.py`  | Offline `!beef` story tests.                    |
 | `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |

@@ -1137,23 +1137,18 @@ def main() -> int:
               "deadpan."], "Aubrey Plaza", "Aubrey Plaza",
              ["Aubrey Plaza is an American actress, comedian and writer."])
          == []),
-        ("a quiet channel gets something to react to",
-         {"smk", "riddle", "joke", "randomfact", "wyr"}
-         <= set(__import__("bot").IDLE_COMMANDS)
-         and hasattr(__import__("bot").TwitchBot(
+        ("a quiet channel gets the chat AI's opener, offline-gated",
+         hasattr(__import__("bot").TwitchBot(
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
-                  oauth_token="oauth:x")), "_idle_chat_tick")
+                  oauth_token="oauth:x")), "_chat_ai_tick")
+         and "chat_ai_quiet_seconds" in __import__("bot").DEFAULTS
          and hasattr(__import__("access").Helix("c", "t", "1"), "is_live")),
         ("!cb command is wired into the dispatch",
          "CB_COMMANDS" in pathlib.Path("bot.py").read_text(encoding="utf-8")),
         ("!cb clears the _on_message allowlist, not just the dispatch",
          pathlib.Path("bot.py").read_text(encoding="utf-8").count(
              "CB_COMMANDS") >= 3),
-        ("the CB clock is re-rolled, never a fixed period",
-         "_cb_next_delay" in pathlib.Path("bot.py").read_text("utf-8")
-         and "random.uniform" in
-         pathlib.Path("bot.py").read_text(encoding="utf-8")),
-        ("trucker chatter: over a million distinct lines",
+        ("trucker radio: over a million distinct lines",
          __import__("trucker").combination_count() > 1_000_000),
         ("every CB template slot resolves (a missing pool is a KeyError)",
          all(__import__("trucker")._ways(x) > 0

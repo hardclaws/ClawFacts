@@ -10,6 +10,8 @@ import threading
 import re
 
 import bot as bot_mod
+import time
+
 import trucker
 
 # Terms that are genuine CB slang but not something to drop into a live
@@ -26,7 +28,7 @@ T = 1_000_000.0
 
 def _bot(live=True, **cfg):
     base = dict(bot_mod.DEFAULTS, nick="bot", channel="#test", prefix="!",
-                cb_chatter_minutes=25)
+                chat_ai_enabled=True)
     base.update(cfg)
     b = bot_mod.TwitchBot(base)
     said = []
@@ -225,87 +227,6 @@ def test_on_my_donkey_only_takes_things_that_can_be_behind_you():
 
 # --- the clock ----------------------------------------------------------
 
-def test_jitter_is_bounded_and_never_repeats():
-    """Random, not periodic - but bounded, so it can never spam."""
-    b, _ = _bot(cb_chatter_minutes=25)
-    base = 25 * 60.0
-    vals = [b._cb_next_delay() for _ in range(20000)]
-    assert all(0.4 * base <= v <= 2.0 * base for v in vals), \
-        (min(vals), max(vals))
-    assert len(set(vals)) == len(vals), len(set(vals))
-    print(f"[PASS] 20000 rolls all distinct, within "
-          f"{0.4*base/60:.0f}-{2.0*base/60:.0f} min of a 25 min average")
-
-
-def test_zero_or_negative_average_disables_it():
-    b, _ = _bot(cb_chatter_minutes=0)
-    assert b._cb_next_delay() == 0.0
-    b, _ = _bot(cb_chatter_minutes=-5)
-    assert b._cb_next_delay() == 0.0
-    print("[PASS] a zero or negative average yields no delay, not a crash")
-
-
-def test_disabled_and_paused_post_nothing():
-    T = 1_000_000.0
-    b, said = _bot(cb_chatter_enabled=False)
-    b._cb_next = 0.0
-    assert b._cb_chatter_tick(now=T) is None
-    assert not said
-    b, said = _bot()
-    b.paused = True
-    b._cb_next = 0.0
-    assert b._cb_chatter_tick(now=T) is None
-    assert not said
-    print("[PASS] disabled or paused, nothing is posted")
-
-
-def test_it_waits_for_its_own_clock():
-    T = 1_000_000.0
-    b, said = _bot()
-    b._cb_next = T + 500.0
-    b._last_chat = T - 3600.0
-    assert b._cb_chatter_tick(now=T) is None
-    assert not said
-    assert b._cb_next == T + 500.0, "not due must not reschedule"
-    print("[PASS] before its roll comes due it stays silent and holds it")
-
-
-def test_offline_pushes_the_schedule_out():
-    T = 1_000_000.0
-    b, said = _bot(live=False)
-    b._cb_next = 0.0
-    b._last_chat = T - 3600.0
-    assert b._cb_chatter_tick(now=T) is None
-    assert not said
-    assert b._cb_next > T, "offline must push the schedule out, not leave 0"
-    print("[PASS] offline: nothing posted, schedule pushed out")
-
-
-def test_it_does_not_talk_over_an_active_conversation():
-    T = 1_000_000.0
-    b, said = _bot()
-    b._cb_next = 0.0
-    b._last_chat = T - 10.0          # someone spoke 10s ago
-    assert b._cb_chatter_tick(now=T) is None
-    assert not said
-    assert b._cb_next == T + 45.0, b._cb_next
-    print("[PASS] chat active in the last 60s: defers 45s instead of posting")
-
-
-def test_it_posts_when_due_and_reschedules():
-    T = 1_000_000.0
-    b, said = _bot()
-    b._cb_next = 0.0
-    b._last_chat = T - 3600.0
-    post = b._cb_chatter_tick(now=T)
-    assert post.text and said == [f"{post.label} | {post.text}"], (post, said)
-    assert T < b._cb_next <= T + 2.0 * 25 * 60.0, b._cb_next
-    assert not said[0].startswith("@"), "ambient chatter must not @mention"
-    # The whole point of the label: chat can tell the modes apart.
-    assert said[0].split(" | ", 1)[0] in ("CB", "WINDOW"), said[0]
-    print(f"[PASS] when due it posts labelled and reschedules: {said[0][:46]}...")
-
-
 def test_command_reply_posts_without_a_mention():
     b, said = _bot()
     b._reply_cb("viewer19")
@@ -332,16 +253,12 @@ VIEWER = ""
 SUB = "subscriber/12"
 
 
-def test_command_can_be_switched_off_while_ambient_survives():
-    """The point of a separate switch: random chatter keeps going."""
+def test_the_command_can_be_switched_off():
+    """cb_command_enabled=false silences !cb itself."""
     b, said = _bot(cb_command_enabled=False)
     b._reply_cb("viewer19", SUB)
     assert said == [], said
-    b._cb_next = 0.0
-    b._last_chat = T - 3600.0
-    assert b._cb_chatter_tick(now=T), "ambient must survive"
-    assert len(said) == 1
-    print("[PASS] cb_command_enabled=false silences !cb but not the chatter")
+    print("[PASS] cb_command_enabled=false silences !cb")
 
 
 def test_access_can_be_limited_to_moderators():
@@ -397,22 +314,20 @@ def test_a_viewer_cannot_touch_the_switch():
     print("[PASS] !cb off from a viewer is ignored, and stays silent")
 
 
-def test_a_moderator_can_switch_the_random_chatter():
-    T2 = T
+def test_a_moderator_can_switch_the_bots_own_chatter():
+    """The ambient CB clock is gone; !cb off now moderates the chat AI's
+    own chatter (chime-ins and quiet-room openers), and says so."""
     b, said = _bot()
     assert b._cb_switch("amod", MOD, "off") is True
-    assert any("OFF" in m for m in said), said
-    b._cb_next = 0.0
-    b._last_chat = T2 - 3600.0
-    said.clear()
-    assert b._cb_chatter_tick(now=T2) is None
-    assert said == [], "off must actually stop it"
-    assert b._cb_next > T2, "and must push the clock, not leave it due"
+    assert any("doc's own chatter is OFF" in m for m in said), said
+    # and it actually stops the openers
+    b._last_chat = time.time() - 3600.0
+    assert b._chat_ai_tick() is False, "off must stop the openers"
 
     assert b._cb_switch("amod", MOD, "on") is True
-    b._cb_next = 0.0
-    assert b._cb_chatter_tick(now=T2), "on must bring it back"
-    print("[PASS] !cb off stops the random chatter, !cb on restores it")
+    assert any("doc's own chatter is back ON" in m for m in said), said
+    assert b._chat_ai_tick() is True, "on must bring them back"
+    print("[PASS] !cb off stops the chat AI's chatter, !cb on restores it")
 
 
 def test_status_reports_the_real_state():
@@ -423,19 +338,6 @@ def test_status_reports_the_real_state():
     b._cb_switch("amod", MOD, "status")
     assert "OFF" in said[-1], said
     print("[PASS] !cb status reports the state it is actually in")
-
-
-def test_on_names_the_config_setting_when_config_has_it_off():
-    """Promising 'back on' while the keeper thread was never started is a
-    lie, so it names the setting that is really holding it."""
-    b, said = _bot(cb_chatter_enabled=False)
-    assert b._cb_switch("amod", MOD, "on") is True
-    assert "cb_chatter_enabled" in said[0], said
-    assert "back ON" not in said[0], said
-    said.clear()
-    b._cb_switch("amod", MOD, "status")
-    assert "the config (cb_chatter_enabled)" in said[0], said
-    print("[PASS] with cb_chatter_enabled=false it names the config key")
 
 
 def test_help_omits_a_command_that_is_switched_off():
@@ -573,26 +475,18 @@ def main():
         test_three_registers_and_invalid_rejected,
         test_it_does_not_repeat_itself_back_to_back,
         test_on_my_donkey_only_takes_things_that_can_be_behind_you,
-        test_jitter_is_bounded_and_never_repeats,
-        test_zero_or_negative_average_disables_it,
-        test_disabled_and_paused_post_nothing,
-        test_it_waits_for_its_own_clock,
-        test_offline_pushes_the_schedule_out,
-        test_it_does_not_talk_over_an_active_conversation,
-        test_it_posts_when_due_and_reschedules,
-        test_command_reply_posts_without_a_mention,
+                                                                test_command_reply_posts_without_a_mention,
         test_help_advertises_the_command,
-        test_command_can_be_switched_off_while_ambient_survives,
+        test_the_command_can_be_switched_off,
         test_access_can_be_limited_to_moderators,
         test_access_can_be_limited_to_the_broadcaster,
         test_a_misspelt_access_setting_fails_closed,
         test_everyone_is_the_default,
         test_a_bare_cb_is_not_mistaken_for_a_switch,
         test_a_viewer_cannot_touch_the_switch,
-        test_a_moderator_can_switch_the_random_chatter,
+        test_a_moderator_can_switch_the_bots_own_chatter,
         test_status_reports_the_real_state,
-        test_on_names_the_config_setting_when_config_has_it_off,
-        test_help_omits_a_command_that_is_switched_off,
+                test_help_omits_a_command_that_is_switched_off,
         test_every_line_carries_the_label_for_its_voice,
         test_the_window_voice_targets_cars_not_people,
         test_the_yelling_is_never_a_threat,

@@ -50,17 +50,6 @@
   "follower_check_failure": "deny",
   "riddle_answer_delay": 20,
   "whois_max_chars": 400,
-  "idle_chat_enabled": true,
-  "idle_chat_minutes": 10,
-  "idle_chat_commands": [
-    "smk",
-    "riddle",
-    "joke",
-    "randomfact",
-    "wyr"
-  ],
-  "cb_chatter_enabled": true,
-  "cb_chatter_minutes": 25,
   "cb_command_enabled": true,
   "cb_command_access": "everyone",
   "cb_yell_enabled": true,

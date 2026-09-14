@@ -331,6 +331,18 @@ def test_the_quiet_room_gets_a_conversation_opener():
         b._chat_ai_times = [now] * bot_mod.DEFAULTS["chat_ai_max_hour"]
         assert not b._chat_ai_tick(now=now + 900)
         b._chat_ai_times = []
+        # An offline channel is not quiet, it is empty: no openers into a
+        # dead room all night. (Unknown - no Helix at all - still fires.)
+        class _Dead:
+            def is_live(self):
+                return False
+
+        b._access.helix = _Dead()
+        b._chat_ai_times = []
+        b._chat_ai_last = 0.0
+        assert not b._chat_ai_tick(now=now + 1200)
+        b._access.helix = None
+        assert b._chat_ai_tick(now=now + 1300)
         # And a disabled chat AI never opens.
         b2 = _bot(chat_ai_enabled=False)
         b2._last_chat = now - 900

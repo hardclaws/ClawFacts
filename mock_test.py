@@ -443,7 +443,7 @@ def main():
         print(f"FAIL: a viewer's !cb off was answered: "
               f"{[l for l in bot_lines if 'viewer22' in l]}")
         return 1
-    status = [l for l in bot_lines if "random truck talk is" in l]
+    status = [l for l in bot_lines if "doc's own chatter is" in l]
     if not status:
         print("FAIL: the moderator's !cb status was not answered")
         return 1

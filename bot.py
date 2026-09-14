@@ -78,7 +78,6 @@ WHOIS_COMMANDS = {"whois", "who"}
 TWITCH_COMMANDS = {"twitch", "whotwitch", "whotw", "twitchwho"}
 # What gets posted into a quiet channel to get it going again. All six are
 # local or keyless, so this never spends the fact engine's budget.
-IDLE_COMMANDS = ("smk", "riddle", "joke", "randomfact", "wyr")
 # Moderator-owned state. Both stay reachable while the bot is switched off,
 # otherwise !bot off would strand a pending reminder or the cargo board.
 REMINDER_COMMANDS = {"reminder", "reminders"}
@@ -140,21 +139,9 @@ DEFAULTS = {
     # How much of the Wikipedia lead !whois posts. Trimmed on a sentence
     # boundary, so a lower number loses whole sentences, never half of one.
     "whois_max_chars": 400,
-    # Post something into a quiet channel to get it going again. Only fires
-    # while the channel is actually streaming, so it cannot chatter into an
-    # offline room all night.
-    "idle_chat_enabled": True,
-    "idle_chat_minutes": 10,
-    "idle_chat_commands": list(IDLE_COMMANDS),
-    # Ambient trucker chatter, posted unprompted while the channel is live.
-    # Deliberately NOT a fixed period: the interval is re-rolled after every
-    # post, so chat cannot learn the rhythm. The number is the average, and
-    # each gap lands between 40% and 200% of it. Set cb_chatter_enabled to
-    # false to keep !cb as a command only.
-    "cb_chatter_enabled": True,
-    "cb_chatter_minutes": 25,
-    # The !cb command itself, kept separate from the random chatter above:
-    # switch the command off and the bot still talks on the radio by itself.
+    # The !cb command: the bot talks on the radio on demand. The old
+    # unprompted posters (idle-chat jokes, ambient CB rambles) are gone -
+    # the chat AI owns the quiet moments now.
     "cb_command_enabled": True,
     # Who may ask for one on demand: "everyone", "moderator" (mods and the
     # broadcaster) or "broadcaster". Anything unrecognised is treated as
@@ -389,7 +376,6 @@ class TwitchBot:
         self.custom_cmds = customcmds_mod.CommandSet(reserved=RESERVED_COMMANDS)
         self._last_denial_note = {}         # login -> timestamp (spam guard)
         self._last_chat = time.time()       # last message seen in the channel
-        self._cb_next = 0.0                 # when the next ramble may post
         self._refresh_lock = threading.Lock()   # one refresh at a time
         self._warned_401 = False
         self._cb_ambient_off = False        # !cb off, until the next restart
@@ -642,24 +628,16 @@ class TwitchBot:
             target=self._reminder_keeper, name="reminder-keeper", daemon=True
         )
         ticker.start()
-        chatter = threading.Thread(
-            target=self._idle_chat_keeper, name="idle-chat", daemon=True
-        )
-        chatter.start()
+        if self.cfg.get("chat_ai_enabled", False):
+            # The chat AI's heartbeat: quiet-room openers, offline-gated.
+            talker = threading.Thread(
+                target=self._chat_ai_keeper, name="chat-ai", daemon=True
+            )
+            talker.start()
         librarian = threading.Thread(
             target=self._names_keeper, name="names-topup", daemon=True
         )
         librarian.start()
-        if self.cfg.get("cb_chatter_enabled", True):
-            self._log(
-                f"cb chatter: {trucker_mod.combination_count():,} distinct "
-                f"lines, one every "
-                f"{self.cfg.get('cb_chatter_minutes', 25)} min on average"
-            )
-            radio = threading.Thread(
-                target=self._cb_chatter_keeper, name="cb-chatter", daemon=True
-            )
-            radio.start()
 
         backoff = 2
         while self.running:
@@ -1195,13 +1173,14 @@ class TwitchBot:
         return tier in ("broadcaster", "moderator")
 
     def _cb_switch(self, nick: str, badges: str, argument: str) -> bool:
-        """!cb off | !cb on | !cb status - moderates the RANDOM chatter only.
+        """!cb off | !cb on | !cb status - moderates the bot's OWN chatter.
 
-        Returns True when the argument was a switch verb, so the caller does
-        not also post a ramble on the same line. "Off" lasts until the next
-        restart; `cb_chatter_enabled` in config.json is the permanent setting.
-        That is the same split `!bot off` uses, and it means a moderator can
-        quiet an annoying feature mid-stream without editing a file.
+        That is the chat AI's chime-ins and quiet-room openers; !cb itself
+        keeps working on demand. Returns True when the argument was a switch
+        verb, so the caller does not also post a radio line on the same
+        line. "Off" lasts until the next restart - the same split `!bot
+        off` uses, so a moderator can quiet the bot mid-stream without
+        editing a file.
         """
         verb = (argument or "").strip().lower()
         if verb not in ("off", "on", "status", "disable", "enable",
@@ -1215,28 +1194,15 @@ class TwitchBot:
             return True
         if verb in ("off", "disable", "pause"):
             self._cb_ambient_off = True
-            self._say(f"@{nick} random truck talk is OFF - {pre}cb on brings "
-                      f"it back. {pre}cb on its own still works.")
+            self._say(f"@{nick} doc's own chatter is OFF - {pre}cb on "
+                      f"brings it back. {pre}cb on its own still works.")
         elif verb in ("on", "enable", "resume"):
-            if not self.cfg.get("cb_chatter_enabled", True):
-                # The keeper thread was never started, so promising "back on"
-                # would be a lie. Name the setting that is actually holding it.
-                self._say(f"@{nick} random truck talk is switched off in "
-                          f"the config (cb_chatter_enabled) - {pre}cb on its "
-                          f"own still works.")
-                return True
             self._cb_ambient_off = False
-            self._say(f"@{nick} random truck talk is back ON, every "
-                      f"{self.cfg.get('cb_chatter_minutes', 25)} min on "
-                      f"average.")
+            self._say(f"@{nick} doc's own chatter is back ON.")
         else:
-            if not self.cfg.get("cb_chatter_enabled", True):
-                self._say(f"@{nick} random truck talk is OFF in the "
-                          f"config (cb_chatter_enabled).")
-            else:
-                state = "OFF" if self._cb_ambient_off else "ON"
-                self._say(f"@{nick} random truck talk is {state}. {pre}cb off "
-                          f"to silence it, {pre}cb on to resume.")
+            state = "OFF" if self._cb_ambient_off else "ON"
+            self._say(f"@{nick} doc's own chatter is {state}. {pre}cb off "
+                      f"to silence it, {pre}cb on to resume.")
         self._log(f"!cb {verb} from {nick} -> "
                   f"ambient={not self._cb_ambient_off}")
         return True
@@ -1687,117 +1653,6 @@ class TwitchBot:
         self._log(f"{post.label} ramble for {nick or 'chat'}: "
                   f"{post.text[:60]}")
 
-    def _cb_next_delay(self) -> float:
-        """Seconds until the next ambient ramble. Re-rolled every time.
-
-        A fixed period is exactly what was not wanted - chat learns "the bot
-        posts every ten minutes" and it becomes a clock. Uniform over 0.4x to
-        2.0x of the configured average is unpredictable in both directions,
-        and the lower bound means it can never fire twice in quick succession.
-        """
-        base = float(self.cfg.get("cb_chatter_minutes", 25)) * 60.0
-        if base <= 0:
-            return 0.0
-        return base * random.uniform(0.4, 2.0)
-
-    def _cb_chatter_tick(self, now: float | None = None):
-        """One pass of the ambient CB clock. Returns the line it posted.
-
-        Unlike `_idle_chat_tick`, this does not wait for the channel to go
-        quiet - ambient chatter is meant to land in a live room. It does
-        refuse to talk over an active conversation, and it holds back while
-        the channel is offline.
-        """
-        now = time.time() if now is None else now
-        if not self.cfg.get("cb_chatter_enabled", True):
-            return None
-        if self.paused or not self.cfg.get("fun_commands", True):
-            return None
-        if self._cb_ambient_off:
-            # Held by a moderator. Keep pushing the clock forward so that
-            # re-enabling does not fire into chat on the very next tick.
-            self._cb_next = now + self._cb_next_delay()
-            return None
-        if now < self._cb_next:
-            return None
-
-        helix = self._access.helix
-        if helix is not None and helix.is_live() is False:
-            # Offline: push the whole schedule out rather than muttering into
-            # an empty room, and without burning the next roll.
-            self._cb_next = now + self._cb_next_delay()
-            return None
-
-        # Someone is mid-conversation. Deferring does not consume the roll, so
-        # the retry is soon rather than another full interval away.
-        if now - self._last_chat < 60.0:
-            self._cb_next = now + 45.0
-            return None
-
-        post = trucker_mod.ramble(exclude=self._cb_excluded())
-        self._cb_next = now + self._cb_next_delay()
-        self._say(self._fit(f"{post.label} | ", post.text))
-        self._log(f"{post.label} ramble: {post.text[:60]}")
-        return post
-
-    def _cb_chatter_keeper(self) -> None:
-        # A long first wait: this is flavour, and nobody joining the stream
-        # should be greeted by the bot talking to itself.
-        time.sleep(120.0)
-        self._cb_next = time.time() + self._cb_next_delay()
-        while self.running:
-            time.sleep(15.0)
-            if not self.running:
-                return
-            try:
-                self._cb_chatter_tick()
-            except Exception as exc:
-                self._log(f"cb-chatter error: {exc!r}")
-
-    def _idle_chat_tick(self, now: float | None = None):
-        """One pass of the idle-chat clock. Returns the command it posted.
-
-        Fires when nobody has said anything in the channel for
-        `idle_chat_minutes`, and only while the channel is actually streaming -
-        a bot that posts jokes into an offline room every ten minutes is not a
-        feature. Where the live check cannot be settled it posts anyway: the
-        requested behaviour beats a guess, and a missed check must not turn the
-        whole feature off silently.
-        """
-        now = time.time() if now is None else now
-        if not self.cfg.get("idle_chat_enabled", True):
-            return None
-        if self.paused or not self.cfg.get("fun_commands", True):
-            return None
-        window = float(self.cfg.get("idle_chat_minutes", 10)) * 60.0
-        if window <= 0:
-            return None
-        idle_for = now - self._last_chat
-        if idle_for < window:
-            return None
-
-        helix = self._access.helix
-        if helix is not None and helix.is_live() is False:
-            # Offline. Hold the clock so this is not re-checked every tick.
-            self._last_chat = now
-            return None
-
-        # An explicitly empty list means "post nothing". `or IDLE_COMMANDS`
-        # would read that as "not configured" and post everything instead.
-        configured = self.cfg.get("idle_chat_commands")
-        if configured is None:
-            configured = IDLE_COMMANDS
-        pool = [c for c in configured if c in IDLE_COMMANDS]
-        if not pool:
-            return None
-        command = random.choice(pool)
-        argument = random.choice(("female", "male", "any")) \
-            if command == "smk" else ""
-        self._last_chat = now      # the next one is another window away
-        self._log(f"chat idle for {int(idle_for)}s - posting !{command}")
-        self._reply_extra("", command, argument)
-        return command
-
     def _names_tick(self) -> int:
         """Top the !smk name pool up from Wikipedia. Returns names added.
 
@@ -1829,15 +1684,16 @@ class TwitchBot:
                     return
                 time.sleep(1.0)
 
-    def _idle_chat_keeper(self) -> None:
+    def _chat_ai_keeper(self) -> None:
+        """The chat AI's heartbeat: 15s ticks that watch for a quiet room.
+
+        The idle-chat poster used to own this loop; the chat AI inherited
+        the heartbeat when the poster was removed.
+        """
         while self.running:
             time.sleep(15.0)
             if not self.running:
                 return
-            try:
-                self._idle_chat_tick()
-            except Exception as exc:
-                self._log(f"idle-chat error: {exc!r}")
             try:
                 self._chat_ai_tick()
             except Exception as exc:
@@ -2115,6 +1971,14 @@ class TwitchBot:
         if now - self._last_chat < float(self.cfg.get(
                 "chat_ai_quiet_seconds", 90)):
             return False                # chat is alive; the message path rules
+        # An offline channel is not quiet, it is empty: without this gate
+        # the bot would open conversations to nobody all night (same live
+        # check the old idle poster used - scope-free GET /helix/streams).
+        # Where the check cannot be settled it fires anyway: unknown is not
+        # offline.
+        helix = self._access.helix
+        if helix is not None and helix.is_live() is False:
+            return False
         if now - self._chat_ai_last < float(self.cfg.get(
                 "chat_ai_quiet_cooldown", 150)):
             return False
