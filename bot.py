@@ -178,6 +178,11 @@ DEFAULTS = {
     "chat_ai_max_hour": 6,
     "chat_ai_min_chat": 5,
     "chat_ai_timeout": 8.0,
+    # Qwen3-family models "think" before answering, which on CPU turns a
+    # one-line reply into a half-minute stall. true appends Qwen3's
+    # documented /no_think soft switch to every prompt. No effect on
+    # models that do not know the switch.
+    "llm_no_think": False,
     "chat_ai_names": ["doc", "docbot"],
     "bot_personality": "",
     # The chat AI's memory: one SQLite file. Messages are pruned after

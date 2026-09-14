@@ -130,6 +130,30 @@ def main():
     assert llm.summarize("x" * 300, 60, {}) is None
     print("[PASS] llm summarize returns shortened fact; None when unconfigured")
 
+    # Qwen3's /no_think switch: appended to every prompt when
+    # llm_no_think is set, absent otherwise. On CPU a thinking Qwen3
+    # turns a one-line chat reply into a half-minute stall.
+    llm.urllib.request.urlopen = _fake_urlopen
+    try:
+        captured.clear()
+        llm.chat_reply("system", "say something dry",
+                       {"llm_api_key": "k", "llm_no_think": True})
+        body = json.loads(captured[-1]["body"])
+        assert body["messages"][-1]["content"].endswith("/no_think"), body
+        captured.clear()
+        llm.chat_reply("system", "say something dry",
+                       {"llm_api_key": "k"})
+        body = json.loads(captured[-1]["body"])
+        assert "/no_think" not in body["messages"][-1]["content"], body
+        captured.clear()
+        llm.answer_question("q?", ["a source line"],
+                            {"llm_api_key": "k", "llm_no_think": True})
+        body = json.loads(captured[-1]["body"])
+        assert body["messages"][-1]["content"].endswith("/no_think"), body
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] llm_no_think appends Qwen3's switch to every prompt")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

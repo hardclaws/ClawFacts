@@ -278,30 +278,41 @@ line for that viewer, then says how much it dropped.
 ### Running it on a local Ollama
 
 The whole chat AI runs on a local model — no key, no rate limits, no
-per-message cost, nothing leaving the box. On a mini PC with 32GB RAM
-and no discrete GPU (e.g. a UM560 XT), an 8B model at Q4 quantisation
-answers in a few seconds, which is fine for a few lines an hour:
-
-```
-ollama pull llama3.1:8b
-```
-
-then in `config.json`:
+per-message cost, nothing leaving the box. If the mini PC already runs
+Ollama for something else, the bot shares that instance: point
+`llm_base_url` at it and use a model that's already pulled. On a 32GB
+mini PC with no discrete GPU (e.g. a UM560 XT), an 8B model at Q4
+quantisation answers in a few seconds — fine for a few lines an hour:
 
 ```json
 "llm_api_key": "",
-"llm_base_url": "http://localhost:11434/v1",
-"llm_model": "llama3.1:8b",
-"chat_ai_timeout": 15
+"llm_base_url": "http://127.0.0.1:11434/v1",
+"llm_model": "qwen3:8b",
+"llm_no_think": true,
+"chat_ai_timeout": 20
 ```
 
-`chat_ai_timeout` gets a bump on CPU because model loading counts
-against it. Two more tips: set `OLLAMA_KEEP_ALIVE=30m` for the Ollama
-service so the first chime-in after a quiet spell isn't spent loading
-the model back into RAM, and if lines feel slow, `llama3.2:3b` is much
-faster on CPU and still fine for one-liners. The architecture is
-provider-agnostic — swap back to a hosted key any time by editing the
-same three fields.
+Three box-specific notes:
+
+- **`llm_no_think: true`** matters with Qwen3-family models. They
+  "think" before answering, and on CPU that turns a one-line reply into
+  a half-minute stall — every timeout goes off and the bot goes quiet.
+  The switch makes them answer directly. No effect on other models.
+- **Keep-alive.** Ollama unloads an idle model after a few minutes, and
+  the bot asks maybe six times an hour — so it would often arrive to a
+  cold 10–20s load. Raise the service default so the model stays
+  resident (RAM is cheap here): `systemctl edit ollama` →
+  `Environment=OLLAMA_KEEP_ALIVE=30m`. If another app on the box passes
+  its own short keep-alive per request, the service default still
+  governs everyone else.
+- **Sharing with another app.** Concurrent requests queue inside
+  Ollama (parallel is enabled by default on 0.33+), so a long
+  generation for the other app can add a little wait — the timeouts
+  absorb it. `qwen3:4b` is the fast alternative if lines ever feel
+  sluggish, at the cost of a second model resident in RAM.
+
+The architecture is provider-agnostic — swap back to a hosted key any
+time by editing the same three fields.
 
 ## Where facts come from
 

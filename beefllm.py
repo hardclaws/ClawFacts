@@ -162,7 +162,8 @@ def write_story(result: dict, cfg: dict) -> list | None:
         else llm.DEFAULT_MODEL)
     body = {"model": model, "messages": [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": _prompt(result)}]}
+        {"role": "user", "content": llm._maybe_nothink(_prompt(result),
+                                                       cfg)}]}
     if llm._REASONING.search(model):
         body["max_completion_tokens"] = 500
         body["reasoning_effort"] = "low"

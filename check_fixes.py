@@ -833,6 +833,25 @@ def main() -> int:
             return False
         return '"memory_db_path"' in _bot_src
 
+    def _llm_no_think_switch():
+        """Qwen3-family models think before answering, and on a CPU mini
+        PC that turns a one-line chat reply into a half-minute stall -
+        every timeout goes off. llm_no_think=true appends Qwen3's
+        documented /no_think switch to every prompt: chat lines, question
+        answers, summaries and beef stories."""
+        import llm as _l
+        if _l._maybe_nothink("hello", {}) != "hello":
+            return False
+        if not _l._maybe_nothink(
+                "hello", {"llm_no_think": True}).endswith("/no_think"):
+            return False
+        if _bot.DEFAULTS.get("llm_no_think") is not False:
+            return False
+        if "llm._maybe_nothink" not in pathlib.Path(
+                "beefllm.py").read_text(encoding="utf-8"):
+            return False
+        return True
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -1257,6 +1276,8 @@ def main() -> int:
          _chat_ai_bounded_and_safe()),
         ("chat AI remembers viewers; !forget erases them",
          _chat_ai_remembers_and_forgets()),
+        ("llm_no_think: Qwen3 answers instead of thinking",
+         _llm_no_think_switch()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

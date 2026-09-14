@@ -72,5 +72,7 @@
   "shoutout_theme": "auto",
   "custom_commands_enabled": true,
   "names_topup_enabled": true,
-  "names_topup_hours": 12
+  "names_topup_hours": 12,
+  "llm_no_think": false,
+  "_llm_no_think": "Set true when llm_model is a Qwen3-family model running locally (qwen3:8b, qwen3:4b): appends Qwen3's /no_think switch to every prompt so the model answers directly instead of thinking first - on CPU, thinking turns a one-line chat reply into a half-minute stall."
 }

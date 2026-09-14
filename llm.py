@@ -154,6 +154,17 @@ _SUMMARIZE_SYSTEM = (
 )
 
 
+def _maybe_nothink(user: str, cfg: dict) -> str:
+    """Qwen3-family models think before answering - on a CPU mini PC that
+    turns a one-line chat reply into a half-minute stall, and every
+    timeout we have goes off. '/no_think' is Qwen3's documented soft
+    switch; llm_no_think=true in the config appends it to every prompt.
+    Harmless no-op for models that do not know the switch."""
+    if cfg.get("llm_no_think"):
+        return (user or "").rstrip() + " /no_think"
+    return user
+
+
 def _build_body(model: str, user_prompt: str, system: str = None) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
@@ -219,7 +230,8 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
               f"(chat, timeout {timeout}s)", flush=True)
         print(f"[llm] ---- chat prompt ----\n{user}", flush=True)
     try:
-        return _call(base, model, key, user, system, timeout=timeout)
+        return _call(base, model, key, _maybe_nothink(user, cfg), system,
+                     timeout=timeout)
     except urllib.error.HTTPError as exc:
         _disable(exc.code)
         return None
@@ -235,7 +247,9 @@ def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
     model = cfg.get("llm_model") or (OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
-    user = f"Max characters: {max_chars}\nFact: {fact}\n\nShortened fact:"
+    user = _maybe_nothink(
+        f"Max characters: {max_chars}\nFact: {fact}\n\nShortened fact:",
+        cfg)
     messages = [
         {"role": "system", "content": _SUMMARIZE_SYSTEM},
         {"role": "user", "content": user},
@@ -345,7 +359,7 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
     last_detail = ""
     for m in candidates:
         try:
-            text = _call(base, m, key, user, system)
+            text = _call(base, m, key, _maybe_nothink(user, cfg), system)
             if cfg.get("debug"):
                 print(f"[llm] ---- response ----\n" + text, flush=True)
             return text
