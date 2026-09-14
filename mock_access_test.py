@@ -122,6 +122,14 @@ def test_badge_tiers(port):
     assert access.tier_from_badges("founder/0") == "subscriber"
     # Twitch staff moderate any channel.
     assert access.tier_from_badges("staff/1") == "moderator"
+    # The Lead Moderator badge REPLACES the moderator badge in IRC tags, so
+    # a lead mod arrives with lead_moderator/1 and nothing else. They are
+    # moderators for every gate, but never outrank the broadcaster.
+    assert access.tier_from_badges("lead_moderator/1") == "moderator"
+    assert access.tier_from_badges(
+        "subscriber/12,lead_moderator/1") == "moderator"
+    assert access.tier_from_badges(
+        "broadcaster/1,lead_moderator/1") == "broadcaster"
     assert access.tier_from_badges("") is None
     assert access.tier_from_badges("premium/1,turbo/1") is None
     print("[PASS] badge tiers resolve, privilege order respected")

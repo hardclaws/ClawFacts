@@ -591,6 +591,26 @@ def main() -> int:
             return False
         return True
 
+    def _lead_moderators_are_moderators():
+        """Twitch's Lead Moderator role REPLACES the moderator badge in IRC
+        tags, so a lead mod arrives as lead_moderator/1 with no moderator/1 -
+        and every mod-gated command silently ignored them (!haul update did
+        nothing at all). The tier table and the bot's own state check both
+        recognise the badge now."""
+        import access as _access
+        if _access.tier_from_badges("lead_moderator/1") != "moderator":
+            return False
+        if _access.tier_from_badges(
+                "subscriber/12,lead_moderator/1") != "moderator":
+            return False
+        if _access.tier_from_badges(
+                "broadcaster/1,lead_moderator/1") != "broadcaster":
+            return False
+        import bot as _bot
+        import inspect
+        return "lead_moderator/1" in inspect.getsource(
+            _bot.TwitchBot._note_own_state)
+
     def _beef_llm_never_breaks_the_game():
         """The optional LLM pass writes body lines only, behind validate(),
         and every failure mode means templates. Unconfigured must mean None
@@ -995,6 +1015,8 @@ def main() -> int:
          _funfact_countries_and_substrings()),
         ("funfact stories outrank sizes, inventory and definitions",
          _funfact_stories_first()),
+        ("lead moderators count as moderators everywhere",
+         _lead_moderators_are_moderators()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

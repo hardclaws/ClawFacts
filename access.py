@@ -46,6 +46,12 @@ _BADGE_TIERS = (
     ("global_mod", "moderator"),
     ("staff", "moderator"),
     ("moderator", "moderator"),
+    # Twitch's Lead Moderator role carries its own badge - and it REPLACES
+    # the moderator badge in IRC tags, so a lead mod's badges say
+    # lead_moderator/1 with no moderator/1 in sight. Any tool checking only
+    # for "moderator" silently ignores them; Twitch's own guidance is to
+    # accept either. A lead mod is a mod for every gate here.
+    ("lead_moderator", "moderator"),
     ("vip", "vip"),
     ("founder", "subscriber"),
     ("subscriber", "subscriber"),

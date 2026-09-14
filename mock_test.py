@@ -117,6 +117,10 @@ SCRIPT = [
     (36.0, privmsg("viewer1", "!haul update Produce", "moderator/1")),
     (37.5, privmsg("nobody", "!haul", "")),
     (39.0, privmsg("nobody", "!haul update Stolen goods", "")),
+    # A Lead Moderator arrives with lead_moderator/1 and no moderator/1 -
+    # the role REPLACES the badge in IRC tags - and must still be a mod.
+    (39.7, privmsg("viewer11", "!haul update Steel coils",
+                   "lead_moderator/1")),
     # A reminder, its list, and the moment it fires. !reminders is an alias.
     (40.5, privmsg("viewer1", "!reminder 10s Check the lights are working",
                    "moderator/1")),
@@ -329,6 +333,9 @@ def main():
         return 1
     if any("@nobody haul updated" in l for l in bot_lines):
         print("FAIL: a viewer was allowed to change the haul board")
+        return 1
+    if not any("@viewer11 haul updated: Steel coils" in l for l in cargo):
+        print("FAIL: a lead moderator could not change the haul board")
         return 1
     print(f"[PASS] !haul is readable by all, writable by mods "
           f"({len(cargo)} line(s))")

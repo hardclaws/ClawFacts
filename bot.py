@@ -471,8 +471,10 @@ class TwitchBot:
         mod, badges = tags.get("mod"), tags.get("badges", "")
         if mod is None and not badges:
             return                          # nothing to learn from this line
+        # lead_moderator/1 too: the role replaces the moderator badge, so
+        # without this a lead-mod bot would be told it is not a moderator.
         is_mod = (mod == "1") or ("moderator/1" in badges) \
-            or ("broadcaster/1" in badges)
+            or ("lead_moderator/1" in badges) or ("broadcaster/1" in badges)
         if is_mod == self._bot_is_mod:
             return
         self._bot_is_mod = is_mod
