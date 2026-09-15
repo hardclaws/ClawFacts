@@ -272,6 +272,8 @@ everything else works without a key.
   the cooldown is *held*, not dropped — the bot answers it to the right
   person the moment the cooldown clears (within two minutes; after that
   the moment has passed and answering would be the non-sequitur).
+  Several people asking in one window are queued (up to three) and
+  answered in order, each to their own asker.
   The streamer's own lines never
   trigger chime-ins — he has the floor — but directly addressing the bot
   by name does get a reply.

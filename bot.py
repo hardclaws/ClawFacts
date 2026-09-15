@@ -407,7 +407,7 @@ class TwitchBot:
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
-        self._chat_ai_pending = None            # a mention held by cooldown
+        self._chat_ai_pending = []              # mentions held by cooldown
         self._chat_ai_names = set(
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
@@ -1967,8 +1967,12 @@ class TwitchBot:
                 # moment the rail clears - the keeper tick picks it up.
                 # Left dangling, a chime answers it to whoever spoke
                 # next: live-fire, 'pick a number 1-100' was answered to
-                # someone else entirely.
-                self._chat_ai_pending = (nick, message, time.time())
+                # someone else entirely. A QUEUE, not a slot: several
+                # people can ask inside one cooldown window, and each
+                # gets their answer - oldest first, capped at three so a
+                # spammer cannot build one.
+                self._chat_ai_pending.append((nick, message, time.time()))
+                del self._chat_ai_pending[:-3]
                 self._log(f"mention from {nick} held - will answer when "
                           f"the cooldown clears (a rail, not a bug)")
             return
@@ -2044,18 +2048,22 @@ class TwitchBot:
         if self.paused or self._cb_ambient_off:
             return False
         now = time.time() if now is None else now
-        # A mention held by the cooldown is answered now, to the person
-        # who asked. Two minutes staleness: after that the moment has
-        # passed and answering would be the non-sequitur, not the fix.
-        p = self._chat_ai_pending
-        if p is not None:
-            self._chat_ai_pending = None
-            if (now - p[2] <= 120
-                    and now - self._chat_ai_mention_last >= float(
-                        self.cfg.get("chat_ai_mention_cooldown", 60))
+        # Mentions held by the cooldown are answered here, to the people
+        # who asked, oldest first - one per tick, so the cooldown's
+        # pacing holds even when several people asked in one window.
+        # Two minutes staleness each: after that the moment has passed
+        # and answering would be the non-sequitur, not the fix.
+        while self._chat_ai_pending \
+                and now - self._chat_ai_pending[0][2] > 120:
+            self._chat_ai_pending.pop(0)     # stale; the next may be live
+        if self._chat_ai_pending:
+            p = self._chat_ai_pending[0]
+            if (now - self._chat_ai_mention_last >= float(
+                    self.cfg.get("chat_ai_mention_cooldown", 60))
                     and len([t for t in self._chat_ai_times
                              if now - t < 3600]) < int(
                         self.cfg.get("chat_ai_max_hour", 12))):
+                self._chat_ai_pending.pop(0)
                 self._log(f"answering {p[0]}'s held message")
                 self._jobs.put((p[0], (p[0] or "").lower(), "",
                                 "chime", p[1]))

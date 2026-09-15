@@ -316,9 +316,14 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
                       "pick a number 1-100 @truckingwithdocbot",
                       "yeyeboi", "")
         assert b._jobs.empty(), "should be held, not enqueued"
-        assert b._chat_ai_pending is not None
+        assert len(b._chat_ai_pending) == 1
         assert any("held" in l for l in logs), logs
-        # 40s later the cooldown has cleared: answered, to Yeyeboi.
+        # A second viewer asks inside the same window: QUEUED, not
+        # overwritten - the single-slot version lost their question.
+        b._on_message("DaniLikesDonuts", "#t", "doc pick one for me too",
+                      "danilikesdonuts", "")
+        assert len(b._chat_ai_pending) == 2
+        # The cooldown clears: answered, oldest first, to Yeyeboi.
         assert b._chat_ai_tick(now=T0 + 40) is True
         # _do_chime re-checks the cooldown against real time; the tick
         # above ran at synthetic T0+40, so move the last-reply timestamp
@@ -326,24 +331,35 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
         b._chat_ai_mention_last = T0 - 200
         _drain(b)
         assert b.said == ["@Yeyeboi Forty-two. Obviously."], b.said
-        assert b._chat_ai_pending is None
+        assert len(b._chat_ai_pending) == 1      # Dani still queued
     finally:
         llm.chat_reply = orig
-    # Stale pending (over two minutes) is dropped, not answered.
+    # A spammer cannot build a queue: the cap is three, and overflow
+    # drops the OLDEST - the freshest questions are the ones still live.
+    b4 = _bot(llm_api_key="k")
+    T4 = time.time()
+    b4._chat_ai_mention_last = T4 - 30
+    for who in ("Yeyeboi", "DaniLikesDonuts", "kvack", "tayfta"):
+        b4._on_message(who, "#t", "doc pick a number", who.lower(), "")
+    assert len(b4._chat_ai_pending) == 3, b4._chat_ai_pending
+    assert b4._chat_ai_pending[0][0] == "DaniLikesDonuts"
+    # Stale pendings (over two minutes) are dropped, not answered.
     b2 = _bot(llm_api_key="k")
     b2._last_chat = time.time()            # quiet gate closed
-    b2._chat_ai_pending = ("kvack", "doc hello there", time.time() - 300)
+    b2._chat_ai_pending = [("kvack", "doc hello there",
+                            time.time() - 300)]
     assert b2._chat_ai_tick() is False
-    assert b2._chat_ai_pending is None
-    # And the hourly cap still rules: a fresh pending is dropped when
-    # the bot is capped.
+    assert b2._chat_ai_pending == []
+    # And the hourly cap still rules: a fresh pending waits when the
+    # bot is capped (kept, not dropped - its moment has not passed).
     b3 = _bot(llm_api_key="k")
     b3._last_chat = time.time()
-    b3._chat_ai_pending = ("kvack", "doc hello there", time.time())
+    b3._chat_ai_pending = [("kvack", "doc hello there", time.time())]
     b3._chat_ai_times = [time.time()] * bot_mod.DEFAULTS["chat_ai_max_hour"]
     assert b3._chat_ai_tick() is False
-    assert b3._chat_ai_pending is None
-    print("[PASS] a held mention is answered late, to the right person")
+    assert len(b3._chat_ai_pending) == 1
+    print("[PASS] held mentions queue up and are answered late, each to "
+          "the right person")
 
 
 def test_the_bot_cannot_repeat_itself():
