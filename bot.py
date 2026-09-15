@@ -2289,7 +2289,9 @@ class TwitchBot:
         verb = verb.lower()
         rest = rest.strip()
         if verb == "list":
-            names = ", ".join(sorted(chatai.PERSONAS))
+            names = ", ".join(
+                f"{n} ({chatai.PERSONA_BLURBS[n]})"
+                for n in sorted(chatai.PERSONAS))
             self._say(f"@{nick} voices: {names} - {pre}persona set "
                       f"<name>, or {pre}persona custom <description> for "
                       f"your own.")

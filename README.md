@@ -311,7 +311,7 @@ tells viewers to go use `!funfact` — it answers itself or says nothing).
 It also cannot repeat itself: its own recent lines are named in the
 prompt, and a reply reusing a signature word from them is declined
 (`!ask` gets one "say something completely different" re-ask first) —
-a small model that finds a phrase it likes will otherwise drill it into
+a small modet finds a phrase it likes will otherwise drill it into
 the ground ("midnight coffee and donuts" was a real stream). A model
 with nothing worth saying
 replies `NOTHING TO SAY` and the bot stays quiet — a decline still
@@ -1039,8 +1039,8 @@ So every game has a live source and a floor:
 
 The old idle poster (ten minutes of silence, then a random `!smk` or
 `!joke`) is gone. The chat AI owns the quiet moments now: after
-`chat_ai_quiet_seconds` of silence Doc opens the conversation himself —
-a question for chat, a hook from his trucking life. See
+`chat_ai_quiet_seconds` of silence the active voice opens the
+conversation itself — a question for chat, a hook from its own life. See
 [The chat AI](#the-chat-ai-ask-replies-and-chime-ins). Like the old
 poster, openers only fire while the channel is actually streaming
 (scope-free `GET /helix/streams`); where the check cannot be settled
@@ -1895,6 +1895,19 @@ appends fake joke comments.
 | `mock_whois_test.py` | Offline `!whois` / `!twitch` tests.             |
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_subgoal_test.py` | Offline !subgoal tests.                        |
+| `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
+| `mock_beef_test.py`  | Offline `!beef` story tests.                    |
+| `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |
+| `mock_beefllm_test.py` | Offline LLM-pass tests, incl. a fake OpenAI server. |
+| `mock_shoutout_test.py` | Offline raid-shoutout tests.                 |
+| `mock_customcmds_test.py` | Offline `!cmd` tests.                      |
+| `tokens.json`        | Created on first login; holds the saved login.  |
+| `reminders.json`     | Pending reminders; written at runtime.          |
+| `haul.json`          | The current haul; written at runtime.           |
+| `beef_state.json`    | The beef leaderboard and !revenge windows.      |
+| `custom_commands.json` | Mod-defined commands; written at runtime.     |
+| `names.json`         | Harvested `!smk` names; written at runtime.     |
+s.                        |
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
 | `mock_beef_test.py`  | Offline `!beef` story tests.                    |
 | `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |

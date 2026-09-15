@@ -520,11 +520,23 @@ def test_mods_can_switch_the_bots_voice():
     """!persona: show, list, set, custom, reset - moderators only. The
     chosen voice is what the model actually receives (pinned by
     capturing the system prompt), and it survives a restart."""
-    assert len(chatai.PERSONAS) >= 5
+    assert len(chatai.PERSONAS) >= 10
     assert len(set(chatai.PERSONAS.values())) == len(chatai.PERSONAS)
     assert chatai.persona("SARGE") == chatai.PERSONAS["sarge"]
     assert chatai.persona("nope") is None
     assert chatai.PERSONAS["doc"] == chatai.DEFAULT_PERSONA
+    # The streamer's own crew: the unit medic, the CB, the drop
+    # partner, the coach, the trail hand. Every voice - including a
+    # custom one - also receives his story, so a voice that lands on a
+    # run night or a Warzone night knows what room it is in.
+    crew = ("medic", "cb", "squaddie", "coach", "cowboy")
+    for v in crew:
+        assert chatai.persona(v), v
+    assert set(chatai.PERSONA_BLURBS) == set(chatai.PERSONAS)
+    bio = chatai.system_prompt()
+    assert "airborne" in bio and "Afghanistan" in bio, bio
+    assert "truck-stop 5Ks" in bio and "Red Dead Redemption 2" in bio
+    assert "airborne" in chatai.system_prompt("you are a pirate"), bio
 
     b = _bot(llm_api_key="k")
     pre = bot_mod.DEFAULTS["prefix"]
@@ -545,6 +557,9 @@ def test_mods_can_switch_the_bots_voice():
                       "hardclaws", "broadcaster/1")
         _drain(b)
         assert systems and chatai.PERSONAS["sarge"] in systems[0]
+        # ...and so does the streamer's story - Sarge knows whose
+        # channel he is barking in.
+        assert "airborne" in systems[0], systems[0]
         # Unknown name, list, custom validation, reset.
         b._persona_command("amod", "moderator/1", "set nobody")
         assert any("no voice called" in s for s in b.said), b.said

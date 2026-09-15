@@ -1348,6 +1348,14 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "_persona_text" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("the voices come from the streamer's world, and every voice knows his story",
+         len(_ch2.PERSONAS) >= 10
+         and _ch2.persona("medic") and _ch2.persona("cb")
+         and _ch2.persona("squaddie") and _ch2.persona("coach")
+         and _ch2.persona("cowboy")
+         and set(_ch2.PERSONA_BLURBS) == set(_ch2.PERSONAS)
+         and "airborne" in _ch2.system_prompt()
+         and "Red Dead Redemption 2" in _ch2.system_prompt()),
         ("!subgoal tracks the sub goal: set/count/add/sub/clear",
          _subgoal_command_works()),
         ("overheard questions never get FunFacts; chimes hold a bar",
