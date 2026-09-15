@@ -1321,6 +1321,11 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("local models get a local-sized chat budget (30s, 120 tokens)",
+         "default_to" in pathlib.Path("llm.py").read_text(encoding="utf-8")
+         and "max_tokens=120" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "chat_ai_timeout" not in _bot.DEFAULTS),
         ("the model is warmed at startup, not on the first chat line",
          callable(getattr(_llm2, "warm_up", None))
          and "chat-ai-warmup" in pathlib.Path(

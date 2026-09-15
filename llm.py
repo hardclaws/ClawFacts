@@ -186,7 +186,8 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
     return user
 
 
-def _build_body(model: str, user_prompt: str, system: str = None) -> str:
+def _build_body(model: str, user_prompt: str, system: str = None,
+                max_tokens: int = None) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -196,7 +197,7 @@ def _build_body(model: str, user_prompt: str, system: str = None) -> str:
         body["max_completion_tokens"] = 300
         body["reasoning_effort"] = "low"
     else:
-        body["max_tokens"] = 300
+        body["max_tokens"] = max_tokens or 300
         body["temperature"] = 0.9
     return json.dumps(body).encode("utf-8")
 
@@ -222,8 +223,11 @@ def _request(base: str, key: str, body: bytes,
 
 
 def _call(base: str, model: str, key: str, user_prompt: str,
-          system: str = None, timeout: float = 60.0) -> str:
-    return _request(base, key, _build_body(model, user_prompt, system),
+          system: str = None, timeout: float = 60.0,
+          max_tokens: int = None) -> str:
+    return _request(base, key,
+                    _build_body(model, user_prompt, system,
+                                max_tokens=max_tokens),
                     timeout=timeout)
 
 
@@ -241,18 +245,28 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
     model = cfg.get("llm_model") or (
         OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    # A local model on CPU needs a budget a hosted API does not: the chat
+    # prompt is the big one (persona + memories + the room), and reading
+    # it alone can run 10s+ on a mini PC. 8s was tuned for hosted APIs
+    # and kept timing out warm local models; local now self-defaults to
+    # the full 30s, and chat_ai_timeout in config still overrides both.
+    default_to = 30.0 if _is_local(base) else 8.0
     try:
-        timeout = max(2.0, min(float(cfg.get("chat_ai_timeout") or 8.0),
-                                30.0))
+        timeout = max(2.0, min(float(cfg.get("chat_ai_timeout")
+                                      or default_to), 30.0))
     except (TypeError, ValueError):
-        timeout = 8.0
+        timeout = default_to
     if cfg.get("debug"):
         print(f"[llm] POST {base}/chat/completions  model={model} "
               f"(chat, timeout {timeout}s)", flush=True)
         print(f"[llm] ---- chat prompt ----\n{user}", flush=True)
     try:
+        # One cleaned line is <= 280 chars (~60 words). 120 tokens is
+        # generous for that, and caps the damage a rambling model can do:
+        # on CPU, 300 tokens of nobody-will-read-this costs the whole
+        # timeout budget.
         return _call(base, model, key, _maybe_nothink(user, cfg), system,
-                     timeout=timeout)
+                     timeout=timeout, max_tokens=120)
     except urllib.error.HTTPError as exc:
         _disable(exc.code)
         if exc.code == 404:
@@ -286,7 +300,7 @@ def warm_up(cfg: dict) -> bool:
         text = _call(base, model, key,
                      _maybe_nothink("Reply with exactly: OK", cfg),
                      "You are a warm-up probe. Reply with exactly: OK.",
-                     timeout=90.0)
+                     timeout=90.0, max_tokens=8)
     except urllib.error.HTTPError:
         return False        # already logged (404 hint, key, credits)
     except Exception as exc:

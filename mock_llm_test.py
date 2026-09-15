@@ -21,7 +21,8 @@ captured = []
 
 
 def _fake_urlopen(req, timeout=60):
-    captured.append({"url": req.full_url, "headers": req.headers, "body": req.data.decode("utf-8")})
+    captured.append({"url": req.full_url, "headers": req.headers,
+                     "body": req.data.decode("utf-8"), "timeout": timeout})
     return io.BytesIO(json.dumps(FAKE_BODY).encode("utf-8"))
 
 
@@ -168,6 +169,39 @@ def main():
     finally:
         llm.urllib.request.urlopen = orig
     print("[PASS] warm-up loads the model at startup; unconfigured skips")
+
+    # The chat budget is provider-aware: 8s was tuned for hosted APIs and
+    # kept timing out WARM local models - the chat prompt is the big one,
+    # and reading it on CPU runs 10s+. Local self-defaults to 30s;
+    # chat_ai_timeout still overrides both ways.
+    llm.urllib.request.urlopen = _fake_urlopen
+    try:
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "k",
+                                  "llm_base_url": "http://127.0.0.1:11434/v1"})
+        assert captured[-1]["timeout"] == 30.0, captured[-1]
+        body = json.loads(captured[-1]["body"])
+        assert body["max_tokens"] == 120, body
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "k",
+                                  "llm_base_url": "https://api.groq.com/openai/v1"})
+        assert captured[-1]["timeout"] == 8.0, captured[-1]
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "k",
+                                  "llm_base_url": "http://127.0.0.1:11434/v1",
+                                  "chat_ai_timeout": 15})
+        assert captured[-1]["timeout"] == 15.0, captured[-1]
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "k",
+                                  "llm_base_url": "http://127.0.0.1:11434/v1",
+                                  "chat_ai_timeout": 99})
+        assert captured[-1]["timeout"] == 30.0, captured[-1]   # the clamp
+    finally:
+        llm.urllib.request.urlopen = orig
+    import bot as _b
+    assert "chat_ai_timeout" not in _b.DEFAULTS   # absence reaches llm.py
+    print("[PASS] local chat budget self-defaults to 30s; chat is capped "
+          "at 120 tokens")
 
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1

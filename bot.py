@@ -164,7 +164,6 @@ DEFAULTS = {
     "chat_ai_chance": 0.4,
     "chat_ai_max_hour": 20,
     "chat_ai_min_chat": 5,
-    "chat_ai_timeout": 8.0,
     # The quiet-room half: when nobody has spoken for chat_ai_quiet_seconds,
     # the bot opens the conversation itself (a question, a hook) rather than
     # waiting for a message to react to - at most once per

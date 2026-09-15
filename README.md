@@ -308,9 +308,15 @@ quantisation answers in a few seconds — fine for a few lines an hour:
 "llm_api_key": "",
 "llm_base_url": "http://127.0.0.1:11434/v1",
 "llm_model": "qwen3:8b",
-"llm_no_think": true,
-"chat_ai_timeout": 20
+"llm_no_think": true
 ```
+
+(`chat_ai_timeout` is optional now: local models self-default to the
+full 30s — 8s was tuned for hosted APIs and kept timing out warm local
+models, because the chat prompt is the big one and reading it on CPU
+runs 10s+. Set the key only to override. Chat replies are also capped
+at 120 generated tokens — one line never needs more, and a rambling
+model on CPU would otherwise burn the whole budget.)
 
 Three box-specific notes:
 
