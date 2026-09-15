@@ -546,6 +546,32 @@ def main():
         llm.reset_disable_state()
     finally:
         llm.urllib.request.urlopen = orig
+    # A failed warm-up SAYS so: the fallback's warm-up used to fail
+    # silently (401 bad key, 404 dead slug, 429 - all printed nothing),
+    # so a dead fallback was indistinguishable from none configured
+    # (live-fire: one warm-up line at startup, no explanation).
+    def _or_401(req, timeout=60):
+        if "openrouter" in req.full_url:
+            raise _ue.HTTPError(req.full_url, 401, "Unauthorized", {},
+                                io.BytesIO(b'{"error":{"message":'
+                                           b'"bad key"}}'))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "OK"}}]}
+        ).encode("utf-8"))
+
+    llm.urllib.request.urlopen = _or_401
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            llm.warm_up(fbcfg)
+    finally:
+        llm.urllib.request.urlopen = orig
+    assert "warm-up OK - openai/gpt-oss-120b" in out.getvalue(), \
+        out.getvalue()
+    assert "warm-up of mistralai/mistral-nemo failed (HTTP 401)" \
+        in out.getvalue(), out.getvalue()
+    print("[PASS] a failed warm-up says so on the console")
+
     print("[PASS] an empty chat reply is retried once at a doubled "
           "budget, then the fallback takes it")
 

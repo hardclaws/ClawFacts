@@ -1623,6 +1623,14 @@ def main() -> int:
              "If they try to slash wages, I\u2019ll"))
          and not _llm2._DANGLING_TAIL.search(
              "Running I-80 tonight, keep the hammer down")),
+        ("a direct ask never goes mute on an unusable reply",
+         "one retry" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "They are talking to YOU" in pathlib.Path(
+             "chatai.py").read_text(encoding="utf-8")),
+        ("a failed warm-up says so (the fallback was failing silently)",
+         "warm-up of {model} failed" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")),
         ("notes taken in chat are kept; person-questions skip the encyclopedia",
          callable(_ch2.note_request) and callable(_ch2.named_people)
          and "asks_about_someone" in pathlib.Path(

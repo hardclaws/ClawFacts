@@ -248,8 +248,9 @@ mid-stream (HTTP 429), and the chat voice used to go quiet for the
 two-minute breaker window. Fill the `llm_fallback_*` fields in
 `config.json` and a second provider carries the voice until the window
 clears — the console announces the switch once per outage, both
-providers are warmed at startup, and each has its own breaker so a dead
-fallback key never takes the primary down. The free OpenRouter setup:
+providers are warmed at startup (a failed warm-up says so on the
+console), and each has its own breaker so a dead fallback key never
+takes the primary down. The free OpenRouter setup:
 any key from openrouter.ai/keys (no card) plus any model whose slug
 ends in `:free` — verified live and healthy as of September 2026:
 `nvidia/nemotron-3-super-120b-a12b:free` (912ms, 62 t/s, months
@@ -306,7 +307,11 @@ voice.
   so it cannot be wound up like a toy. A mention that arrives inside
   the cooldown is *held*, not dropped — the bot answers it to the right
   person the moment the cooldown clears (within two minutes; after that
-  the moment has passed and answering would be the non-sequitur).
+  the moment has passed and answering would be the non-sequitur). And a
+  reply that comes back unusable — cut off mid-sentence, too long — is
+  re-asked once before silence: a direct question is never left
+  dangling, and a late answer always answers the message that was
+  actually sent.
   Channel-stats questions are answered straight from Helix: "docbot,
   how many follows this stream?" gets the live follower total plus how
   many are new since the bot came online (the baseline the startup

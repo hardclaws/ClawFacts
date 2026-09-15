@@ -700,6 +700,55 @@ def test_the_follower_count_is_one_question_away():
           "(total + new since baseline)")
 
 
+def test_a_direct_ask_gets_one_redemption():
+    """Live-fire: the zwift question's reply came back unusable (cut
+    off mid-sentence, over the rail) and a direct question from the
+    streamer got SILENCE - the next mention ('you ok?') was then
+    answered with the stale zwift take. A direct ask now gets ONE
+    redemption re-ask when the reply fails the cleaner; a chime does
+    not - chimes are optional talk."""
+    b = _bot(llm_api_key="k")
+    calls = []
+    orig, orig_fact = llm.chat_reply, bot_mod.get_funfact
+    # The zwift question is a WHAT question: stub the fact engine out so
+    # the test is hermetic - it has nothing, and the persona answers.
+    bot_mod.get_funfact = lambda q, o: None
+    bad = "Hey @kvack, check this thing out right now please buddy"
+    good = "0% is fine by me - keep the cadence and crush the miles"
+    try:
+        llm.chat_reply = lambda s, u, c: (calls.append(u) or
+                                          (bad if len(calls) == 1
+                                           else good))
+        b._chat_ai_mention_last = 0.0
+        b._on_message("Hardclaws", "#t",
+                      "docbot what do we think of people who ride zwift "
+                      "with 0% trainer difficulty", "hardclaws",
+                      "broadcaster/1")
+        _drain(b)
+        # Three model calls: the unusable reply, the redemption, and the
+        # post-reply memory distill. Two would mean no redemption.
+        assert len(calls) == 3, calls
+        assert b.said and "0% is fine" in b.said[0], b.said
+        # A chime (overheard) gets no redemption: one call, no post.
+        c = _bot(llm_api_key="k")
+        calls2 = []
+        llm.chat_reply = lambda s, u, cfg: (calls2.append(u) or bad)
+        bot_mod.random = _FixedRoll(1.0)     # fillers never chime
+        for i in range(6):
+            c._on_message("v%d" % i, "#t", "chatter line %d" % i,
+                          "v%d" % i, "")
+        bot_mod.random = _FixedRoll(0.0)     # the chime moment wins
+        c._on_message("kvack", "#t", "anyone else running I-80 tonight",
+                      "kvack", "")
+        _drain(c)
+        assert len(calls2) == 1, calls2
+        assert c.said == [], c.said
+    finally:
+        llm.chat_reply = orig
+        bot_mod.get_funfact = orig_fact
+    print("[PASS] a direct ask gets one redemption; a chime does not")
+
+
 def test_mention_notes_are_remembered_and_recalled():
     """Live-fire: 'Docbot take a mental note its 2:49am ... and
     @TruckingWithDoc just took a piss in Sullivan,MO Truck stop' had
@@ -1174,6 +1223,7 @@ def main():
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()
+    test_a_direct_ask_gets_one_redemption()
     test_the_follower_count_is_one_question_away()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()

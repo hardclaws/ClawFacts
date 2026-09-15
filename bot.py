@@ -2163,6 +2163,34 @@ class TwitchBot:
         if chatai.declined(raw):
             return None
         line = chatai.clean_line(raw)
+        if line is None and not quiet and not overheard:
+            # A DIRECT ask (a mention or !ask) never goes mute on an
+            # unusable reply: one redemption re-ask, told what was
+            # wrong. Live-fire: the zwift question's reply came back
+            # unusable ('...a solid rhythm, not a') and the question
+            # got SILENCE - then the next mention ('you ok?') was
+            # answered with the stale zwift take.
+            self._log(f"chat line rejected by the cleaner - one retry: "
+                      f"{raw[:120]!r}")
+            try:
+                raw = llm_mod.chat_reply(
+                    system + "\nYour previous reply was unusable - too "
+                    "long, cut off mid-sentence, or not allowed. Write "
+                    "ONE complete line of plain text, under 200 "
+                    "characters.",
+                    chatai.user_prompt(lines, nick, text, memories,
+                                       quiet=quiet,
+                                       max_lines=8 if local else 15,
+                                       max_memories=4 if local else 8,
+                                       own=list(self._chat_ai_own),
+                                       overheard=overheard),
+                    self._opts)
+            except Exception as exc:
+                self._log(f"chat ai error: {exc!r}")
+                return None
+            if not raw or chatai.declined(raw):
+                return None
+            line = chatai.clean_line(raw)
         if line is None:
             # The rails stay the rails (length, no @, no links) - but a
             # rejected line must not vanish silently: on a small local

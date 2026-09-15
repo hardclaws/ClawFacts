@@ -150,6 +150,8 @@ def user_prompt(lines: list, nick: str, text: str,
             "SAY. When in doubt, reply NOTHING TO SAY.")
     else:
         out.append(f"{nick} just said: {text}")
+        out.append("They are talking to YOU: answer THIS message - the "
+                   "earlier room chat is context, not the question.")
     out.append("")
     out.append("Your line:")
     return "\n".join(out)

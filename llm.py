@@ -525,8 +525,21 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict) -> str:
                      "You are a warm-up probe. Reply with exactly: OK.",
                      timeout=90.0, max_tokens=24,
                      hard_nothink=_hard_nothink(cfg, base))
-    except urllib.error.HTTPError:
-        return ""            # already logged (404 hint, key, credits)
+    except urllib.error.HTTPError as exc:
+        # A warm-up failure must SAY so. It used to return silently on
+        # the theory that the caller had logged it - but the 404 hint
+        # and the breaker messages live in the chat/complete callers,
+        # not here, so a dead fallback key or slug produced a startup
+        # with one warm-up line and no explanation (live-fire: the
+        # fallback was configured, failing, and invisible).
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace").strip()[:200]
+        except Exception:
+            pass
+        print(f"[llm] warm-up of {model} failed (HTTP {exc.code})"
+              f"{': ' + detail if detail else ''}", flush=True)
+        return ""
     except Exception as exc:
         print(f"[llm] warm-up failed: {exc!r}", flush=True)
         return ""
