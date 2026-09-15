@@ -303,14 +303,19 @@ voice.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers (a factual question in a mention gets the fact
   engine's grounded answer, same as `!ask`), at most once per
-  `chat_ai_mention_cooldown` seconds,
-  so it cannot be wound up like a toy. A mention that arrives inside
+  `chat_ai_mention_cooldown` seconds. Viewer wording is not run through
+  the bot's *output* profanity filter: a directly addressed question with
+  rough language is still answered, while the generated reply still has to
+  pass every output rail. Unsafe viewer lines are never retained as ambient
+  model context, so they cannot be parroted into a later reply. The cooldown
+  keeps the bot from being wound up like a toy. A mention that arrives inside
   the cooldown is *held*, not dropped — the bot answers it to the right
   person the moment the cooldown clears (within two minutes; after that
   the moment has passed and answering would be the non-sequitur). And a
   reply that comes back unusable — cut off mid-sentence, too long — is
-  re-asked once before silence: a direct question is never left
-  dangling, and a late answer always answers the message that was
+  re-asked once; a safe overlong answer is then fitted at a complete boundary,
+  or the bot posts an honest retry acknowledgement. A direct question is
+  never left dangling, and a late answer always answers the message that was
   actually sent.
   Channel-stats questions are answered straight from Helix: "docbot,
   how many follows this stream?" gets the live follower total plus how

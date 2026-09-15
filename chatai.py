@@ -76,6 +76,14 @@ _RULES = (
 )
 
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+
+# Last-resort acknowledgement after both model attempts violate the output
+# rails. This is intentionally not a guessed answer: it tells the viewer the
+# bot heard them, and prevents a later message from looking like the answer.
+DIRECT_FAILURE_LINE = (
+    "I heard you, but my answer got mangled in the gears. Try me once more."
+)
+
 #: A bare dotted word autolinks in chat clients ('config.json' is a real
 #: TLD) - the beef game already bans them, and so does the chat AI.
 _DOMAIN = re.compile(r"\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b")
@@ -107,6 +115,15 @@ def user_prompt(lines: list, nick: str, text: str,
     the generation - was the cost blowing past a 20s timeout on a warm
     model. Callers point these at smaller values for local models."""
     out = []
+    if not quiet and not overheard:
+        # Put the actual ask before the room as well as at the final answer
+        # cue. Some reasoning models latched onto an older question in Recent
+        # chat even though the old prompt named the latest one only at the end.
+        out.append("MESSAGE TO ANSWER (highest priority):")
+        out.append(f"{nick}: {text}")
+        out.append("Answer this message only. Older chat is context, never a "
+                   "different question to answer.")
+        out.append("")
     if own:
         # The bot's own lines are in the room buffer too, and a small
         # model left alone with them mimics itself - the 'midnight
@@ -172,25 +189,69 @@ def mention_kind(text: str, names) -> str | None:
     return None
 
 
+def direct_context(lines: list, names, prefix: str = "!") -> list:
+    """Room context safe to place beside a new direct question.
+
+    Older questions addressed to the bot are competing instructions, not
+    context. Keeping them in the prompt caused "Docbot you ok?" to receive an
+    answer to an earlier Zwift question. Commands are excluded for the same
+    reason (the current ``!ask`` is supplied separately by its caller).
+    """
+    out = []
+    for nick, text in lines or []:
+        t = (text or "").strip()
+        if not t or (prefix and t.startswith(prefix)):
+            continue
+        if mention_kind(t, names):
+            continue
+        out.append((nick, text))
+    return out
+
+
+def _blocked_output(line: str) -> bool:
+    """Whether normalized model output crosses a non-length safety rail."""
+    if "@" in line:                     # mentions are prepended by the bot
+        return True
+    if _DOMAIN.search(line):
+        return True
+    if len(_EMOJI.findall(line)) > 1:
+        return True          # the rules always said at most one
+    if re.search(r"![a-zA-Z]", line):
+        return True          # command syntax belongs to viewers, not the bot
+    if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
+                 line, re.IGNORECASE):
+        return True          # "check !funfact" died with the redirect rule
+    return bool(funfacts._EXPLICIT.search(line)
+                or funfacts._TASTELESS.search(line))
+
+
 def clean_line(line: str) -> str | None:
     """One safe line of chat, or None. The output gate."""
     line = " ".join((line or "").split()).strip('"\u201c\u201d')
     if not line or len(line) < 12 or len(line) > 280:
         return None
-    if "@" in line:                     # mentions are prepended by the bot
+    return None if _blocked_output(line) else line
+
+
+def recover_direct_line(line: str, limit: int = 240) -> str | None:
+    """Recover a safe short answer from an overlong direct reply.
+
+    Reasoning models occasionally ignore the 240-character instruction and
+    return a paragraph. Throwing the whole answer away made a direct mention
+    look broken. Only LENGTH is recoverable: if any part of the raw output
+    crosses a safety rail, none of it is used. ``trim_to_fit`` keeps a whole
+    sentence where possible and otherwise lands on a clause/word boundary.
+    Ambient chimes never use this -- silence is fine when nobody asked us.
+    """
+    raw = " ".join((line or "").split()).strip('"\u201c\u201d')
+    if len(raw) <= 280 or _blocked_output(raw):
         return None
-    if _DOMAIN.search(line):
+    candidate = funfacts.trim_to_fit(raw, max(80, min(int(limit), 280)))
+    # A pathological token wall ("xxxx..."), base64, etc. is not prose and
+    # trim_to_fit cannot invent a boundary for it.
+    if len(re.findall(r"\b[\w'\u2019-]+\b", candidate)) < 4:
         return None
-    if len(_EMOJI.findall(line)) > 1:
-        return None          # the rules always said at most one
-    if re.search(r"![a-zA-Z]", line):
-        return None          # command syntax belongs to viewers, not the bot
-    if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
-                 line, re.IGNORECASE):
-        return None          # "check !funfact" died with the redirect rule
-    if funfacts._EXPLICIT.search(line) or funfacts._TASTELESS.search(line):
-        return None
-    return line
+    return clean_line(candidate)
 
 
 def declined(raw: str) -> bool:
@@ -245,6 +306,8 @@ _SMALLTALK = (
     re.compile(r"\bwho are (?:you|u)\b", re.IGNORECASE),
     re.compile(r"\bwhat(?:'s| is|s) your name\b", re.IGNORECASE),
     re.compile(r"\bare (?:you|u) (?:a bot|real|human|alive|an ai)\b",
+               re.IGNORECASE),
+    re.compile(r"\b(?:(?:are|r) )?(?:you|u) (?:ok|okay|alright)\b",
                re.IGNORECASE),
     re.compile(r"\bhow old are (?:you|u)\b", re.IGNORECASE),
     re.compile(r"\bsay something\b", re.IGNORECASE),
@@ -550,6 +613,14 @@ _FACTUAL_Q = re.compile(
     r"how many|how much|how long|how old|how tall|how far)\b",
     re.IGNORECASE)
 _ABOUT_BOT = re.compile(r"\b(?:you|your|u|ur)\b", re.IGNORECASE)
+# Collective phrasing is still an opinion request aimed at the persona:
+# "what do we think of people who ride at 0%?" is not encyclopedia trivia.
+# Keep this narrower than a bare "we" so "what do we know about Mars" can
+# still use the grounded fact engine.
+_OPINION_Q = re.compile(
+    r"^\s*(?:what\s+do\s+(?:we|you|u)\s+think\b|"
+    r"what(?:'s|\s+is)\s+(?:our|your)\s+(?:take|opinion)\b|"
+    r"how\s+do\s+(?:we|you|u)\s+feel\b)", re.IGNORECASE)
 
 
 def strip_address(text: str, names=()) -> str:
@@ -577,7 +648,7 @@ def factual_question(text: str, names=()) -> bool:
     the bot ('doc, what is a bongo twist') is stripped first - mentions
     carry their trigger word."""
     t = strip_address(text, names)
-    if not _FACTUAL_Q.match(t):
+    if not _FACTUAL_Q.match(t) or _OPINION_Q.match(t):
         return False
     return not _ABOUT_BOT.search(t)
 

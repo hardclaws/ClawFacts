@@ -70,12 +70,13 @@ def test_a_mention_gets_one_bounded_reply():
         _drain(b)
         assert len(b.said) == 1, b.said
         # The reply is prefixed by the bot, never by the model: a model
-        # line carrying an @mention of its own is dropped whole.
+        # line carrying an @mention of its own is dropped whole. A direct ask
+        # gets the bot's safe acknowledgement instead of disappearing.
         llm.chat_reply = lambda s, u, c: "@kvack you would not believe it"
         b._chat_ai_mention_last = 0.0
         b._on_message("kvack", "#t", "doc honestly", "kvack", "")
         _drain(b)
-        assert len(b.said) == 1, b.said
+        assert b.said[-1] == "@kvack " + chatai.DIRECT_FAILURE_LINE, b.said
     finally:
         llm.chat_reply = orig
     print("[PASS] a mention gets one bounded reply, then quiet")
@@ -749,6 +750,67 @@ def test_a_direct_ask_gets_one_redemption():
     print("[PASS] a direct ask gets one redemption; a chime does not")
 
 
+def test_rough_direct_ask_is_answered_and_cannot_go_stale():
+    """Exact live-fire regression: an output-only profanity regex was also
+    censoring viewer input. The Zwift ask never became a job, but stayed in the
+    room buffer, so a later "you ok?" finally triggered the model and received
+    the stale Zwift answer. Direct asks must win, unsafe ambient context must
+    not linger, and configured fallback settings must actually reach llm.py.
+    """
+    b = _bot(
+        llm_api_key="groq-test",
+        llm_fallback_key="or-test",
+        llm_fallback_base_url="https://openrouter.ai/api/v1",
+        llm_fallback_model="fallback/test",
+    )
+    assert b._opts["llm_fallback_key"] == "or-test", b._opts
+    assert b._opts["llm_fallback_model"] == "fallback/test", b._opts
+    assert llm.fallback_endpoint(b._opts) == (
+        "https://openrouter.ai/api/v1", "or-test", "fallback/test")
+
+    rough = ("Docbot what do we think of people who ride zwift with 0% "
+             "trainer difficulty? Pussy or its ok?")
+    assert not chatai.factual_question(rough, b._chat_ai_names), \
+        "an opinion request was routed to encyclopedia search"
+    prompts = []
+    orig = llm.chat_reply
+
+    def answer(system, user, cfg):
+        prompts.append(user)
+        if "you ok?" in user.lower():
+            return "Running fine. The coffee is the part making strange noises."
+        return "0% is okay. Trainer difficulty is a preference, not a character test."
+
+    # Keep the regression about reply routing; memory distillation is covered
+    # separately and would add unrelated model calls to prompts.
+    b._distill = lambda *a, **k: None
+    llm.chat_reply = answer
+    try:
+        b._on_message("Hardclaws", "#t", rough, "hardclaws",
+                      "broadcaster/1")
+        assert not b._jobs.empty(), "rough wording silently killed a direct ask"
+        _drain(b)
+        assert b.said and "0% is okay" in b.said[-1], b.said
+        assert all(rough not in text for _, text in b._chat_ai_snapshot()), \
+            b._chat_ai_snapshot()
+
+        # Also simulate an older, otherwise-safe addressed question in the
+        # room. direct_context must remove it from the next prompt.
+        with b._chat_lock:
+            b._chat_buf.append(("Hardclaws", "docbot old zwift question"))
+        b._chat_ai_mention_last = 0.0
+        b._on_message("Hardclaws", "#t", "Docbot you ok?", "hardclaws",
+                      "broadcaster/1")
+        _drain(b)
+        assert "Running fine" in b.said[-1], b.said
+        assert "old zwift question" not in prompts[-1], prompts[-1]
+        assert "MESSAGE TO ANSWER" in prompts[-1]
+        assert chatai.smalltalk("Docbot you ok?") in chatai._SMALLTALK_LINES
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] rough direct asks answer now; old asks cannot hijack later replies")
+
+
 def test_mention_notes_are_remembered_and_recalled():
     """Live-fire: 'Docbot take a mental note its 2:49am ... and
     @TruckingWithDoc just took a piss in Sullivan,MO Truck stop' had
@@ -840,13 +902,14 @@ def test_no_failed_chat_attempt_is_silent():
             b.said
         assert b.said[0].split(" ", 1)[1] in chatai._OPINION_LINES, b.said
         assert any("returned nothing" in l for l in logs), logs
-        # The cleaner rejects a 400-char ramble: the log says so.
+        # The cleaner rejects a 400-char token wall: the log says so and the
+        # direct asker gets a safe acknowledgement, never the rejected text.
         logs.clear()
         llm.chat_reply = lambda s, u, c: "x" * 400
         b._chat_ai_mention_last = 0.0
         b._on_message("kvack", "#t", "doc hello there friend", "kvack", "")
         _drain(b)
-        assert len(b.said) == 1, b.said
+        assert b.said[-1] == "@kvack " + chatai.DIRECT_FAILURE_LINE, b.said
         assert any("rejected by the cleaner" in l for l in logs), logs
         # A mention inside the 60s cooldown: held, and the log says so.
         logs.clear()
@@ -945,6 +1008,14 @@ def test_unsafe_or_lazy_lines_never_post():
     assert chatai.clean_line(
         "one \U0001f600 two \U0001f601 three \U0001f602 four") is None
     assert chatai.clean_line("Graphics are free with the job.") is not None
+    paragraph = ("Zero percent is fine; trainer difficulty is a preference, "
+                 "not a character test. " + "Cadence is still cadence. " * 15)
+    recovered = chatai.recover_direct_line(paragraph)
+    assert recovered and len(recovered) <= 240 and "Zero percent" in recovered, \
+        recovered
+    assert chatai.recover_direct_line("x" * 400) is None
+    assert chatai.recover_direct_line(
+        "A safe opening sentence. " + "pussy " * 60) is None
     assert chatai.declined("NOTHING TO SAY")
     assert not chatai.declined("Ten-four on that.")
     # A declined or uncleanable reply backs off instead of hammering: the
@@ -1224,6 +1295,7 @@ def main():
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()
     test_a_direct_ask_gets_one_redemption()
+    test_rough_direct_ask_is_answered_and_cannot_go_stale()
     test_the_follower_count_is_one_question_away()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()

@@ -456,19 +456,28 @@ class TwitchBot:
         self._memory = memory_mod.Memory(
             cfg.get("memory_db_path") or memory_mod.DB_PATH)
         self._memory.prune()
-        self._opts = {                      # passed through to funfacts
+        self._opts = {                      # passed through to facts + chat AI
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
             "fact_source": cfg.get("fact_source", "sources"),
-        "answer_questions": cfg.get("answer_questions", True),
+            "answer_questions": cfg.get("answer_questions", True),
             "llm_api_key": cfg.get("llm_api_key", ""),
             "llm_base_url": cfg.get("llm_base_url", ""),
             "llm_model": cfg.get("llm_model", ""),
+            # These used to stop at config.json: llm.chat_reply() received
+            # _opts, not cfg, so a fully configured fallback was invisible.
+            # The tell in a live log was that startup warmed only the primary.
+            "llm_fallback_key": cfg.get("llm_fallback_key", ""),
+            "llm_fallback_base_url": cfg.get(
+                "llm_fallback_base_url", ""),
+            "llm_fallback_model": cfg.get("llm_fallback_model", ""),
+            "llm_no_think": bool(cfg.get("llm_no_think", False)),
+            # Deliberately absent from DEFAULTS (llm.py chooses hosted/local
+            # defaults); preserving a user override here does not create one.
+            "chat_ai_timeout": cfg.get("chat_ai_timeout"),
             "google_api_key": cfg.get("google_api_key", ""),
             "google_cx": cfg.get("google_cx", ""),
             "serper_api_key": cfg.get("serper_api_key", ""),
-        "tavily_api_key": cfg.get("tavily_api_key", "")
-        or os.environ.get("TAVILY_API_KEY", ""),
             "tavily_api_key": cfg.get("tavily_api_key", "")
             or os.environ.get("TAVILY_API_KEY", ""),
             "debug": bool(cfg.get("debug")),
@@ -813,11 +822,19 @@ class TwitchBot:
         # it should hear is plain chatter, which never starts with the
         # prefix. Cheap by design - a list append and, rarely, a job.
         if (nick or "").lower() != (self.nick or "").lower():
-            with self._chat_lock:
-                self._chat_buf.append(
-                    (nick, " ".join((message or "").split())[:200]))
-                if len(self._chat_buf) > 60:
-                    del self._chat_buf[:len(self._chat_buf) - 60]
+            # _EXPLICIT/_TASTELESS are OUTPUT backstops. A viewer is allowed
+            # to use rough language when directly asking the bot something,
+            # but that line must not linger in the room context for the model
+            # to parrot at somebody later. The direct request is still passed
+            # separately to _chat_ai_line; only ambient context is filtered.
+            unsafe_context = bool(funfacts._EXPLICIT.search(message or "")
+                                  or funfacts._TASTELESS.search(message or ""))
+            if not unsafe_context:
+                with self._chat_lock:
+                    self._chat_buf.append(
+                        (nick, " ".join((message or "").split())[:200]))
+                    if len(self._chat_buf) > 60:
+                        del self._chat_buf[:len(self._chat_buf) - 60]
             if self.cfg.get("chat_ai_enabled", False):
                 self._memory.note(nick, login, message)
             kind = self._chat_ai_kind(nick, badges, message)
@@ -2014,19 +2031,25 @@ class TwitchBot:
         text = (message or "").strip()
         if len(text) < 3 or text.startswith(self.cfg.get("prefix", "!")):
             return None
+        m = chatai.mention_kind(text, self._chat_ai_names)
+        if m:
+            # Direct address wins over the ambient-input filter. Those regexes
+            # are output rails, but this check used them as input censorship:
+            # "Docbot ... Pussy or it's ok?" was silently ignored, then the
+            # model answered that stale line when the viewer later asked
+            # "you ok?". The reply still passes clean_line(), so the bot can
+            # answer rough wording without repeating it into chat.
+            return m
         if funfacts._EXPLICIT.search(text) \
                 or funfacts._TASTELESS.search(text):
             return None
-        m = chatai.mention_kind(text, self._chat_ai_names)
         if "broadcaster/1" in (badges or ""):
             # The streamer has the floor: the bot never butts into his
-            # lines with a chime-in. But a direct @-mention is him
-            # addressing the bot, and ignoring it reads as broken - so
-            # mentions reply, chime-ins stay off for him.
-            return m
+            # lines with a chime-in. A direct mention returned above.
+            return None
         # A chime-in needs actual words to react to: an emoji wall has
         # characters but no conversation in it.
-        return m or (chatai.CHIME if chatai.chime_worthy(text) else None)
+        return chatai.CHIME if chatai.chime_worthy(text) else None
 
     def _maybe_chime(self, nick: str, login: str, kind: str,
                      message: str, badges: str = "") -> None:
@@ -2115,7 +2138,15 @@ class TwitchBot:
         not one it was asked - the model holds a far higher bar."""
         import llm as llm_mod
         persona = self._persona_text()
-        speakers = [n for n, _ in lines[-6:]] + [nick]
+        direct = not quiet and not overheard
+        # A previous direct ask is a competing instruction, not useful room
+        # context. In live chat the ignored Zwift question remained here, so
+        # "Docbot you ok?" got a Zwift answer. The current ask is supplied in
+        # its own high-priority block by user_prompt().
+        prompt_lines = (chatai.direct_context(
+            lines, self._chat_ai_names, self.cfg.get("prefix", "!"))
+            if direct else lines)
+        speakers = [n for n, _ in prompt_lines[-6:]] + [nick]
         # ...and whoever the line itself is about: a recall question
         # names its subject ('when did @TruckingWithDoc last stop'),
         # and the subject may not have spoken recently enough to sit in
@@ -2145,7 +2176,7 @@ class TwitchBot:
         try:
             raw = llm_mod.chat_reply(
                 system,
-                chatai.user_prompt(lines, nick, text, memories,
+                chatai.user_prompt(prompt_lines, nick, text, memories,
                                    quiet=quiet,
                                    max_lines=8 if local else 15,
                                    max_memories=4 if local else 8,
@@ -2178,7 +2209,7 @@ class TwitchBot:
                     "long, cut off mid-sentence, or not allowed. Write "
                     "ONE complete line of plain text, under 200 "
                     "characters.",
-                    chatai.user_prompt(lines, nick, text, memories,
+                    chatai.user_prompt(prompt_lines, nick, text, memories,
                                        quiet=quiet,
                                        max_lines=8 if local else 15,
                                        max_memories=4 if local else 8,
@@ -2192,10 +2223,19 @@ class TwitchBot:
                 return None
             line = chatai.clean_line(raw)
         if line is None:
-            # The rails stay the rails (length, no @, no links) - but a
-            # rejected line must not vanish silently: on a small local
-            # model, cleaner rejections are COMMON and invisible.
+            # The rails stay the rails (no @, no links, no explicit output),
+            # but an otherwise-safe paragraph can be fitted after both model
+            # attempts ignored the length instruction. Direct asks get a
+            # deterministic acknowledgement if even that is impossible;
+            # ambient lines remain optional and may stay silent.
+            recovered = (chatai.recover_direct_line(raw) if direct else None)
+            if recovered:
+                self._log("overlong direct reply recovered at a complete "
+                          f"boundary: {recovered[:120]!r}")
+                return recovered
             self._log(f"chat line rejected by the cleaner: {raw[:120]!r}")
+            if direct:
+                return chatai.DIRECT_FAILURE_LINE
         return line
 
     def _chat_ai_tick(self, now: float = None) -> bool:

@@ -910,6 +910,50 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _bot_forwards_chat_options():
+        """The provider test can pass while the real bot still drops the
+        fallback fields when it builds _opts. Exercise that handoff itself."""
+        cfg = dict(
+            _bot.DEFAULTS, nick="n", channel="#c", chat_ai_enabled=True,
+            llm_api_key="primary", llm_fallback_key="fallback-key",
+            llm_fallback_base_url="https://openrouter.ai/api/v1",
+            llm_fallback_model="fallback/model", llm_no_think=True,
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        return (_llm2.fallback_endpoint(b._opts) == (
+                    "https://openrouter.ai/api/v1", "fallback-key",
+                    "fallback/model")
+                and b._opts.get("llm_no_think") is True)
+
+    def _rough_direct_ask_cannot_go_stale():
+        rough = ("Docbot what do we think of people who ride zwift with 0% "
+                 "trainer difficulty? Pussy or its ok?")
+        cfg = dict(
+            _bot.DEFAULTS, nick="TruckingWithDocBot", channel="#c",
+            chat_ai_enabled=True,
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        context = _ch2.direct_context(
+            [("Hardclaws", rough),
+             ("Hardclaws", "docbot old zwift question"),
+             ("kvack", "ordinary room context")],
+            b._chat_ai_names)
+        return (b._chat_ai_kind("Hardclaws", "broadcaster/1", rough)
+                == _ch2.MENTION
+                and not _ch2.factual_question(rough, b._chat_ai_names)
+                and context == [("kvack", "ordinary room context")]
+                and _ch2.recover_direct_line("Safe prose with enough words. "
+                                             * 20) is not None
+                and _ch2.recover_direct_line("x" * 400) is None)
+
     def _subs_count_themselves():
         """Twitch lets only the broadcaster's own token read the sub
         count, so the bot counts what chat SEES: sub, resub and gift
@@ -1568,6 +1612,10 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("the live bot forwards fallback/no-think options to the chat client",
+         _bot_forwards_chat_options()),
+        ("rough direct asks answer; an old ask cannot hijack the next reply",
+         _rough_direct_ask_cannot_go_stale()),
         ("subs the bot sees in chat count toward the sub goal",
          "subgoal_auto_count" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
