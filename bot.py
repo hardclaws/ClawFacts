@@ -2618,6 +2618,19 @@ def main() -> None:
         sys.stderr = _Tee(sys.stderr, log_path)
         print(f"[log] also writing everything to {log_path}")
 
+    # Which build is this? A pasted log should never require guessing
+    # whether a fix is actually running. Silent if git is unavailable.
+    try:
+        import subprocess
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if commit:
+            print(f"[bot] build {commit}")
+    except Exception:
+        pass
+
     if not do_selftest:
         warn_config(cfg)
 

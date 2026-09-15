@@ -1321,6 +1321,8 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("the build is stamped in the log (a paste names its build)",
+         "rev-parse" in pathlib.Path("bot.py").read_text(encoding="utf-8")),
         ("no silent chat failures: every dead end leaves a log line",
          "rejected by the cleaner" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
