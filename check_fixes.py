@@ -1350,6 +1350,15 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")),
         ("!subgoal tracks the sub goal: set/count/add/sub/clear",
          _subgoal_command_works()),
+        ("overheard questions never get FunFacts; chimes hold a bar",
+         "NOT to you" in pathlib.Path(
+             "chatai.py").read_text(encoding="utf-8")
+         and "overheard=not (quiet or addressed)" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "strip_address" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "build unknown" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

@@ -283,9 +283,13 @@ everything else works without a key.
   room must have at least `chat_ai_min_chat` recent messages,
   `chat_ai_cooldown` seconds (default 240) must have passed since its
   last unprompted line, and the message it reacts to needs actual words
-  — an emoji wall has characters but no conversation in it. The
-  conversation is carried by mentions, `!ask` and the openers; chime-ins
-  are accents (default cap 12 an hour), not a second voice in the room.
+  — an emoji wall has characters but no conversation in it. The model
+  is told the message was NOT to it and must genuinely have something to
+  add, or it declines; and an overheard question is never answered with
+  a FunFact — the fact engine answers only questions *addressed* to the
+  bot. The conversation is carried by mentions, `!ask` and the openers;
+  chime-ins are accents (default cap 12 an hour), not a second voice in
+  the room.
 - **Quiet-room openers** — when nobody has spoken for
   `chat_ai_quiet_seconds`, the bot opens the conversation itself (a
   question for chat, a hook from its trucking life), at most once per

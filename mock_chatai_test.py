@@ -364,6 +364,49 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
           "the right person")
 
 
+def test_overheard_questions_never_get_funfacts():
+    """Live-fire: 'Where ya cuttin thru with Illinois?' was asked of the
+    ROOM - and the chime path answered it with a FunFact about traffic
+    lights. The fact engine answers only questions ADDRESSED to the bot
+    (mentions, !ask); overheard ones get the persona's judgment, under a
+    prompt that says the message was NOT to the bot."""
+    b = _bot(llm_api_key="k")
+    engine, prompts = [], []
+    orig_fact, orig_reply = bot_mod.get_funfact, llm.chat_reply
+    orig_roll = bot_mod.random
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or {
+        "place": "Illinois",
+        "fact": "You may not cut through private property."})
+    llm.chat_reply = lambda s, u, c: (prompts.append(u) or
+                                      "I-80 to Joliet. Skip the Circle.")
+    try:
+        bot_mod.random = _FixedRoll(1.0)     # fillers never chime
+        for i in range(6):
+            b._on_message("v%d" % i, "#t", "chatter line %d" % i,
+                          "v%d" % i, "")
+        bot_mod.random = _FixedRoll(0.0)     # the overheard question wins
+        b._on_message("reverendscottherapy", "#t",
+                      "Where ya cuttin thru with Illinois ?",
+                      "reverendscottherapy", "")
+        _drain(b)
+        assert engine == [], engine
+        assert any("NOT to you" in p for p in prompts), prompts
+        assert b.said and "I-80" in b.said[0], b.said
+        # A factual question ADDRESSED to the bot still gets the engine,
+        # with the address stripped from the query and the header.
+        b._chat_ai_mention_last = 0.0
+        b._on_message("kvack", "#t", "doc what is a bongo twist",
+                      "kvack", "")
+        _drain(b)
+        assert engine == ["what is a bongo twist"], engine
+        assert "doc what" not in b.said[-1], b.said
+    finally:
+        bot_mod.get_funfact = orig_fact
+        llm.chat_reply = orig_reply
+        bot_mod.random = orig_roll
+    print("[PASS] overheard questions never get FunFacts; addressed ones do")
+
+
 def test_the_bot_cannot_repeat_itself():
     """Live-fire: the model found 'midnight coffee and donuts' and used
     some form of it in eight straight lines ('does this bot just repeat
@@ -934,6 +977,7 @@ def main():
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
     test_a_held_mention_is_answered_late_to_the_right_person()
+    test_overheard_questions_never_get_funfacts()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
     test_mods_can_switch_the_bots_voice()

@@ -80,7 +80,7 @@ def system_prompt(persona: str = "") -> str:
 def user_prompt(lines: list, nick: str, text: str,
                 memories: list = None, quiet: bool = False,
                 max_lines: int = 15, max_memories: int = 8,
-                own: list = None) -> str:
+                own: list = None, overheard: bool = False) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
@@ -118,6 +118,17 @@ def user_prompt(lines: list, nick: str, text: str,
             "conversation going - a question for chat, a hook from your "
             "trucking life, or an observation. Nothing like your last "
             "few lines.")
+    elif overheard:
+        # A chime-in, not a reply: the model must know nobody addressed
+        # it, or it treats an overheard remark like a question asked of
+        # it and answers conversations it was never part of.
+        out.append(f"{nick} said to the room (NOT to you): {text}")
+        out.append("")
+        out.append(
+            "You are jumping in on your own initiative. Reply ONLY if "
+            "you genuinely have something to add to exactly what was "
+            "said - a relevant quip or a related story. When in doubt, "
+            "reply NOTHING TO SAY.")
     else:
         out.append(f"{nick} just said: {text}")
     out.append("")
@@ -352,14 +363,10 @@ _FACTUAL_Q = re.compile(
 _ABOUT_BOT = re.compile(r"\b(?:you|your|u|ur)\b", re.IGNORECASE)
 
 
-def factual_question(text: str, names=()) -> bool:
-    """True when the text asks about a third-party thing the fact engine
-    can look up - 'what is a bongo twist'. Questions about the bot
-    ('what do you think of this', 'whats your favorite truck') are
-    False: those are the persona's job, and routing them at the fact
-    engine would answer a question nobody asked. A leading address to
-    the bot ('doc, what is a bongo twist') is stripped first - mentions
-    carry their trigger word."""
+def strip_address(text: str, names=()) -> str:
+    """Drop a leading address to the bot: 'doc, what is a bongo twist'
+    -> 'what is a bongo twist'. Mentions carry their trigger word, and
+    neither the fact engine's header nor its query should include it."""
     t = (text or "").strip()
     low = t.lower()
     for n in sorted({str(x).lower().lstrip("@") for x in names if x},
@@ -369,6 +376,18 @@ def factual_question(text: str, names=()) -> bool:
             if rest:
                 t = rest
             break
+    return t
+
+
+def factual_question(text: str, names=()) -> bool:
+    """True when the text asks about a third-party thing the fact engine
+    can look up - 'what is a bongo twist'. Questions about the bot
+    ('what do you think of this', 'whats your favorite truck') are
+    False: those are the persona's job, and routing them at the fact
+    engine would answer a question nobody asked. A leading address to
+    the bot ('doc, what is a bongo twist') is stripped first - mentions
+    carry their trigger word."""
+    t = strip_address(text, names)
     if not _FACTUAL_Q.match(t):
         return False
     return not _ABOUT_BOT.search(t)

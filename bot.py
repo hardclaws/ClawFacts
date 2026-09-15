@@ -2013,10 +2013,13 @@ class TwitchBot:
             return list(self._chat_buf)
 
     def _chat_ai_line(self, lines: list, nick: str, text: str,
-                      quiet: bool = False, vary: bool = False):
+                      quiet: bool = False, vary: bool = False,
+                      overheard: bool = False):
         """Compose one cleaned line, or None. Shared by chime, !ask and
         the quiet-room opener. `vary` re-asks after a too-similar reply
-        (explicit commands get one redemption; ambient lines do not)."""
+        (explicit commands get one redemption; ambient lines do not).
+        `overheard` frames the message as one the bot is jumping in on,
+        not one it was asked - the model holds a far higher bar."""
         import llm as llm_mod
         persona = self._persona_text()
         speakers = [n for n, _ in lines[-6:]] + [nick]
@@ -2040,7 +2043,8 @@ class TwitchBot:
                                    quiet=quiet,
                                    max_lines=8 if local else 15,
                                    max_memories=4 if local else 8,
-                                   own=list(self._chat_ai_own)),
+                                   own=list(self._chat_ai_own),
+                                   overheard=overheard),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2129,12 +2133,16 @@ class TwitchBot:
             if now - self._chat_ai_mention_last < float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)):
                 return                  # the room moved on while we queued
-        # A factual question aimed at the bot ('doc, what is a bongo
+        # A factual question ADDRESSED to the bot ('doc, what is a bongo
         # twist?') is answered by the fact engine, not the persona - same
         # rule as !ask: grounded beats charming, and a guess is the
-        # failure mode.
-        if not quiet and chatai.factual_question(
-                text, self._chat_ai_names) \
+        # failure mode. Overheard questions do NOT get this: 'Where ya
+        # cuttin thru with Illinois?' was asked of the room, and the
+        # chime path answering it with a FunFact was the bot answering a
+        # question nobody asked it.
+        addressed = chatai.mention_kind(text, self._chat_ai_names)
+        if not quiet and addressed \
+                and chatai.factual_question(text, self._chat_ai_names) \
                 and self._answer_factual(nick, text):
             now = time.time()
             self._chat_ai_times = [t for t in self._chat_ai_times
@@ -2142,7 +2150,8 @@ class TwitchBot:
             self._chat_ai_mention_last = now
             return
         line = self._chat_ai_line(self._chat_ai_snapshot(),
-                                  nick or "chat", text, quiet=quiet)
+                                  nick or "chat", text, quiet=quiet,
+                                  overheard=not (quiet or addressed))
         # Failed attempts back off too, or every following message would
         # pay for another model call. Mentions back off mentions; openers
         # were already marked at enqueue.
@@ -2214,6 +2223,9 @@ class TwitchBot:
         by !ask and by factual mentions; returns True when an answer
         posted (the caller bumps the clocks)."""
         import llm as llm_mod
+        # 'doc, what is a bongo twist?' - the engine gets the question,
+        # not the address; the FunFact header must not carry 'doc'.
+        question = chatai.strip_address(question, self._chat_ai_names)
         opts = self._opts
         if llm_mod.chat_timed_out() and llm_mod._is_local(
                 (self._opts.get("llm_base_url") or "").strip()):
@@ -2936,8 +2948,11 @@ def main() -> None:
         ).stdout.strip()
         if commit:
             print(f"[bot] build {commit}")
+        else:
+            print("[bot] build unknown - no commit available; if this "
+                  "folder has no .git, updates were copied in by hand")
     except Exception:
-        pass
+        print("[bot] build unknown - git is unavailable here")
 
     if not do_selftest:
         warn_config(cfg)
