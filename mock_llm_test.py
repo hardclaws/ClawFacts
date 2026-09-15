@@ -609,7 +609,37 @@ def main():
         out.getvalue()
     assert "warm-up of mistralai/mistral-nemo failed (HTTP 401)" \
         in out.getvalue(), out.getvalue()
-    print("[PASS] a failed warm-up says so on the console")
+    assert "fallback NOT READY" in out.getvalue(), out.getvalue()
+
+    # OpenRouter documents a second error shape: an upstream can fail after
+    # HTTP 200 is committed, leaving {"error": ...} and no choices. That was
+    # the live KeyError('choices') and hid the actual code/message.
+    def _or_200_error(req, timeout=60):
+        if "openrouter" in req.full_url:
+            return io.BytesIO(json.dumps({
+                "error": {"code": 429,
+                          "message": "free-model provider is rate limited"}
+            }).encode("utf-8"))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "OK"}}]}
+        ).encode("utf-8"))
+
+    llm.reset_disable_state()
+    llm.urllib.request.urlopen = _or_200_error
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            assert llm.warm_up(fbcfg) is True  # primary is still healthy
+    finally:
+        llm.urllib.request.urlopen = orig
+    log = out.getvalue()
+    assert "fallback rate-limited (HTTP 429)" in log, log
+    assert "free-model provider is rate limited" in log, log
+    assert "fallback NOT READY" in log, log
+    assert "KeyError" not in log, log
+    assert llm._fallback_unavailable(), "the fallback's own breaker must open"
+    llm.reset_disable_state()
+    print("[PASS] failed warm-ups and HTTP-200 error envelopes say why")
 
     print("[PASS] an empty chat reply is retried once at a doubled "
           "budget, then the fallback takes it")

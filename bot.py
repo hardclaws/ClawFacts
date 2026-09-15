@@ -3409,12 +3409,17 @@ def main() -> None:
         _here = os.path.dirname(os.path.abspath(__file__))
         _out = subprocess.run(
             [sys.executable, os.path.join(_here, "check_fixes.py")],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, cwd=_here,
         ).stdout or ""
         _m = re.search(r"(\d+)/(\d+) present", _out)
         if _m:
             print(f"[bot] fixes self-check: {_m.group(1)}/{_m.group(2)} "
                   f"present - that is the build you are running")
+            # A count like 155/157 proves something is missing but used to hide
+            # WHAT, forcing another round trip for the full checker output.
+            for _missing in re.findall(
+                    r"^\s*\[ \]\s*(.*?)(?:\s{2,})?$", _out, re.MULTILINE):
+                print(f"[bot] MISSING FIX: {_missing.strip()}")
         else:
             print("[bot] fixes self-check: could not read check_fixes.py "
                   "- is it next to bot.py?")

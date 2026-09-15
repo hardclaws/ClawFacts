@@ -253,21 +253,22 @@ window clears. The console announces the switch once per outage, both
 providers are warmed at startup, and each has its own breaker so a dead
 fallback key never takes the primary down. Startup also prints
 `fallback READY`, `OFF`, or `MISCONFIGURED`; a misspelled or missing
-fallback field can no longer fail invisibly. The common
+fallback field can no longer fail invisibly. `READY` at this first line means
+the three config fields form an endpoint; the background probe then prints a
+second `fallback READY` only after a real answer, or `fallback NOT READY` with
+the provider's actual code and message. The common
 `llm_fallback_api_key` spelling is accepted as an alias for
-`llm_fallback_key`. The free OpenRouter setup:
-any key from openrouter.ai/keys (no card) plus any model whose slug
-ends in `:free` — verified live and healthy as of September 2026:
-`nvidia/nemotron-3-super-120b-a12b:free` (912ms, 62 t/s, months
-stable — the pick), `thinkingmachines/inkling-small:free` (100%
-uptime), `google/gemma-4-26b-a4b-it:free` and
-`google/gemma-4-31b-it:free`. Skip the free coding agents (Poolside,
-Nex, Cohere Code) and the domain-tuned Lings (Sante = health,
-Fin = finance) — wrong tools for chat. Free slugs rotate (several
-older `:free` listings have
-gone dark), so take whatever is currently free on openrouter.ai/models;
-the free tier allows 20 requests/minute and 50/day — 1,000/day after
-any one-time $10 credit top-up — which is plenty for a fallback that
+`llm_fallback_key`.
+
+For OpenRouter, use a key from openrouter.ai/keys and a current model slug.
+Free slugs (`:free`) rotate, are shared-capacity endpoints, and can return
+provider failures even while the model page is up; they are useful as a
+best-effort spare, not a dependable failover service. For reliable coverage,
+use a paid non-`:free` slug (often fractions of a cent per short line) or a
+local Ollama fallback. Recheck openrouter.ai/models rather than copying a
+hard-coded free recommendation. The free tier allows 20 requests/minute and
+50/day — 1,000/day after any one-time $10 credit top-up — which can suit a
+fallback that
 carries requests only while Groq's window clears. A local Ollama works
 as the fallback too, with no limits at all. An empty chat reply — or one
 cut off mid-sentence ("If they try to slash wages, I'll") — is retried

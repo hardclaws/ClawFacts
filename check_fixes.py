@@ -923,6 +923,30 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _openrouter_200_error_is_explicit():
+        """A provider error after HTTP 200 must retain its code and reason."""
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+
+        original = _llm2.urllib.request.urlopen
+
+        def fake(_req, timeout=60):
+            return _io.BytesIO(_json.dumps({
+                "error": {"code": 429, "message": "provider overloaded"}
+            }).encode("utf-8"))
+
+        _llm2.urllib.request.urlopen = fake
+        try:
+            try:
+                _llm2._request("https://openrouter.ai/api/v1", "k", b"{}")
+            except _ue.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                return exc.code == 429 and "provider overloaded" in detail
+            return False
+        finally:
+            _llm2.urllib.request.urlopen = original
+
     def _bot_forwards_chat_options():
         """The provider test can pass while the real bot still drops the
         fallback fields when it builds _opts. Exercise that handoff itself."""
@@ -1633,6 +1657,12 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("OpenRouter HTTP-200 errors keep their code and explanation",
+         _openrouter_200_error_is_explicit()
+         and "fallback NOT READY" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "MISSING FIX" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("the live bot forwards fallback/no-think options to the chat client",
          _bot_forwards_chat_options()),
         ("rough direct asks answer; an old ask cannot hijack the next reply",

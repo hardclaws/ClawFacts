@@ -27,6 +27,7 @@ never appends made-up comments.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import time
@@ -372,6 +373,39 @@ def _build_body(model: str, user_prompt: str, system: str = None,
     return json.dumps(body).encode("utf-8")
 
 
+class _ResponseFormatError(ValueError):
+    """A 2xx response that is neither a completion nor an API error."""
+
+
+def _error_as_http(url: str, data, raw: bytes, headers) -> None:
+    """Turn an error envelope delivered with HTTP 200 into HTTPError.
+
+    OpenRouter can commit a successful HTTP status before an upstream model
+    fails. For a non-streaming request it then returns ``{"error": ...}`` with
+    no ``choices``. Treating that as a malformed completion produced the
+    useless live message ``KeyError('choices')`` and, more importantly, hid a
+    401/429 from the fallback's independent circuit breaker.
+    """
+    if not isinstance(data, dict) or not data.get("error"):
+        return
+    error = data["error"]
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("type")
+                      or "provider returned an error")
+        raw_code = error.get("code")
+    else:
+        message = str(error)
+        raw_code = None
+    try:
+        code = int(raw_code)
+    except (TypeError, ValueError):
+        code = 502
+    if code < 400 or code > 599:
+        code = 502
+    raise urllib.error.HTTPError(
+        url, code, message[:200], headers or {}, io.BytesIO(raw))
+
+
 def _request(base: str, key: str, body: bytes,
              timeout: float = 60.0) -> str:
     headers = {
@@ -386,10 +420,28 @@ def _request(base: str, key: str, body: bytes,
     if "openrouter" in base:
         headers["HTTP-Referer"] = "https://localhost"
         headers["X-Title"] = "TruckingWithDoc FunFact Bot"
-    req = urllib.request.Request(base + "/chat/completions", data=body, headers=headers)
+    req = urllib.request.Request(base + "/chat/completions", data=body,
+                                 headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
-    text = (data["choices"][0]["message"]["content"] or "").strip()
+        raw = resp.read()
+        response_headers = getattr(resp, "headers", {})
+    try:
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise _ResponseFormatError(
+            f"non-JSON response from {base}: {exc}") from exc
+    _error_as_http(req.full_url, data, raw, response_headers)
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        keys = sorted(str(k) for k in data) if isinstance(data, dict) else []
+        shape = f"; top-level fields: {', '.join(keys)}" if keys else ""
+        raise _ResponseFormatError(
+            f"response has no assistant choice{shape}") from exc
+    if not isinstance(content, str):
+        raise _ResponseFormatError(
+            f"assistant content is {type(content).__name__}, not text")
+    text = content.strip()
     # Qwen3 and other thinking models wrap the answer in a <think> block
     # even with the /no_think soft switch. Ollama usually strips it, but
     # not every stack does - and a generation cut mid-think leaves the
@@ -565,10 +617,13 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     return None
 
 
-def _warm_probe(base: str, model: str, key: str, cfg: dict) -> str:
-    """One warm-up attempt against one provider: the probe, plus the
-    generous retry for the empty-think-block case. Returns the reply
-    text ('' counts as failure)."""
+def _warm_probe(base: str, model: str, key: str, cfg: dict,
+                fallback: bool = False) -> str:
+    """One warm-up attempt against one provider.
+
+    ``fallback`` makes failures identify and update the fallback's separate
+    breaker instead of making a configured-but-dead endpoint look ready.
+    """
     started = time.time()
     try:
         text = _call(base, model, key,
@@ -577,22 +632,23 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict) -> str:
                      timeout=90.0, max_tokens=24,
                      hard_nothink=_hard_nothink(cfg, base))
     except urllib.error.HTTPError as exc:
-        # A warm-up failure must SAY so. It used to return silently on
-        # the theory that the caller had logged it - but the 404 hint
-        # and the breaker messages live in the chat/complete callers,
-        # not here, so a dead fallback key or slug produced a startup
-        # with one warm-up line and no explanation (live-fire: the
-        # fallback was configured, failing, and invisible).
+        # A warm-up failure must SAY so. OpenRouter may put this error in a
+        # 200 body; _request normalises that envelope into the same path.
         detail = ""
         try:
-            detail = exc.read().decode("utf-8", "replace").strip()[:200]
+            detail = exc.read().decode("utf-8", "replace").strip()[:300]
         except Exception:
             pass
+        if exc.code in (401, 402, 403, 429):
+            (_disable_fallback if fallback else _disable)(exc.code)
+        readiness = " - fallback NOT READY" if fallback else ""
         print(f"[llm] warm-up of {model} failed (HTTP {exc.code})"
-              f"{': ' + detail if detail else ''}", flush=True)
+              f"{': ' + detail if detail else ''}{readiness}", flush=True)
         return ""
     except Exception as exc:
-        print(f"[llm] warm-up failed: {exc!r}", flush=True)
+        readiness = " - fallback NOT READY" if fallback else ""
+        print(f"[llm] warm-up of {model} failed: {exc!r}{readiness}",
+              flush=True)
         return ""
     if not text:
         # qwen3 opens with an EMPTY <think></think> block even with
@@ -605,17 +661,33 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict) -> str:
                          "You are a warm-up probe. Reply with exactly: OK.",
                          timeout=90.0, max_tokens=200,
                          hard_nothink=_hard_nothink(cfg, base))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode(
+                    "utf-8", "replace").strip()[:300]
+            except Exception:
+                pass
+            if exc.code in (401, 402, 403, 429):
+                (_disable_fallback if fallback else _disable)(exc.code)
+            readiness = " - fallback NOT READY" if fallback else ""
+            print(f"[llm] warm-up retry of {model} failed (HTTP {exc.code})"
+                  f"{': ' + detail if detail else ''}{readiness}", flush=True)
         except Exception as exc:
-            print(f"[llm] warm-up retry failed: {exc!r}", flush=True)
+            readiness = " - fallback NOT READY" if fallback else ""
+            print(f"[llm] warm-up retry of {model} failed: {exc!r}"
+                  f"{readiness}", flush=True)
     if text:
+        readiness = " - fallback READY" if fallback else ""
         print(f"[llm] warm-up OK - {model} is loaded and answering "
-              f"({time.time() - started:.1f}s)", flush=True)
+              f"({time.time() - started:.1f}s){readiness}", flush=True)
         return text
     # An empty reply is odd but not fatal - chat lines will try anyway.
     # It must not be SILENT, though: a missing warm-up line in the log is
     # indistinguishable from the feature being off.
+    readiness = " - fallback NOT READY" if fallback else ""
     print(f"[llm] warm-up got an empty reply from {model} - chat lines "
-          f"will try anyway", flush=True)
+          f"will try anyway{readiness}", flush=True)
     return ""
 
 
@@ -645,7 +717,7 @@ def warm_up(cfg: dict) -> bool:
     fb = fallback_endpoint(cfg)
     if fb and not _fallback_unavailable():
         fbase, fkey, fmodel = fb
-        fok = bool(_warm_probe(fbase, fmodel, fkey, cfg))
+        fok = bool(_warm_probe(fbase, fmodel, fkey, cfg, fallback=True))
         if fok and not ok:
             print("[llm] the primary could not be warmed - chat will "
                   "run on the fallback", flush=True)
