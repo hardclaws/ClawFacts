@@ -1286,6 +1286,17 @@ To update safely, copy the new `.py` files, `spicy_facts.json`, `README.md` and
 alone**. If you do lose the login, `python3 bot.py --login` re-runs the device
 flow once.
 
+After every restart the bot prints its own build level — no git needed:
+
+```
+[bot] fixes self-check: 149/149 present - that is the build you are running
+```
+
+The count is the honest build number: it rises with every fix that ships, so a
+pasted log can never leave anyone guessing which fixes are actually running
+(`[bot] build …` names the git commit when there is one; the self-check works
+even in a hand-copied folder).
+
 One more thing that looks identical: `refresh_if_possible()` refuses saved
 tokens whose `client_id` differs from the one in `config.json`. Replacing
 `config.json` with `config.example.json` therefore also forces a re-login.

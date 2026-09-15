@@ -1517,6 +1517,11 @@ def main() -> int:
          and "empty chat reply" in pathlib.Path(
              "llm.py").read_text(encoding="utf-8")
          and _empty_reply_retried()),
+        ("startup names its fix count - a build number even without git",
+         "fixes self-check" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "check_fixes.py" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

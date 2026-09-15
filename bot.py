@@ -3030,6 +3030,27 @@ def main() -> None:
     except Exception:
         print("[bot] build unknown - git is unavailable here")
 
+    # ...and because hand-copied folders have no git at all, the fix
+    # count IS the build number: 149 is a different build than 143,
+    # whatever the folder's history says. A pasted log can then never
+    # leave us guessing which fixes are actually running.
+    try:
+        import subprocess
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _out = subprocess.run(
+            [sys.executable, os.path.join(_here, "check_fixes.py")],
+            capture_output=True, text=True, timeout=120,
+        ).stdout or ""
+        _m = re.search(r"(\d+)/(\d+) present", _out)
+        if _m:
+            print(f"[bot] fixes self-check: {_m.group(1)}/{_m.group(2)} "
+                  f"present - that is the build you are running")
+        else:
+            print("[bot] fixes self-check: could not read check_fixes.py "
+                  "- is it next to bot.py?")
+    except Exception:
+        print("[bot] fixes self-check: could not run check_fixes.py")
+
     if not do_selftest:
         warn_config(cfg)
 
