@@ -55,6 +55,13 @@ def _drain(b):
             b._say(argument)
 
 
+def _make_room_light(b, count=6):
+    """Enough recent conversation for a chime, but no flowing-chat burst."""
+    now = time.time()
+    with b._chat_lock:
+        b._chat_human_times = [now - 40 * (i + 1) for i in range(count)]
+
+
 def test_a_mention_gets_one_bounded_reply():
     b = _bot(llm_api_key="k")
     orig = llm.chat_reply
@@ -94,11 +101,20 @@ def test_chime_ins_are_gated():
             b._on_message(f"viewer{i}", "#t",
                           "the weather out there is brutal today",
                           f"viewer{i}", "")
-        # Roll too high: the bot keeps its own counsel.
+        # Even a winning roll stays silent while those rapid human lines make
+        # the room busy. A direct mention would still pass.
+        bot_mod.random = _FixedRoll(0.05)
+        b._on_message("viewer9", "#t", "anyone else running I-80 tonight",
+                      "viewer9", "")
+        assert b._jobs.empty(), "autonomous chime interrupted flowing chat"
+        # Age the same conversation into light chat: a losing roll stays quiet.
+        _make_room_light(b)
+        bot_mod.random = _FixedRoll(0.9)
         b._on_message("viewer9", "#t", "anyone else running I-80 tonight",
                       "viewer9", "")
         assert b._jobs.empty(), "chimed in on a losing roll"
-        # Roll wins: it speaks, once.
+        # In light chat a winning roll may speak, once.
+        _make_room_light(b)
         bot_mod.random = _FixedRoll(0.05)
         b._on_message("viewer9", "#t", "anyone else running I-80 tonight",
                       "viewer9", "")
@@ -111,21 +127,27 @@ def test_chime_ins_are_gated():
         b._on_message("viewer8", "#t", "roads are rough near Joplin",
                       "viewer8", "")
         assert b._jobs.empty(), "chimed in inside the long cooldown"
-        # The hourly cap is absolute - mentions included.
+        # The hourly cap is for autonomous chatter, never direct questions.
         b._chat_ai_last = 0.0
         b._chat_ai_times = [time.time() - 10] * bot_mod.DEFAULTS[
             "chat_ai_max_hour"]
         b._on_message("kvack", "#t", "doc tell them", "kvack", "")
-        assert b._jobs.empty(), "spoke past the hourly cap"
-        # Paused (!bot off) and !cb off both silence it.
+        assert b._jobs.qsize() == 1, "hourly ambient cap blocked a direct ask"
+        _drain(b)
+        # !bot off pauses everything. !cb off controls only autonomous
+        # chatter, so it must not turn a direct question into silence.
         b._chat_ai_times = []
+        b._chat_ai_mention_last = 0.0
         b.paused = True
         b._on_message("kvack", "#t", "doc tell them", "kvack", "")
         assert b._jobs.empty(), "spoke while paused"
         b.paused = False
         b._cb_ambient_off = True
+        before = len(b.said)
         b._on_message("kvack", "#t", "doc tell them", "kvack", "")
-        assert b._jobs.empty(), "spoke after !cb off"
+        assert b._jobs.qsize() == 1, "!cb off blocked a direct ask"
+        _drain(b)
+        assert len(b.said) == before + 1
         b._cb_ambient_off = False
         # A quiet room is not worth joining: too little chatter, no chime.
         b2 = _bot(llm_api_key="k")
@@ -136,6 +158,51 @@ def test_chime_ins_are_gated():
         bot_mod.random = orig_roll
         llm.chat_reply = orig_reply
     print("[PASS] chime-ins are gated by roll, room, cooldown and cap")
+
+
+def test_ambient_attempts_use_the_ambient_clock_only():
+    """Live-fire: every non-quiet attempt updated the MENTION clock instead
+    of the ambient clock. Rejected chimes could therefore run on every winning
+    message while real questions were held. The clocks must stay separate and
+    an attempt must start its cooldown before its model job runs."""
+    b = _bot(llm_api_key="k", chat_ai_chance=1.0)
+    _make_room_light(b)
+    orig_reply, orig_roll = llm.chat_reply, bot_mod.random
+    bot_mod.random = _FixedRoll(0.0)
+    calls = []
+
+    def _model(system, user, cfg):
+        calls.append(user)
+        if "MESSAGE TO ANSWER" in user:
+            return "Wide awake. What do you need?"
+        return "A freezer poem unrelated to anything in the room."
+
+    llm.chat_reply = _model
+    try:
+        b._on_message("viewer", "#t", "the weather turned rough",
+                      "viewer", "")
+        assert b._jobs.qsize() == 1
+        marked = b._chat_ai_last
+        assert marked > 0, "ambient cooldown was not marked at enqueue"
+        # The pending ambient job must not block an actual question.
+        b._on_message("Hardclaws", "#t", "doc are you awake",
+                      "hardclaws", "broadcaster/1")
+        assert b._jobs.qsize() == 2, "ambient work blocked a direct mention"
+        _drain(b)
+        assert b.said == ["@Hardclaws Wide awake. What do you need?"], b.said
+        assert b._chat_ai_last >= marked
+        assert b._chat_ai_mention_last > 0
+        # Another winning ambient moment inside 10 minutes pays no model call.
+        before = len(calls)
+        _make_room_light(b)
+        b._on_message("viewer2", "#t", "the weather is still rough",
+                      "viewer2", "")
+        assert b._jobs.empty()
+        assert len(calls) == before
+    finally:
+        llm.chat_reply = orig_reply
+        bot_mod.random = orig_roll
+    print("[PASS] ambient declines cool down themselves and never block asks")
 
 
 def test_the_streamer_can_address_the_bot_but_it_never_butts_in():
@@ -287,7 +354,8 @@ def test_emoji_walls_never_chime():
         b._on_message("kvack", "#t", "\U0001f3dc\ufe0f\U0001f3dc\ufe0f\U0001f3dc\ufe0f",
                       "kvack", "")
         assert b._jobs.empty(), b._jobs.qsize()
-        # ...but a real line still chimes
+        # ...but a real line may chime once the room is light, not flowing.
+        _make_room_light(b)
         b._on_message("kvack", "#t", "man the wind out here is brutal",
                       "kvack", "")
         assert b._jobs.qsize() == 1, b._jobs.qsize()
@@ -356,14 +424,13 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
                             time.time() - 300)]
     assert b2._chat_ai_tick() is False
     assert b2._chat_ai_pending == []
-    # And the hourly cap still rules: a fresh pending waits when the
-    # bot is capped (kept, not dropped - its moment has not passed).
+    # The autonomous hourly cap never strands a direct pending question.
     b3 = _bot(llm_api_key="k")
     b3._last_chat = time.time()
     b3._chat_ai_pending = [("kvack", "doc hello there", time.time())]
     b3._chat_ai_times = [time.time()] * bot_mod.DEFAULTS["chat_ai_max_hour"]
-    assert b3._chat_ai_tick() is False
-    assert len(b3._chat_ai_pending) == 1
+    assert b3._chat_ai_tick() is True
+    assert b3._chat_ai_pending == []
     print("[PASS] held mentions queue up and are answered late, each to "
           "the right person")
 
@@ -389,6 +456,7 @@ def test_overheard_questions_never_get_funfacts():
         for i in range(6):
             b._on_message("v%d" % i, "#t", "chatter line %d" % i,
                           "v%d" % i, "")
+        _make_room_light(b)
         bot_mod.random = _FixedRoll(0.0)     # the overheard question wins
         b._on_message("reverendscottherapy", "#t",
                       "Where ya cuttin thru with Illinois ?",
@@ -425,6 +493,12 @@ def test_the_bot_cannot_repeat_itself():
            "Midnight brew, fresh donuts, and the hum of a diesel"]
     assert chatai.too_similar("Midnight snacks and that endless horizon", own)
     assert not chatai.too_similar("Weighed the rig at the stateline scale", own)
+    cadence_own = ["Cadence is the whole game on this climb",
+                   "Smooth cadence beats stomping the pedals"]
+    assert chatai.too_similar("Cadence keeps the effort honest", cadence_own)
+    assert not chatai.too_similar(
+        "Cadence keeps the effort honest", cadence_own,
+        source="doc what cadence should I ride at")
     assert chatai.clean_line("check !funfact for the lowdown") is None
     assert chatai.clean_line("check the funfact command for more pal") is None
     assert chatai.clean_line("one emoji is fine \U0001f69b") is not None
@@ -447,19 +521,21 @@ def test_the_bot_cannot_repeat_itself():
     orig = llm.chat_reply
     llm.chat_reply = _model
     try:
-        # A mention whose reply echoes the loop: declined, nothing posts.
+        # A direct mention whose first reply echoes the loop gets one retry;
+        # direct questions are no longer silently discarded by anti-repeat.
         b._on_message("kvack", "#t", "doc what keeps you awake at night",
                       "kvack", "")
         _drain(b)
-        assert b.said == [], b.said
-        assert any("too similar" in l for l in logs), logs
-        # !ask gets the redemption: the echo is re-asked, the different
-        # line posts.
+        assert len(calls) >= 2 and "COMPLETELY different" in calls[1], calls
+        assert b.said and "scale house" in b.said[0], b.said
+        assert any("recycled" in l for l in logs), logs
+        # !ask gets the same redemption from the same starting history.
         calls.clear()
+        b._chat_ai_own = list(own)
         b._reply_ask("Hardclaws", "what is your favorite midnight snack")
         assert len(calls) == 2, calls
         assert "COMPLETELY different" in calls[1]
-        assert b.said and "scale house" in b.said[0], b.said
+        assert len(b.said) == 2 and "scale house" in b.said[1], b.said
         assert b._chat_ai_own[-1] == ("The scale house closed early. "
                                       "Nobody weighed anything.")
     finally:
@@ -631,12 +707,15 @@ def test_chimes_answer_what_was_said():
         for i in range(6):
             b._on_message("v%d" % i, "#t", "chatter line %d" % i,
                           "v%d" % i, "")
+        _make_room_light(b)
         bot_mod.random = _FixedRoll(0.0)     # the chime moment wins
         b._on_message("PiMPleff", "#t", src1, "pimpleff", "")
         _drain(b)
         assert b.said == [], b.said
-        # A grounded reply goes out, @-tagged to the speaker.
-        b._chat_ai_mention_last = 0.0
+        # A grounded reply goes out, @-tagged to the speaker. Move past the
+        # autonomous attempt cooldown for this independent case.
+        b._chat_ai_last = 0.0
+        _make_room_light(b)
         llm.chat_reply = lambda s, u, c: "That supplement hipped him up"
         b._on_message("PiMPleff", "#t", "that supplement really works",
                       "pimpleff", "")
@@ -644,7 +723,8 @@ def test_chimes_answer_what_was_said():
         assert b.said and "@PiMPleff" in b.said[0], b.said
         assert "supplement" in b.said[0], b.said
         # Parroting the message back is not an answer either.
-        b._chat_ai_mention_last = 0.0
+        b._chat_ai_last = 0.0
+        _make_room_light(b)
         llm.chat_reply = lambda s, u, c: "that supplement really works"
         b._on_message("PiMPleff", "#t", "that supplement really works",
                       "pimpleff", "")
@@ -738,6 +818,7 @@ def test_a_direct_ask_gets_one_redemption():
         for i in range(6):
             c._on_message("v%d" % i, "#t", "chatter line %d" % i,
                           "v%d" % i, "")
+        _make_room_light(c)
         bot_mod.random = _FixedRoll(0.0)     # the chime moment wins
         c._on_message("kvack", "#t", "anyone else running I-80 tonight",
                       "kvack", "")
@@ -1145,47 +1226,54 @@ def test_the_bot_remembers_and_forgets():
 
 
 def test_the_quiet_room_gets_a_conversation_opener():
-    """The other half of conversational: a chime-in can only trigger off
-    someone's message, which is impossible when the room has gone silent -
-    exactly when the bot should be doing the talking. After
-    chat_ai_quiet_seconds of silence the keeper queues one opener: posted
-    bare (nobody to @), at most once per chat_ai_quiet_cooldown, inside
-    the same hourly cap, and never while paused or !cb-off."""
+    """A quiet opener is one contextual follow-up per human conversation
+    lull, not a timer. It never starts from an empty startup room, never repeats
+    into unanswered silence, and remains bounded by the ambient rails."""
     b = _bot(llm_api_key="k")
     seen = []
     orig = llm.chat_reply
 
     def _model(s, u, c):
         seen.append(u)
-        # Two distinct lines: the anti-echo gate would correctly decline
-        # an identical repeat of the opener.
         return ("Anyone else ever lose a whole day to a weigh station "
                 "line?" if len(seen) == 1 else
-                "Heard a guy on the CB claim his cat navigates for him.")
+                "Does the navigating cat charge by the mile?")
 
     llm.chat_reply = _model
     try:
         now = time.time()
+        # Startup with no human conversation never opens, however old the
+        # timestamp gets. Ordinary safe chat arms one contextual follow-up.
+        b._last_chat = now - 500
+        assert not b._chat_ai_tick(now=now)
+        with b._chat_lock:
+            b._chat_buf.append(
+                ("viewer", "that weigh station line took all afternoon"))
+        b._chat_ai_quiet_armed = True
         # Chat alive: no opener.
         b._last_chat = now - 10
         assert not b._chat_ai_tick(now=now)
-        # Quiet: one opener, posted bare, prompt says the room is quiet.
+        # Quiet: one opener, posted bare, and grounded in the last human topic.
         b._last_chat = now - 500
         assert b._chat_ai_tick(now=now)
         _drain(b)
         assert b.said and not b.said[0].startswith("@"), b.said
+        assert "weigh station" in b.said[0].lower(), b.said
         assert any("gone quiet" in u for u in seen), "model not told"
-        # The quiet cooldown holds for a second tick.
+        # No human replied, so even after every cooldown expires it cannot
+        # repeat into silence.
         b._last_chat = now - 900
         assert not b._chat_ai_tick(now=now + 30)
+        assert not b._chat_ai_tick(now=now + 2000)
         # ...but a mention still works; the bot just spoke, so the
         # mention cooldown governs, not the quiet one.
         b._on_message("kvack", "#t", "doc good one", "kvack", "")
         _drain(b)
         assert len(b.said) == 2, b.said
-        # Paused and !cb off both stop the openers.
+        # Paused and !cb off both stop an armed opener.
         b._last_chat = now - 900
         b._chat_ai_last = 0.0
+        b._chat_ai_quiet_armed = True
         b.paused = True
         assert not b._chat_ai_tick(now=now + 600)
         b.paused = False
@@ -1215,6 +1303,48 @@ def test_the_quiet_room_gets_a_conversation_opener():
     finally:
         llm.chat_reply = orig
     print("[PASS] a quiet room gets a conversation opener, bounded")
+
+
+def test_quiet_followups_track_real_human_lulls():
+    """Ordinary human chat arms the latch through the production message path.
+    If another human speaks while the quiet job is queued, that stale opener is
+    canceled and the new conversation owns the next (and only) opportunity."""
+    b = _bot(llm_api_key="k", chat_ai_chance=0.0)
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c: "Did those cats ever give the map back?"
+    try:
+        b._on_message("viewer", "#t", "the cats are navigating today",
+                      "viewer", "")
+        assert b._chat_ai_quiet_armed, "ordinary conversation did not arm lull"
+        now = time.time()
+        b._last_chat = now - 500
+        b._chat_ai_last = 0.0
+        assert b._chat_ai_tick(now=now)
+        assert not b._chat_ai_quiet_armed, "attempt did not consume old lull"
+
+        # The worker has not run yet. New human chat invalidates that job and
+        # starts a fresh human-driven lull instead.
+        b._on_message("viewer2", "#t", "the cats stole the map again",
+                      "viewer2", "")
+        assert b._chat_ai_quiet_armed
+        _drain(b)
+        assert b.said == [], "stale quiet job interrupted resumed chat"
+        assert b._chat_ai_quiet_armed, "canceling stale work lost new lull"
+
+        # Age the new lull and the autonomous backstop: exactly one contextual
+        # follow-up can now post.
+        b._last_chat = time.time() - 500
+        b._chat_ai_last = 0.0
+        assert b._chat_ai_tick()
+        _drain(b)
+        assert b.said == ["Did those cats ever give the map back?"], b.said
+        assert not b._chat_ai_quiet_armed
+        b._last_chat = time.time() - 5000
+        b._chat_ai_last = 0.0
+        assert not b._chat_ai_tick(), "same lull repeated after speaking"
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] human chat arms one lull; resumed chat cancels stale work")
 
 
 def test_ask_is_a_command_not_a_feature():
@@ -1284,6 +1414,7 @@ def test_nothing_is_recorded_while_the_feature_is_off():
 def main():
     test_a_mention_gets_one_bounded_reply()
     test_chime_ins_are_gated()
+    test_ambient_attempts_use_the_ambient_clock_only()
     test_the_streamer_can_address_the_bot_but_it_never_butts_in()
     test_unsafe_or_lazy_lines_never_post()
     test_ask_answers_with_persona_then_facts()
@@ -1306,6 +1437,7 @@ def main():
     test_memory_roundtrip_and_forget()
     test_the_bot_remembers_and_forgets()
     test_the_quiet_room_gets_a_conversation_opener()
+    test_quiet_followups_track_real_human_lulls()
     test_ask_is_a_command_not_a_feature()
     test_nothing_is_recorded_while_the_feature_is_off()
     print("\nALL PASSED \u2714")

@@ -66,9 +66,13 @@ _RULES = (
     "- NEVER mention or point viewers at commands like !funfact or !ask. "
     "YOU are the one answering: answer yourself, or reply NOTHING TO "
     "SAY.\n"
-    "- Vary every line. Never reuse a word or image from your own recent "
-    "lines (no same drink, snack or time of day), and not every line "
-    "ends with a question.\n"
+    "- Vary every line. Do not recycle phrasing, metaphors or openers from "
+    "your recent lines; necessary words from the current topic are fine. "
+    "Not every line ends with a question.\n"
+    "- Never force truck, coffee, cadence, mileage, workout or negative-split "
+    "references into an unrelated reply. No generic motivation or slogans. "
+    "Sound like a person responding to this conversation, not a coach or a "
+    "scheduled quote bot.\n"
     "- When asked your opinion of a person or their news, give your take "
     "on the SITUATION - never pivot to a different subject.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
@@ -131,9 +135,9 @@ def user_prompt(lines: list, nick: str, text: str,
         # impossible to miss.
         out.append("Your own last lines - the room just saw these:")
         out.extend(f"- {l}" for l in own[-3:])
-        out.append("Your next line must NOT reuse their words, imagery "
-                   "or openers, and must not end with a question if they "
-                   "did.")
+        out.append("Do not recycle their phrasing, imagery or opener. Words "
+                   "needed for the CURRENT topic are allowed. Do not end with "
+                   "a question merely because the last line did.")
         out.append("")
     if memories:
         out.append("What you remember about people here (from past chat,"
@@ -148,10 +152,11 @@ def user_prompt(lines: list, nick: str, text: str,
     out.append("")
     if quiet:
         out.append(
-            "Nobody has spoken for a while. Say ONE line to get the "
-            "conversation going - a question for chat, a hook from "
-            "your own life, or an observation. Nothing like your last "
-            "few lines.")
+            "Nobody has spoken for a while. Continue the MOST RECENT HUMAN "
+            "topic above with one natural question or observation. It must "
+            "clearly name that topic. Do not give motivation, a slogan, or "
+            "generic truck/coffee/workout/cadence filler. If the last topic "
+            "is not worth reopening, reply NOTHING TO SAY.")
     elif overheard:
         # A chime-in, not a reply: the model must know nobody addressed
         # it, or it treats an overheard remark like a question asked of
@@ -162,9 +167,10 @@ def user_prompt(lines: list, nick: str, text: str,
             "You are jumping in on your own initiative. Reply ONLY if "
             "you genuinely have something to add to exactly what was "
             "said - a relevant quip or a related story about THAT "
-            "subject. Your line must be about what they actually "
-            "said; performing your persona at the room is NOTHING TO "
-            "SAY. When in doubt, reply NOTHING TO SAY.")
+            "subject. Your line must be about what they actually said. No "
+            "generic encouragement and no forced truck, coffee, workout, "
+            "cadence or mileage references. Performing your persona at the "
+            "room is NOTHING TO SAY. When in doubt, reply NOTHING TO SAY.")
     else:
         out.append(f"{nick} just said: {text}")
         out.append("They are talking to YOU: answer THIS message - the "
@@ -189,18 +195,24 @@ def mention_kind(text: str, names) -> str | None:
     return None
 
 
-def direct_context(lines: list, names, prefix: str = "!") -> list:
-    """Room context safe to place beside a new direct question.
+def direct_context(lines: list, names, prefix: str = "!",
+                   bot_nick: str = "") -> list:
+    """Human conversation context with commands and old bot asks removed.
 
     Older questions addressed to the bot are competing instructions, not
     context. Keeping them in the prompt caused "Docbot you ok?" to receive an
     answer to an earlier Zwift question. Commands are excluded for the same
-    reason (the current ``!ask`` is supplied separately by its caller).
+    reason (the current ``!ask`` is supplied separately by its caller), and
+    the bot's own lines are already supplied through the dedicated ``own``
+    block. This clean human-only room is also what quiet openers continue.
     """
     out = []
+    bot_low = (bot_nick or "").lower()
     for nick, text in lines or []:
         t = (text or "").strip()
-        if not t or (prefix and t.startswith(prefix)):
+        if not t or (bot_low and (nick or "").lower() == bot_low):
+            continue
+        if prefix and t.startswith(prefix):
             continue
         if mention_kind(t, names):
             continue
@@ -260,6 +272,26 @@ def declined(raw: str) -> bool:
     return (not up) or "NOTHING TO SAY" in up
 
 
+def recent_chat_count(message_times, now: float, window: float = 300.0) -> int:
+    """Number of human messages inside a rolling activity window."""
+    return sum(1 for t in (message_times or []) if now - t <= window)
+
+
+def room_is_busy(message_times, now: float, window: float = 30.0,
+                 messages: int = 4) -> bool:
+    """True while chat is flowing too quickly for an unsolicited bot line.
+
+    Direct mentions do not use this gate. Four human messages in thirty
+    seconds is already a conversation; the bot should listen until asked.
+    """
+    try:
+        threshold = max(2, int(messages))
+        span = max(5.0, float(window))
+    except (TypeError, ValueError):
+        threshold, span = 4, 30.0
+    return recent_chat_count(message_times, now, span) >= threshold
+
+
 def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
                  kind: str | None, roll: float, chance: float,
                  now: float, last: float, mention_last: float,
@@ -276,7 +308,11 @@ def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
     enough chatter to be worth joining, and they wait out the long
     cooldown.
     """
-    if not enabled or paused or ambient_off or kind is None:
+    if not enabled or paused or kind is None:
+        return False
+    # !cb off is the autonomous-chatter switch. Someone explicitly addressing
+    # the bot is not autonomous chatter and must remain answerable.
+    if ambient_off and kind != MENTION:
         return False
     if kind == MENTION:
         if now - mention_last < mention_cd:
@@ -288,7 +324,12 @@ def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
             return False
         if now - last < chime_cd:
             return False
-    if len([t for t in times if now - t < 3600]) >= max_hour:
+    # The hourly cap is for autonomous chatter. Someone explicitly talking to
+    # the bot still gets an answer (paced by the mention cooldown); otherwise a
+    # lively Q&A hour makes later direct questions disappear behind an ambient
+    # anti-spam rail.
+    if kind != MENTION \
+            and len([t for t in times if now - t < 3600]) >= max_hour:
         return False
     return True
 
@@ -371,27 +412,43 @@ def _content_words(line: str) -> set:
             if w not in _STOPWORDS}
 
 
-def too_similar(line: str, own_lines, jaccard: float = 0.3) -> bool:
-    """True when a candidate line repeats the bot's own recent lines.
+def _phrase_bigrams(line: str, exempt=None) -> set:
+    """Meaningful adjacent-word pairs, excluding pairs made only of filler."""
+    tokens = re.findall(r"[a-z]+(?:['\u2019][a-z]+)?",
+                        (line or "").lower())
+    exempt = exempt or set()
+    out = set()
+    for a, b in zip(tokens, tokens[1:]):
+        phrase = f"{a} {b}"
+        if _content_words(phrase) - exempt:
+            out.add(phrase)
+    return out
 
-    Two signals. A SIGNATURE WORD: any content word already used in two
-    or more of the last lines - the night the model found 'midnight
-    coffee and donuts' it used some form of it in eight straight lines,
-    and chat noticed ('does this bot just repeat midnight over and
-    over'). And plain high overlap with any single recent line."""
-    words = _content_words(line)
-    recent = [_content_words(l) for l in (own_lines or [])[-3:]]
+
+def too_similar(line: str, own_lines, jaccard: float = 0.3,
+                source: str = "") -> bool:
+    """True when a candidate recycles the bot's recent wording.
+
+    Topic words present in the message being answered are exempt: two answers
+    about cadence are allowed to say "cadence". What is rejected is a repeated
+    signature across several bot lines, a shared phrase/template, or high
+    overall overlap. The old rule rejected *any one word* shared with the
+    previous line, which discarded sensible direct answers constantly.
+    """
+    exempt = _content_words(source)
+    words = _content_words(line) - exempt
+    recent_lines = list(own_lines or [])[-3:]
+    recent = [_content_words(l) - exempt for l in recent_lines]
     if not words or not recent:
         return False
-    for w in words:
-        # A signature word across recent lines, OR any content word
-        # from the immediately previous line: live-fire, 'I'm swapping
-        # frozen beans for a steaming oat latte' was followed by 'I'm
-        # swapping stale jerky for a caramel macchiato' - they share
-        # only 'swapping', and the old >= 2-of-3 rule let the template
-        # through twice running.
-        if sum(1 for s in recent if w in s) >= 2 or w in recent[-1]:
-            return True
+    # A word the model has made a motif across at least two previous lines.
+    if any(sum(1 for s in recent if w in s) >= 2 for w in words):
+        return True
+    # A repeated phrase catches template reuse such as "I'm swapping ..."
+    # without treating one necessary shared noun as a duplicate answer.
+    phrases = _phrase_bigrams(line, exempt)
+    if any(phrases & _phrase_bigrams(old, exempt) for old in recent_lines):
+        return True
     for s in recent:
         if s and len(words & s) / len(words | s) >= jaccard:
             return True

@@ -792,14 +792,21 @@ def main() -> int:
         if not _ch.should_speak(**base):
             return False
         for key, value in (("paused", True), ("enabled", False),
-                           ("ambient_off", True), ("kind", None),
-                           ("mention_last", 990.0), ("times", [900.0] * 6)):
+                           ("kind", None), ("mention_last", 990.0)):
             if _ch.should_speak(**{**base, key: value}):
                 return False
+        # Autonomous switches/caps never strand an explicit question.
+        if not _ch.should_speak(**{**base, "ambient_off": True}):
+            return False
+        if not _ch.should_speak(**{**base, "times": [900.0] * 6}):
+            return False
         chime = {**base, "kind": "chime", "roll": 0.9}
         if _ch.should_speak(**chime):
             return False
         if not _ch.should_speak(**{**chime, "roll": 0.1}):
+            return False
+        if _ch.should_speak(**{**chime, "roll": 0.1,
+                               "times": [900.0] * 6}):
             return False
         if _ch.should_speak(**{**chime, "roll": 0.1, "last": 990.0}):
             return False                      # chimes wait out their clock
@@ -1711,9 +1718,10 @@ def main() -> int:
          callable(getattr(_ch2, "chime_worthy", None))
          and not _ch2.chime_worthy("\U0001f3dc\ufe0f\U0001f3dc\ufe0f")
          and _ch2.chime_worthy("crushed a few tootsie rolls today")
-         and _bot.DEFAULTS.get("chat_ai_chance") == 0.25
-         and _bot.DEFAULTS.get("chat_ai_cooldown") == 240
-         and _bot.DEFAULTS.get("chat_ai_max_hour") == 12),
+         and _bot.DEFAULTS.get("chat_ai_chance") == 0.10
+         and _bot.DEFAULTS.get("chat_ai_cooldown") == 600
+         and _bot.DEFAULTS.get("chat_ai_max_hour") == 6
+         and _bot.DEFAULTS.get("chat_ai_busy_messages") == 4),
         ("factual questions get the grounded answer before the persona",
          callable(getattr(_ch2, "factual_question", None))
          and _ch2.factual_question("what is a bongo twist")

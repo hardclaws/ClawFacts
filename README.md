@@ -328,33 +328,39 @@ voice.
   The streamer's own lines never
   trigger chime-ins — he has the floor — but directly addressing the bot
   by name does get a reply.
-- **Chime-ins** — on a busy channel it occasionally adds a line of its
-  own: a moment must win a `chat_ai_chance` roll (default 0.25), the
-  room must have at least `chat_ai_min_chat` recent messages,
-  `chat_ai_cooldown` seconds (default 240) must have passed since its
-  last unprompted line, and the message it reacts to needs actual words
-  — an emoji wall has characters but no conversation in it. The model
-  is told the message was NOT to it and must genuinely have something to
-  add, or it declines; and an overheard question is never answered with
-  a FunFact — the fact engine answers only questions *addressed* to the
-  bot. A chime must also be **about the message it jumps on**: the
-  reply has to share a content word with what was said, and is declined
-  otherwise — a persona poem at somebody who was talking about
-  something else (live-fire: "The freezer rattles like wind through
-  pine trees…" at a supplement comment) never reaches chat. The
-  conversation is carried by mentions, `!ask` and the openers;
-  chime-ins are accents (default cap 12 an hour), not a second voice in
-  the room.
-- **Quiet-room openers** — when nobody has spoken for
-  `chat_ai_quiet_seconds`, the bot opens the conversation itself (a
-  question for chat, a hook from its own life), at most once per
-  `chat_ai_quiet_cooldown`. A chime-in can only trigger off someone's
-  message, which is impossible in a silent room — exactly when the bot
-  should be doing the talking. Mention replies run on their own clock,
-  so a human answering an opener five seconds later gets a reply, not a
-  cooldown wall.
-- Nothing — mentions, chime-ins and openers included — exceeds
-  `chat_ai_max_hour` lines an hour, and `!cb off` silences all of it.
+- **Contextual chime-ins** — these are for *light* conversation, never a
+  busy room. A moment must win a `chat_ai_chance` roll (default 0.10),
+  the room must have at least `chat_ai_min_chat` recent human messages,
+  and `chat_ai_cooldown` seconds (default 600) must have passed since the
+  last unprompted attempt. If `chat_ai_busy_messages` human lines arrive
+  inside `chat_ai_busy_seconds` (defaults: 4 in 30 seconds), chat has the
+  floor: the bot stays silent unless someone asks or addresses it. Bot
+  echoes, commands, unsafe text and emoji walls do not create an excuse
+  to chime.
+
+  The model is told that the message was NOT to it and may speak only if
+  it has something specific to add. An overheard question is never
+  answered with a FunFact — the fact engine answers only questions
+  *addressed* to the bot. Every chime must be **about the human message
+  it jumps on**: the result has to carry that message's subject, and is
+  declined otherwise. Generic cadence, coffee, trucking, motivation or
+  workout filler does not count just because it matches Doc's persona.
+  A declined attempt still starts the cooldown, so a poor model cannot
+  hammer the room or the API. Chime-ins are accents (default autonomous
+  cap 6 an hour), not a second voice in the conversation.
+- **One contextual follow-up per lull** — a safe ordinary human
+  conversation can arm one follow-up. After
+  `chat_ai_quiet_seconds` (default 300) of silence, the bot may continue
+  that latest topic; it may not invent a generic icebreaker. The attempt
+  consumes the latch whether it speaks or declines. Continued silence
+  therefore never becomes a repeating timer: a new ordinary human
+  conversation must happen before another lull can be armed. Startup
+  silence is not armed, resumed chat cancels queued quiet work, and
+  `chat_ai_quiet_cooldown` (default 900) remains an additional backstop.
+- `chat_ai_max_hour` limits autonomous chime-ins and quiet follow-ups,
+  not directly addressed questions. Mentions use their own clock and
+  remain reliable even when the room is flowing or the autonomous cap
+  is full. `!cb off` still silences all autonomous chat AI.
 - **`!cb off`** silences it for the session, like the other chatter.
 
 What it will never do, by prompt *and* by output filter: tease people
@@ -364,14 +370,17 @@ routed to the fact engine first), guess anything personal about a viewer, or pos
 @mentions or more than one emoji, no command syntax (the persona never
 tells viewers to go use `!funfact` — it answers itself or says nothing).
 It also cannot repeat itself: its own recent lines are named in the
-prompt, and a reply reusing a signature word from them is declined
-(`!ask` gets one "say something completely different" re-ask first) —
-a small modet finds a phrase it likes will otherwise drill it into
-the ground ("midnight coffee and donuts" was a real stream). A model
-with nothing worth saying
-replies `NOTHING TO SAY` and the bot stays quiet — a decline still
-starts the cooldown, so it never hammers the API. The streamer's own
-messages never trigger it: he already has the floor.
+prompt, and an answer that recycles a phrase, distinctive signature or
+most of a recent line is declined. Ordinary topic words are exempt when
+the viewer just used them — mentioning `cadence` again while answering a
+cadence question is not repetition. A directly addressed answer gets one
+"say something completely different" retry before a deterministic
+failure line; autonomous chatter simply declines. That blocks actual
+repeated templates without making real questions silently disappear.
+A model with nothing worth saying replies `NOTHING TO SAY` and the bot
+stays quiet. The streamer's own messages never trigger autonomous chat:
+he already has the floor, though directly addressing the bot still gets
+an answer.
 
 The voice is `bot_personality` in `config.json` — your words, your
 rules — and the built-in default is Doc: a dry-witted old trucker who
