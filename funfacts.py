@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import random
 import re
@@ -47,6 +48,8 @@ USER_AGENT = ("ClawFacts/1.0 "
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
+OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # weather + solar
+OPEN_METEO_GEOCODE_API = "https://geocoding-api.open-meteo.com/v1/search"
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
 TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
@@ -634,35 +637,25 @@ _DANGLING_TAIL = re.compile(
     r"shall|should|may|might|must)\s*$",
     re.IGNORECASE)
 
-#: Speech verbs dangle off a cut quote: '...split, saying:' is a
-#: lead-in whose quote got cut off with the rest of the line.
+#: Speech verbs dangle off a cut quote: '...split, saying:' is a lead-in whose
+#: quote disappeared with the truncated tail.
 _DANGLING_SAY = re.compile(
     r"\s*\b(?:saying|said|says|telling|told|asking|asked|according)\W*$",
     re.IGNORECASE)
-
-#: Bare pronouns dangle off a cut tail: '...wages, I will' strips
-#: 'will' and would leave '...wages, I.' - the pronoun is not a
-#: sentence either.
 _DANGLING_PRONOUN = re.compile(
     r"\s*\b(?:i|we|you|they|he|she|it|this|that|there)\W*$",
     re.IGNORECASE)
 
 
 def _finish_line(s: str) -> str:
-    """Repair a model-written line that came back cut off. Returns "" for
-    anything that cannot stand as a complete line.
+    """Repair a generated line to its last complete clause, or reject it.
 
-    Live-fire: the Daft Punk split fact posted as 'He cited concerns
-    about ... as to why Daft Punk split, saying: "As much as I love
-    this character, the last thing I would want to be' - the model
-    squeezed the quote into its character budget, gave up mid-sentence,
-    and every downstream filter saw a line that was short enough and
-    grounded enough. A half-quote is not a fact: strip the model's
-    truncation marker, cut at the unclosed quote, strip dangling
-    connectors, and keep only what still reads complete."""
+    A model can fit under the character limit while still stopping mid-quote
+    or on an auxiliary (the field report ended “the last thing I would want to
+    be”). Remove the incomplete quote and dangling lead-ins before any such
+    line reaches grounding, caching, or chat.
+    """
     s = _ELLIPSIS_END.sub("", (s or "").strip())
-    # An unclosed quote means its back half was cut off with the rest -
-    # the whole quote goes, not just its ending. Curly and straight.
     if s.count("\u201c") > s.count("\u201d"):
         s = s[:s.rfind("\u201c")]
     if s.count('"') % 2 == 1:
@@ -923,7 +916,7 @@ def _fit_fact(fact: str, limit: int, opts: dict) -> str:
         import llm
     except Exception:
         llm = None
-    if llm and llm.is_configured(opts):
+    if llm and llm.any_configured(opts):
         try:
             s = llm.summarize(fact, limit, opts)
             if s:
@@ -2005,6 +1998,50 @@ def _osm_geocode(query: str):
     return _parse_geocode(data[0])
 
 
+def _open_meteo_geocode(query: str):
+    """Second keyless geocoder for live clock data when Nominatim is down."""
+    parts = [p.strip() for p in (query or "").split(",") if p.strip()]
+    city = parts[0] if parts else (query or "").strip()
+    region = parts[1].lower() if len(parts) > 1 else ""
+    if not region:
+        suffix = re.match(r"^(.*?)\s+([A-Za-z]{2})$", city)
+        if suffix and suffix.group(2).lower() in (
+                set(_US_STATES) | set(_CA_PROVINCES)):
+            city, region = suffix.group(1).strip(), suffix.group(2).lower()
+    region = (_US_STATES.get(region) or _CA_PROVINCES.get(region)
+              or region).lower()
+    if not city:
+        return None
+    try:
+        data = _http_get_json(
+            OPEN_METEO_GEOCODE_API,
+            {"name": city, "count": 10, "language": "en", "format": "json"},
+            timeout=10)
+    except Exception as exc:
+        print(f"[funfacts] open-meteo geocoder error: {exc!r}", flush=True)
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return None
+    for item in results:
+        admin = str(item.get("admin1") or "").strip()
+        if region and admin.lower() != region:
+            continue
+        try:
+            lat, lon = float(item["latitude"]), float(item["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        return {"name": str(item.get("name") or city).strip(),
+                "state": admin,
+                "county": str(item.get("admin2") or "").strip(),
+                "country": str(item.get("country") or "").strip(),
+                "lat": lat, "lon": lon,
+                "display_name": ", ".join(
+                    x for x in (str(item.get("name") or city).strip(), admin,
+                                str(item.get("country") or "").strip()) if x)}
+    return None
+
+
 # ---- optional LLM writer (OpenRouter / OpenAI-compatible) -------------------
 
 # Hard backstop against sexually explicit chat output. The LLM prompt forbids
@@ -2439,7 +2476,7 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
     except Exception as exc:
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return []
-    if not llm.is_configured(options):
+    if not llm.any_configured(options):
         if "llm_missing" not in _log_once:
             _log_once.add("llm_missing")
             print("[funfacts] spicy mode: no LLM configured — facts will be plain "
@@ -2478,9 +2515,6 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         # Drop chain-of-thought / meta chatter before it can reach chat.
         if _META_LINE.match(ln):
             continue
-        # A line the model cut off (its own ellipsis, a quote it never
-        # closed) is repaired to its last complete clause or dropped -
-        # before grounding, before the pool, before chat ever sees it.
         ln = _finish_line(ln)
         if not ln:
             continue
@@ -2995,7 +3029,7 @@ def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
     except Exception as exc:
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return []
-    if not llm.is_configured(opts):
+    if not llm.any_configured(opts):
         print("[funfacts] fact_source='llm' but no LLM is configured — set "
               "llm_api_key / GROQ_API_KEY / OPENROUTER_API_KEY, or a local "
               "Ollama (llm_base_url http://localhost:11434/v1).", flush=True)
@@ -3068,8 +3102,7 @@ _QSTRIP = frozenset((
 _SPECIFIC_Q = re.compile(
     r"\b(?:longest|shortest|biggest|largest|smallest|tallest|fastest|"
     r"slowest|oldest|newest|first|last|most|how many|how much|how long|"
-    r"how far|how old|how tall|when|who|which|what time)\b",
-    re.IGNORECASE)
+    r"how far|how old|how tall|when|who|which)\b", re.IGNORECASE)
 #: A capitalised word after the first is a proper noun; a digit is a figure.
 _CAP_MID = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _DIGIT = re.compile(r"\d")
@@ -3108,16 +3141,83 @@ def _question_wiki_hits(subject: str):
 _WEATHER_Q = re.compile(r"\bweather\b", re.IGNORECASE)
 _IN_PLACE = re.compile(
     r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
+_SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
+_SOLAR_PLACE = re.compile(
+    r"\b(?:in|for|at)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
 
 
-def _place_at_end(question: str):
-    """The place after 'in/for/at' at the end of a question, ignoring
-    trailing punctuation. Live-fire: 'what time we expecting sunrise
-    today in Vandalia, IL ?' found no place - the '?' sat between the
-    place and the end of the line, so even the weather header lost its
-    label on a question asked with a question mark."""
-    m = _IN_PLACE.search((question or "").strip().rstrip("?!.,;: "))
-    return " ".join(m.group(1).split()) if m else None
+def _clock_12h(value: str) -> str | None:
+    """``2026-09-15T06:37`` -> ``6:37 AM``, without timezone guessing."""
+    try:
+        clock = (value or "").rsplit("T", 1)[1][:5]
+        hour, minute = (int(x) for x in clock.split(":"))
+    except (IndexError, TypeError, ValueError):
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{(hour % 12) or 12}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+
+
+def _solar_answer(question: str):
+    """A live sunrise/sunset answer, ``False`` when this is not that query.
+
+    Search snippets are disastrous for clock questions: the exact live-fire
+    request for Vandalia returned “All times are local time” with no time in it.
+    Geocode the requested place, then ask Open-Meteo for the calculated local
+    sunrise/sunset directly. No model is involved and no snippet can masquerade
+    as the answer.
+    """
+    event_match = _SOLAR_Q.search(question or "")
+    if not event_match:
+        return False
+    event = event_match.group(1).lower()
+    place_match = _SOLAR_PLACE.search((question or "").strip())
+    # “Sunset, Louisiana” is a place lookup, not an astronomy question.
+    if not place_match and not re.search(
+            r"\b(?:what time|when|today|tomorrow|expect(?:ing|ed)|rise|set)\b|\?",
+            question or "", re.IGNORECASE):
+        return False
+    place = place_match.group(1).strip(" ,.?!)") if place_match else ""
+    # Accept both “sunrise tomorrow in X” and “sunrise in X tomorrow”.
+    day = "tomorrow" if re.search(r"\btomorrow\b", question or "",
+                                   re.IGNORECASE) else "today"
+    place = re.sub(r"\b(?:today|tomorrow|tonight)\b", "", place,
+                   flags=re.IGNORECASE).strip(" ,")
+    kind = event.title()
+    if not place:
+        return {"place": "requested place", "kind": kind,
+                "facts": [f"I need a city or town to look up {event}."]}
+
+    geo = _osm_geocode(place) or _open_meteo_geocode(place)
+    label = place
+    if geo:
+        label = ", ".join(x for x in (geo.get("name"), geo.get("state")) if x)
+    if not geo:
+        print(f"[funfacts] could not geocode {event} place: {place}", flush=True)
+        return {"place": label, "kind": kind, "_ttl": _BUSY_TTL,
+                "facts": [f"I couldn't fetch the {event} time right now; "
+                          "try me again in a minute."]}
+    try:
+        data = _http_get_json(
+            OPEN_METEO_API,
+            {"latitude": geo["lat"], "longitude": geo["lon"],
+             "daily": "sunrise,sunset", "timezone": "auto",
+             "forecast_days": 2}, timeout=10)
+        values = (data.get("daily") or {}).get(event) or []
+        index = 1 if day == "tomorrow" else 0
+        value = values[index]
+        clock = _clock_12h(value)
+        if not clock:
+            raise ValueError(f"bad {event} value: {value!r}")
+    except Exception as exc:
+        print(f"[funfacts] {event} lookup failed: {exc!r}", flush=True)
+        return {"place": label, "kind": kind, "_ttl": _BUSY_TTL,
+                "facts": [f"I couldn't fetch the {event} time right now; "
+                          "try me again in a minute."]}
+    print(f"[funfacts] {event} for {label}: {clock} local time {day}",
+          flush=True)
+    return {"place": label, "kind": kind, "_ttl": 900,
+            "facts": [f"{kind} is expected around {clock} local time {day}."]}
 
 
 def _weather_header(question: str):
@@ -3130,92 +3230,130 @@ def _weather_header(question: str):
     label instead of the whole question."""
     if not _WEATHER_Q.search(question or ""):
         return None, None
-    return _place_at_end(question), "Weather"
+    m = _IN_PLACE.search((question or "").strip().rstrip(" ?!."))
+    place = " ".join(m.group(1).split()) if m else None
+    return place, "Weather"
 
 
-#: Sunrise/sunset questions are data questions, not trivia (see
-#: _sun_times).
-_SUN_Q = re.compile(
-    r"\b(?:sunrise|sunsets?|sun\s?rises?|sun\s?sets?|first light|"
-    r"last light)\b", re.IGNORECASE)
+_WEATHER_CODES = {
+    0: "clear skies",
+    1: "mainly clear skies",
+    2: "partly cloudy skies",
+    3: "overcast skies",
+    45: "fog",
+    48: "freezing fog",
+    51: "light drizzle",
+    53: "drizzle",
+    55: "heavy drizzle",
+    56: "light freezing drizzle",
+    57: "heavy freezing drizzle",
+    61: "light rain",
+    63: "rain",
+    65: "heavy rain",
+    66: "light freezing rain",
+    67: "heavy freezing rain",
+    71: "light snow",
+    73: "snow",
+    75: "heavy snow",
+    77: "snow grains",
+    80: "light rain showers",
+    81: "rain showers",
+    82: "heavy rain showers",
+    85: "light snow showers",
+    86: "heavy snow showers",
+    95: "thunderstorms",
+    96: "thunderstorms with light hail",
+    99: "thunderstorms with heavy hail",
+}
+_WIND_POINTS = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
 
-#: State disambiguation reuses the _US_STATES table defined above (the
-#: region matcher's own): Open-Meteo's geocoder answers 'Illinois'
-#: while the question says 'IL' - and there are four Vandalias in the
-#: United States to choose between.
 
-_OM_GEO = "https://geocoding-api.open-meteo.com/v1/search"
-_OM_FORECAST = "https://api.open-meteo.com/v1/forecast"
-
-
-def _sun_header(question: str):
-    """(place, 'Sun') for a sunrise/sunset question, else (None, None)."""
-    if not _SUN_Q.search(question or ""):
-        return None, None
-    return _place_at_end(question), "Sun"
-
-
-def _clock_time(iso: str) -> str:
-    """'2026-09-15T06:37' -> '6:37 AM'. Open-Meteo speaks ISO-8601 in
-    the place's own timezone; chat does not."""
-    t = (iso or "").split("T")[-1][:5]
-    h, m = int(t[:2]), t[3:5]
-    return f"{h % 12 or 12}:{m} {'AM' if h < 12 else 'PM'}"
-
-
-def _sun_times(question: str):
-    """Sunrise/sunset for a named place, straight from Open-Meteo's
-    free keyless API - no model in the path, nothing to rate-limit,
-    nothing to cut off.
-
-    Live-fire: 'Docbot what time we expecting sunrise today in
-    Vandalia, IL ?' was answered 'All times are local time for the City
-    of Vandalia.' - the footnote of a scraped sun-times page, not the
-    time. Sun times are data like the weather: look them up, don't
-    summarize them. Returns the answer dict, or None to fall through to
-    the model path (no place, no geocode hit, API down)."""
-    place, kind = _sun_header(question)
-    if not place:
-        return None
+def _weather_number(value):
     try:
-        name, state = place, None
-        m = re.match(r"^(.+?)[,\s]+([A-Za-z]{2})$", place)
-        if m and m.group(2).lower() in _US_STATES:
-            name, state = m.group(1).strip(), _US_STATES[m.group(2).lower()]
-        geo = _http_get_json(_OM_GEO,
-                             {"name": name, "count": "10",
-                              "language": "en", "format": "json"})
-        hits = geo.get("results") or []
-        if not hits:
-            print(f"[funfacts] no geocode hit for {place!r} - leaving "
-                  f"the sun question to the model path", flush=True)
-            return None
-        # Prefer the state the question named; otherwise the geocoder's
-        # first hit (its own idea of 'the' Vandalia).
-        hit = next((h for h in hits
-                    if state and (h.get("admin1") or "").lower() == state),
-                   None) or hits[0]
-        tomorrow = bool(re.search(r"\btomorrow\b", question, re.IGNORECASE))
-        fc = _http_get_json(_OM_FORECAST, {
-            "latitude": str(hit.get("latitude")),
-            "longitude": str(hit.get("longitude")),
-            "daily": "sunrise,sunset", "timezone": "auto",
-            "forecast_days": "2" if tomorrow else "1"})
-        daily = fc.get("daily") or {}
-        sr = daily.get("sunrise") or []
-        ss = daily.get("sunset") or []
-        idx = 1 if tomorrow else 0
-        if len(sr) <= idx or len(ss) <= idx or not sr[idx] or not ss[idx]:
-            return None
-        when = "tomorrow" if tomorrow else "today"
-        line = (f"sunrise {_clock_time(sr[idx])}, sunset "
-                f"{_clock_time(ss[idx])} {when} - times are local.")
-        print(f"[funfacts] sun times from Open-Meteo for {place}", flush=True)
-        return {"place": place, "facts": [line], "kind": kind}
-    except Exception as exc:      # never let a data lookup break answering
-        print(f"[funfacts] sun times lookup failed for {place!r}: {exc!r}",
-              flush=True)
+        number = float(value)
+    except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
+
+
+def _weather_answer(question: str):
+    """Current conditions from Open-Meteo, or ``False`` when not weather.
+
+    Weather search results routinely describe archive pages (the exact field
+    report was “Weather reports from the last weeks ... with highs and lows”).
+    A weather question therefore owns this path completely: it either returns
+    measured current conditions or an honest temporary failure, and can never
+    fall through to Wikipedia/search snippets or an LLM paraphrase.
+    """
+    place, kind = _weather_header(question)
+    if kind is None:
+        return False
+    if not place:
+        return {"place": "requested place", "kind": "Weather",
+                "facts": ["I need a city or town to check the weather."]}
+
+    geo = _osm_geocode(place) or _open_meteo_geocode(place)
+    label = place
+    if geo:
+        label = ", ".join(x for x in (geo.get("name"), geo.get("state")) if x)
+    if not geo:
+        print(f"[funfacts] could not geocode weather place: {place}", flush=True)
+        return {"place": label, "kind": "Weather", "_ttl": _BUSY_TTL,
+                "facts": ["I couldn't fetch the current weather right now; "
+                          "try me again in a minute."]}
+
+    try:
+        data = _http_get_json(
+            OPEN_METEO_API,
+            {"latitude": geo["lat"], "longitude": geo["lon"],
+             "current": ("temperature_2m,apparent_temperature,"
+                         "relative_humidity_2m,precipitation,weather_code,"
+                         "wind_speed_10m,wind_direction_10m,wind_gusts_10m"),
+             "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+             "precipitation_unit": "inch", "timezone": "auto"},
+            timeout=10)
+        current = data.get("current") if isinstance(data, dict) else None
+        if not isinstance(current, dict):
+            raise ValueError("response has no current conditions")
+        temperature = _weather_number(current.get("temperature_2m"))
+        if temperature is None:
+            raise ValueError("response has no current temperature")
+        code = _weather_number(current.get("weather_code"))
+        conditions = _WEATHER_CODES.get(int(code), "unknown conditions") \
+            if code is not None else "unknown conditions"
+        feels = _weather_number(current.get("apparent_temperature"))
+        humidity = _weather_number(current.get("relative_humidity_2m"))
+        wind = _weather_number(current.get("wind_speed_10m"))
+        direction = _weather_number(current.get("wind_direction_10m"))
+        gusts = _weather_number(current.get("wind_gusts_10m"))
+        precipitation = _weather_number(current.get("precipitation"))
+    except Exception as exc:
+        print(f"[funfacts] weather lookup failed: {exc!r}", flush=True)
+        return {"place": label, "kind": "Weather", "_ttl": _BUSY_TTL,
+                "facts": ["I couldn't fetch the current weather right now; "
+                          "try me again in a minute."]}
+
+    pieces = [f"Currently {temperature:.0f}°F with {conditions}"]
+    if feels is not None:
+        pieces.append(f"feels like {feels:.0f}°F")
+    if humidity is not None:
+        pieces.append(f"humidity {humidity:.0f}%")
+    if wind is not None:
+        bearing = ""
+        if direction is not None:
+            bearing = " " + _WIND_POINTS[
+                int((direction % 360) / 22.5 + 0.5) % len(_WIND_POINTS)]
+        wind_text = f"wind{bearing} at {wind:.0f} mph"
+        if gusts is not None and gusts >= wind + 3:
+            wind_text += f", gusting to {gusts:.0f} mph"
+        pieces.append(wind_text)
+    if precipitation is not None and precipitation > 0:
+        pieces.append(f"precipitation {precipitation:.2f} in")
+    fact = "; ".join(pieces) + "."
+    print(f"[funfacts] current weather for {label}: {fact}", flush=True)
+    return {"place": label, "kind": "Weather", "_ttl": 300,
+            "facts": [fact]}
 
 
 def _question_place(question: str) -> str:
@@ -3441,9 +3579,6 @@ def _answer_question(question: str, opts: dict, limit: int):
     whenever the model path has nothing. A broken model must not turn an
     answerable question into a decline.
     """
-    sun = _sun_times(question)
-    if sun:
-        return sun
     result = _answer_question_llm(question, opts, limit)
     if result:
         return result
@@ -3473,7 +3608,7 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
     except Exception as exc:
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return None
-    if not llm.is_configured(opts):
+    if not llm.any_configured(opts):
         if "no_llm" not in _log_once:
             _log_once.add("no_llm")
             print("[funfacts] cannot answer free-form questions: no LLM is "
@@ -3596,14 +3731,16 @@ def get_funfact(location: str, options=None):
             _cache.pop(key, None)
 
     if entry is None:
-        result = None
-        # Sun times are data, not trivia: answer them before any
-        # search, scrape or model call (see _sun_times). A sunrise
-        # question must never be summarized by a model that can 429,
-        # time out, or post the page's footnote, when the actual times
-        # are one keyless lookup away.
-        if _SUN_Q.search(location):
-            result = _sun_times(location)
+        # Live conditions and clock data are not place fun facts and must never
+        # go through a search snippet or an LLM. ``False`` means the specialist
+        # did not recognise its query; a dict (including a transparent fetch
+        # failure) is the whole answer.
+        weather = _weather_answer(location.strip())
+        if weather is not False:
+            result = weather
+        else:
+            solar = _solar_answer(location.strip())
+            result = None if solar is False else solar
         if result is None and llm_only:
             facts = _llm_only_facts(location.strip(), limit, opts)
             if facts:
@@ -3649,11 +3786,9 @@ def get_funfact(location: str, options=None):
             elif result and result.get("facts"):
                 # facts arrive ranked best-first; show facts[0] on the first
                 # call so the reply matches the place's most famous story.
-                # The kind rides along: a 'Sun |' answer must still be a
-                # 'Sun |' answer on the cached second ask.
                 entry = {"place": result["place"], "facts": list(result["facts"]),
-                         "kind": result.get("kind"),
-                         "shown": 0, "t": now, "ttl": _HIT_TTL}
+                         "kind": result.get("kind"), "shown": 0, "t": now,
+                         "ttl": result.get("_ttl", _HIT_TTL)}
             else:
                 entry = {"place": None, "facts": [], "shown": 0,
                          "t": now, "ttl": _MISS_TTL}

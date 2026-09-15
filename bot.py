@@ -161,43 +161,42 @@ DEFAULTS = {
     # switch. False leaves the three CB voices and drops the WINDOW one.
     "cb_yell_enabled": True,
     # The chat AI: an optional persona that answers !ask, replies when
-    # addressed by name, and occasionally chimes in on a busy channel.
+    # addressed by name, and occasionally chimes in during light conversation.
     # OFF by default - flip chat_ai_enabled to let the bot hold its own in
-    # chat. Every line it posts is one short cleaned line, rate-limited:
-    # mention replies wait out chat_ai_mention_cooldown, unprompted
-    # chime-ins must win a chat_ai_chance roll and wait out
-    # chat_ai_cooldown, and nothing exceeds chat_ai_max_hour lines an hour.
-    # !cb off silences it for the session, like the other chatter.
+    # chat. Every line it posts is one short cleaned line. Mention replies
+    # wait out chat_ai_mention_cooldown; autonomous attempts win a chance roll,
+    # wait out chat_ai_cooldown and stay under chat_ai_max_hour. Direct asks
+    # are never hidden behind an autonomous cap or the !cb chatter switch.
     "chat_ai_enabled": False,
-    # The bot speaks when spoken to. Chime-ins - unprompted lines in a
-    # flowing conversation - are OFF by default: the field verdict,
-    # after weeks of declines and persona poems, was 'when chat is
-    # really flowing the bot should not speak at all unless someone
-    # asks it a question'. chat_ai_chance > 0 re-enables them (the odds
-    # per eligible moment), still bounded by chat_ai_cooldown and
-    # chat_ai_max_hour. Mention replies, !ask and the quiet-room
-    # openers are not affected by the chance.
-    "chat_ai_cooldown": 240,
+    # Chime-in cadence, retuned after field feedback ("timer bot"): the
+    # conversation is carried by mention replies and !ask; chime-ins are
+    # rare accents in LIGHT conversation, never a second voice in a flowing
+    # room. 0.10 roll + a 10-minute cooldown + a 6/hour cap.
+    "chat_ai_cooldown": 600,
     "chat_ai_mention_cooldown": 60,
-    "chat_ai_chance": 0.0,
-    "chat_ai_max_hour": 12,
+    "chat_ai_chance": 0.10,
+    "chat_ai_max_hour": 6,
     "chat_ai_min_chat": 5,
-    # The quiet-room half: after a real lull (five minutes, not ninety
-    # seconds) the bot may open the conversation itself - at most once
-    # per twenty minutes, inside the same hourly cap. The old 90/150
-    # pairing was a timer bot: five openers in sixteen minutes in a
-    # quiet room, half of them declined for repeating themselves.
+    # Autonomous chimes listen during light conversation but get out of the
+    # way once chat is flowing. Activity is rolling, not the lifetime buffer.
+    "chat_ai_context_seconds": 300,
+    "chat_ai_busy_seconds": 30,
+    "chat_ai_busy_messages": 4,
+    # The quiet-room half: when nobody has spoken for chat_ai_quiet_seconds,
+    # the bot opens the conversation itself (a question, a hook) rather than
+    # waiting for a message to react to - at most once per
+    # chat_ai_quiet_cooldown, inside the same hourly cap.
     "chat_ai_quiet_seconds": 300,
-    "chat_ai_quiet_cooldown": 1200,
+    "chat_ai_quiet_cooldown": 900,
     # Qwen3-family models "think" before answering, which on CPU turns a
     # one-line reply into a half-minute stall. true appends Qwen3's
     # documented /no_think soft switch to every prompt. No effect on
     # models that do not know the switch.
     "llm_no_think": False,
-    # The chat voice's second provider: when the llm_* provider is
-    # rate-limited (Groq's free tier 429s mid-stream), chat replies
-    # switch to this one until the window clears - the streamer never
-    # sees the gap. Empty model = no fallback (the default). A local
+    # The second LLM provider: when the llm_* provider is rate-limited
+    # (Groq's free tier 429s mid-stream), chat, sourced answers and fact
+    # writing switch to this one until the window clears. Empty model = no
+    # fallback (the default). A local
     # Ollama works here too: no key needed, and it is warmed at startup
     # like the primary.
     "llm_fallback_key": "",
@@ -366,6 +365,34 @@ def load_config(path: str, require: bool = True) -> dict:
                     cfg["llm_model"] = os.environ.get(model_env, "").strip() or model_default
                     break
 
+    # Normalize fallback aliases and optional environment variables. The first
+    # fallback implementation accepted only ``llm_fallback_key``; a natural
+    # ``llm_fallback_api_key`` spelling was silently ignored and looked exactly
+    # like failover never ran. Provider-specific environment keys are also a
+    # valid source when the configured fallback URL names that provider.
+    cfg["llm_fallback_model"] = str(
+        cfg.get("llm_fallback_model")
+        or cfg.get("llm_fallback_model_name")
+        or os.environ.get("LLM_FALLBACK_MODEL", "")).strip()
+    cfg["llm_fallback_base_url"] = str(
+        cfg.get("llm_fallback_base_url")
+        or cfg.get("llm_fallback_url")
+        or os.environ.get("LLM_FALLBACK_BASE_URL", "")).strip()
+    cfg["llm_fallback_key"] = str(
+        cfg.get("llm_fallback_key")
+        or cfg.get("llm_fallback_api_key")
+        or os.environ.get("LLM_FALLBACK_API_KEY", "")
+        or os.environ.get("LLM_FALLBACK_KEY", "")).strip()
+    fbbase = (cfg.get("llm_fallback_base_url") or
+              "https://openrouter.ai/api/v1").lower()
+    if cfg.get("llm_fallback_model") and not cfg.get("llm_fallback_key"):
+        if "openrouter" in fbbase:
+            cfg["llm_fallback_key"] = os.environ.get(
+                "OPENROUTER_API_KEY", "").strip()
+        elif "groq" in fbbase:
+            cfg["llm_fallback_key"] = os.environ.get(
+                "GROQ_API_KEY", "").strip()
+
     # The OAuth token is optional here — it can come from the auto-login flow.
     # `require` is False for --doctor: a half-finished config is exactly what
     # you are diagnosing, so refusing to load it would hide the answer.
@@ -437,10 +464,14 @@ class TwitchBot:
         # keep it from ever being the loudest voice in chat.
         self._chat_buf = []                        # [(nick, text), ...]
         self._chat_lock = threading.Lock()
-        self._chat_ai_last = 0.0                   # last unprompted line
+        self._chat_ai_last = 0.0                   # last unprompted attempt
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
+        self._chat_human_times = []             # rolling flow/busy detector
+        # One quiet opener per HUMAN conversation lull. It starts disarmed so
+        # startup never becomes a timer talking into a room that said nothing.
+        self._chat_ai_quiet_armed = False
         self._persona = self._load_json_state(
             self.cfg.get("persona_state_path", "persona.json"))
         self._subgoal = self._load_json_state(
@@ -460,19 +491,30 @@ class TwitchBot:
         self._memory = memory_mod.Memory(
             cfg.get("memory_db_path") or memory_mod.DB_PATH)
         self._memory.prune()
-        self._opts = {                      # passed through to funfacts
+        self._opts = {                      # passed through to facts + chat AI
             "spice": cfg.get("spice", "clean"),
             "max_fact_chars": int(cfg.get("max_fact_chars", 200)),
             "fact_source": cfg.get("fact_source", "sources"),
-        "answer_questions": cfg.get("answer_questions", True),
+            "answer_questions": cfg.get("answer_questions", True),
             "llm_api_key": cfg.get("llm_api_key", ""),
             "llm_base_url": cfg.get("llm_base_url", ""),
             "llm_model": cfg.get("llm_model", ""),
+            # These used to stop at config.json: llm.chat_reply() received
+            # _opts, not cfg, so a fully configured fallback was invisible.
+            # The tell in a live log was that startup warmed only the primary.
+            "llm_fallback_key": (cfg.get("llm_fallback_key")
+                                 or cfg.get("llm_fallback_api_key", "")),
+            "llm_fallback_base_url": (cfg.get("llm_fallback_base_url")
+                                      or cfg.get("llm_fallback_url", "")),
+            "llm_fallback_model": (cfg.get("llm_fallback_model")
+                                   or cfg.get("llm_fallback_model_name", "")),
+            "llm_no_think": bool(cfg.get("llm_no_think", False)),
+            # Deliberately absent from DEFAULTS (llm.py chooses hosted/local
+            # defaults); preserving a user override here does not create one.
+            "chat_ai_timeout": cfg.get("chat_ai_timeout"),
             "google_api_key": cfg.get("google_api_key", ""),
             "google_cx": cfg.get("google_cx", ""),
             "serper_api_key": cfg.get("serper_api_key", ""),
-        "tavily_api_key": cfg.get("tavily_api_key", "")
-        or os.environ.get("TAVILY_API_KEY", ""),
             "tavily_api_key": cfg.get("tavily_api_key", "")
             or os.environ.get("TAVILY_API_KEY", ""),
             "debug": bool(cfg.get("debug")),
@@ -807,8 +849,20 @@ class TwitchBot:
     # ---- chat ---------------------------------------------------------
     def _on_message(self, nick: str, target: str, message: str,
                     login: str = "", badges: str = "") -> None:
-        # Anything anyone says counts as chat being alive, not just commands.
-        self._last_chat = time.time()
+        prefix = self.cfg.get("prefix", "!")
+        human = (nick or "").lower() != (self.nick or "").lower()
+        # Only HUMAN lines drive silence and flow. Counting the bot's own IRC
+        # echo makes an autonomous timer influence its own activity detector.
+        if human:
+            now = time.time()
+            self._last_chat = now
+            # Every human line ends the previous lull. Only an ordinary safe
+            # conversation line below may arm a new one-shot follow-up.
+            self._chat_ai_quiet_armed = False
+            with self._chat_lock:
+                self._chat_human_times.append(now)
+                self._chat_human_times = [
+                    t for t in self._chat_human_times if now - t <= 600]
         # ...and anyone who says anything counts as present. Presence only
         # ever decides whether an @-tag would reach somebody - never who gets
         # named in a feud - and it is kept in memory, not in a file.
@@ -816,18 +870,31 @@ class TwitchBot:
         # The chat AI's ear. Runs before the command check: most of what
         # it should hear is plain chatter, which never starts with the
         # prefix. Cheap by design - a list append and, rarely, a job.
-        if (nick or "").lower() != (self.nick or "").lower():
-            with self._chat_lock:
-                self._chat_buf.append(
-                    (nick, " ".join((message or "").split())[:200]))
-                if len(self._chat_buf) > 60:
-                    del self._chat_buf[:len(self._chat_buf) - 60]
+        if human:
+            # _EXPLICIT/_TASTELESS are OUTPUT backstops. A viewer is allowed
+            # to use rough language when directly asking the bot something,
+            # but that line must not linger in the room context for the model
+            # to parrot at somebody later. The direct request is still passed
+            # separately to _chat_ai_line; only ambient context is filtered.
+            unsafe_context = bool(funfacts._EXPLICIT.search(message or "")
+                                  or funfacts._TASTELESS.search(message or ""))
+            addressed = chatai.mention_kind(message, self._chat_ai_names)
+            if not unsafe_context:
+                with self._chat_lock:
+                    self._chat_buf.append(
+                        (nick, " ".join((message or "").split())[:200]))
+                    if len(self._chat_buf) > 60:
+                        del self._chat_buf[:len(self._chat_buf) - 60]
+                # A quiet opener continues ordinary human conversation. A
+                # command or direct ask already has its own answer and should
+                # not arm a timer five minutes later.
+                if not (message or "").startswith(prefix) and not addressed:
+                    self._chat_ai_quiet_armed = True
             if self.cfg.get("chat_ai_enabled", False):
                 self._memory.note(nick, login, message)
             kind = self._chat_ai_kind(nick, badges, message)
             if kind:
                 self._maybe_chime(nick, login, kind, message, badges)
-        prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
         body = message[len(prefix):].strip()
@@ -2018,27 +2085,49 @@ class TwitchBot:
         text = (message or "").strip()
         if len(text) < 3 or text.startswith(self.cfg.get("prefix", "!")):
             return None
+        m = chatai.mention_kind(text, self._chat_ai_names)
+        if m:
+            # Direct address wins over the ambient-input filter. Those regexes
+            # are output rails, but this check used them as input censorship:
+            # "Docbot ... Pussy or it's ok?" was silently ignored, then the
+            # model answered that stale line when the viewer later asked
+            # "you ok?". The reply still passes clean_line(), so the bot can
+            # answer rough wording without repeating it into chat.
+            return m
         if funfacts._EXPLICIT.search(text) \
                 or funfacts._TASTELESS.search(text):
             return None
-        m = chatai.mention_kind(text, self._chat_ai_names)
         if "broadcaster/1" in (badges or ""):
             # The streamer has the floor: the bot never butts into his
-            # lines with a chime-in. But a direct @-mention is him
-            # addressing the bot, and ignoring it reads as broken - so
-            # mentions reply, chime-ins stay off for him.
-            return m
+            # lines with a chime-in. A direct mention returned above.
+            return None
         # A chime-in needs actual words to react to: an emoji wall has
         # characters but no conversation in it.
-        return m or (chatai.CHIME if chatai.chime_worthy(text) else None)
+        return chatai.CHIME if chatai.chime_worthy(text) else None
+
+    def _chat_activity(self, now: float = None) -> tuple[int, bool]:
+        """(recent human lines, flowing-now) for autonomous speech gates."""
+        now = time.time() if now is None else now
+        with self._chat_lock:
+            times = list(self._chat_human_times)
+        try:
+            context_seconds = float(self.cfg.get(
+                "chat_ai_context_seconds", 300))
+            busy_seconds = float(self.cfg.get("chat_ai_busy_seconds", 30))
+            busy_messages = int(self.cfg.get("chat_ai_busy_messages", 4))
+        except (TypeError, ValueError):
+            context_seconds, busy_seconds, busy_messages = 300.0, 30.0, 4
+        recent = chatai.recent_chat_count(times, now, context_seconds)
+        busy = chatai.room_is_busy(times, now, busy_seconds, busy_messages)
+        return recent, busy
 
     def _maybe_chime(self, nick: str, login: str, kind: str,
                      message: str, badges: str = "") -> None:
         """Gate the moment, then hand the composing to a worker.
 
         The LLM call takes seconds and must never block the read loop; a
-        job does the waiting. Failed attempts bump _chat_ai_last too (in
-        _do_chime), so a declining model cannot be billed in a loop.
+        job does the waiting. Autonomous attempts mark their clock before
+        enqueue, so a slow or declining model cannot be billed in a loop.
         """
         # A note ('docbot, take a mental note X') is a command, not
         # chatter: it is stored and acknowledged whatever the roll and
@@ -2068,26 +2157,29 @@ class TwitchBot:
                     ack = "Noted." if kept else "Already had that one."
                 self._jobs.put(("", "", "", "say", f"@{nick} {ack}"))
                 return
-        with self._chat_lock:
-            buffer_len = len(self._chat_buf)
+        now = time.time()
+        recent_chat, busy = self._chat_activity(now)
+        # Flowing human chat already has a conversation. Autonomous Doc listens;
+        # mentions still pass straight through this gate.
+        if kind == chatai.CHIME and busy:
+            return
         if not chatai.should_speak(
                 enabled=bool(self.cfg.get("chat_ai_enabled", False)),
                 paused=self.paused,
                 ambient_off=self._cb_ambient_off,
                 kind=kind, roll=random.random(),
-                chance=float(self.cfg.get("chat_ai_chance", 0.25)),
-                now=time.time(), last=self._chat_ai_last,
+                chance=float(self.cfg.get("chat_ai_chance", 0.10)),
+                now=now, last=self._chat_ai_last,
                 mention_last=self._chat_ai_mention_last,
                 mention_cd=float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)),
-                chime_cd=float(self.cfg.get("chat_ai_cooldown", 240)),
+                chime_cd=float(self.cfg.get("chat_ai_cooldown", 600)),
                 times=self._chat_ai_times,
-                max_hour=int(self.cfg.get("chat_ai_max_hour", 12)),
-                buffer_len=buffer_len,
+                max_hour=int(self.cfg.get("chat_ai_max_hour", 6)),
+                buffer_len=recent_chat,
                 min_chat=int(self.cfg.get("chat_ai_min_chat", 5))):
             if kind == chatai.MENTION and self.cfg.get(
-                    "chat_ai_enabled", False) \
-                    and not self.paused and not self._cb_ambient_off:
+                    "chat_ai_enabled", False) and not self.paused:
                 # A direct question never dangles. Held by the cooldown
                 # (or the cap), it is answered to the RIGHT person the
                 # moment the rail clears - the keeper tick picks it up.
@@ -2102,6 +2194,11 @@ class TwitchBot:
                 self._log(f"mention from {nick} held - will answer when "
                           f"the cooldown clears (a rail, not a bug)")
             return
+        if kind == chatai.CHIME:
+            # Mark an autonomous ATTEMPT at enqueue, not after the model call.
+            # Otherwise several fast messages all pass the same old timestamp,
+            # and rejected chimes never start their advertised cooldown.
+            self._chat_ai_last = now
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
 
@@ -2119,7 +2216,13 @@ class TwitchBot:
         not one it was asked - the model holds a far higher bar."""
         import llm as llm_mod
         persona = self._persona_text()
-        speakers = [n for n, _ in lines[-6:]] + [nick]
+        direct = not quiet and not overheard
+        # The model gets human conversation, not commands, its own IRC output,
+        # or older questions aimed at it. Those competing instructions caused
+        # both stale direct answers and generic quiet-room monologues.
+        prompt_lines = chatai.direct_context(
+            lines, self._chat_ai_names, self.cfg.get("prefix", "!"), self.nick)
+        speakers = [n for n, _ in prompt_lines[-6:]] + [nick]
         # ...and whoever the line itself is about: a recall question
         # names its subject ('when did @TruckingWithDoc last stop'),
         # and the subject may not have spoken recently enough to sit in
@@ -2149,7 +2252,7 @@ class TwitchBot:
         try:
             raw = llm_mod.chat_reply(
                 system,
-                chatai.user_prompt(lines, nick, text, memories,
+                chatai.user_prompt(prompt_lines, nick, text, memories,
                                    quiet=quiet,
                                    max_lines=8 if local else 15,
                                    max_memories=4 if local else 8,
@@ -2182,7 +2285,7 @@ class TwitchBot:
                     "long, cut off mid-sentence, or not allowed. Write "
                     "ONE complete line of plain text, under 200 "
                     "characters.",
-                    chatai.user_prompt(lines, nick, text, memories,
+                    chatai.user_prompt(prompt_lines, nick, text, memories,
                                        quiet=quiet,
                                        max_lines=8 if local else 15,
                                        max_memories=4 if local else 8,
@@ -2196,26 +2299,31 @@ class TwitchBot:
                 return None
             line = chatai.clean_line(raw)
         if line is None:
-            # The rails stay the rails (length, no @, no links) - but a
-            # rejected line must not vanish silently: on a small local
-            # model, cleaner rejections are COMMON and invisible.
+            # The rails stay the rails (no @, no links, no explicit output),
+            # but an otherwise-safe paragraph can be fitted after both model
+            # attempts ignored the length instruction. Direct asks get a
+            # deterministic acknowledgement if even that is impossible;
+            # ambient lines remain optional and may stay silent.
+            recovered = (chatai.recover_direct_line(raw) if direct else None)
+            if recovered:
+                self._log("overlong direct reply recovered at a complete "
+                          f"boundary: {recovered[:120]!r}")
+                return recovered
             self._log(f"chat line rejected by the cleaner: {raw[:120]!r}")
+            if direct:
+                return chatai.DIRECT_FAILURE_LINE
         return line
 
     def _chat_ai_tick(self, now: float = None) -> bool:
         """The quiet-room half of the chat AI.
 
-        A chime-in can only trigger off someone's message - which is
-        impossible when the room has gone silent, exactly when the bot
-        should be doing the talking. This runs on the idle keeper's
-        heartbeat: after chat_ai_quiet_seconds of silence, it queues one
-        conversation opener, at most once per chat_ai_quiet_cooldown and
-        inside the same hourly cap. The attempt is marked AT ENQUEUE, so
-        a busy worker can never double-fire it.
+        This runs on the idle keeper's heartbeat, but it is not a repeating
+        timer: one ordinary human conversation arms ONE possible follow-up.
+        Once an opener is attempted, silence cannot produce another; a human
+        has to restart the conversation first. The attempt is marked at
+        enqueue, so a busy worker cannot double-fire it.
         """
-        if not self.cfg.get("chat_ai_enabled", False):
-            return False
-        if self.paused or self._cb_ambient_off:
+        if not self.cfg.get("chat_ai_enabled", False) or self.paused:
             return False
         now = time.time() if now is None else now
         # Mentions held by the cooldown are answered here, to the people
@@ -2228,18 +2336,27 @@ class TwitchBot:
             self._chat_ai_pending.pop(0)     # stale; the next may be live
         if self._chat_ai_pending:
             p = self._chat_ai_pending[0]
-            if (now - self._chat_ai_mention_last >= float(
-                    self.cfg.get("chat_ai_mention_cooldown", 60))
-                    and len([t for t in self._chat_ai_times
-                             if now - t < 3600]) < int(
-                        self.cfg.get("chat_ai_max_hour", 12))):
+            if now - self._chat_ai_mention_last >= float(
+                    self.cfg.get("chat_ai_mention_cooldown", 60)):
+                # Direct questions are not ambient chatter and therefore are
+                # never stranded behind the autonomous hourly cap.
                 self._chat_ai_pending.pop(0)
                 self._log(f"answering {p[0]}'s held message")
                 self._jobs.put((p[0], (p[0] or "").lower(), "",
                                 "chime", p[1]))
                 return True
-        if now - self._last_chat < float(self.cfg.get(
-                "chat_ai_quiet_seconds", 90)):
+        # !cb off controls only the bot's own initiative. Check it after the
+        # direct queue so the autonomous switch cannot strand a real question.
+        if self._cb_ambient_off:
+            return False
+        try:
+            quiet_seconds = float(self.cfg.get("chat_ai_quiet_seconds", 300))
+        except (TypeError, ValueError):
+            quiet_seconds = 300.0
+        # Zero is the intuitive way to turn quiet openers off entirely.
+        if quiet_seconds <= 0 or not self._chat_ai_quiet_armed:
+            return False
+        if now - self._last_chat < quiet_seconds:
             return False                # chat is alive; the message path rules
         # An offline channel is not quiet, it is empty: without this gate
         # the bot would open conversations to nobody all night (same live
@@ -2250,12 +2367,13 @@ class TwitchBot:
         if helix is not None and helix.is_live() is False:
             return False
         if now - self._chat_ai_last < float(self.cfg.get(
-                "chat_ai_quiet_cooldown", 150)):
+                "chat_ai_quiet_cooldown", 900)):
             return False
         if len([t for t in self._chat_ai_times if now - t < 3600]) >= int(
-                self.cfg.get("chat_ai_max_hour", 20)):
+                self.cfg.get("chat_ai_max_hour", 6)):
             return False
         self._chat_ai_last = now
+        self._chat_ai_quiet_armed = False
         self._jobs.put(("", "", "", "chime", ""))
         return True
 
@@ -2330,11 +2448,35 @@ class TwitchBot:
         @), and no memory distill (nobody talked).
         """
         quiet = not (nick or "").strip()
-        if not quiet:
-            now = time.time()
+        now = time.time()
+        addressed = (None if quiet else
+                     chatai.mention_kind(text, self._chat_ai_names))
+        # Re-check session switches at execution time: a queued autonomous job
+        # may have waited behind slower work. !cb off silences that initiative,
+        # but never a human who directly addressed the bot.
+        if self.paused or (self._cb_ambient_off and not addressed):
+            return
+        if quiet:
+            # A human may resume chat while this job waits behind a fact lookup.
+            # Do not drop a timer line into a conversation that is alive again.
+            try:
+                quiet_seconds = float(self.cfg.get(
+                    "chat_ai_quiet_seconds", 300))
+            except (TypeError, ValueError):
+                quiet_seconds = 300.0
+            if quiet_seconds <= 0 or now - self._last_chat < quiet_seconds:
+                return
+        elif addressed:
             if now - self._chat_ai_mention_last < float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)):
-                return                  # the room moved on while we queued
+                return                  # another direct answer won the queue
+        else:
+            # The room can accelerate after an ambient job is queued. Direct
+            # asks continue; unsolicited work is canceled before paying the
+            # model or interrupting flowing chat.
+            _, busy = self._chat_activity(now)
+            if busy:
+                return
         # A factual question ADDRESSED to the bot ('doc, what is a bongo
         # twist?') is answered by the fact engine, not the persona - same
         # rule as !ask: grounded beats charming, and a guess is the
@@ -2355,7 +2497,6 @@ class TwitchBot:
                                    if now - t < 3600] + [now]
             self._chat_ai_mention_last = now
             return
-        addressed = chatai.mention_kind(text, self._chat_ai_names)
         if not quiet and addressed \
                 and chatai.factual_question(text, self._chat_ai_names) \
                 and not self._asks_about_someone(text) \
@@ -2365,14 +2506,15 @@ class TwitchBot:
                                    if now - t < 3600] + [now]
             self._chat_ai_mention_last = now
             return
-        line = self._chat_ai_line(self._chat_ai_snapshot(),
-                                  nick or "chat", text, quiet=quiet,
+        snapshot = self._chat_ai_snapshot()
+        line = self._chat_ai_line(snapshot, nick or "chat", text, quiet=quiet,
                                   overheard=not (quiet or addressed))
-        # Failed attempts back off too, or every following message would
-        # pay for another model call. Mentions back off mentions; openers
-        # were already marked at enqueue.
+        # Failed attempts back off on THEIR OWN clock. The old code put every
+        # non-quiet attempt on the mention clock: rejected ambient chimes never
+        # started chat_ai_cooldown, yet they blocked actual questions. That is
+        # why the log filled with chime declines while mentions were held.
         now = time.time()
-        if quiet:
+        if quiet or not addressed:
             self._chat_ai_last = now
         else:
             self._chat_ai_mention_last = now
@@ -2385,30 +2527,40 @@ class TwitchBot:
             if quip and not quiet:
                 self._say(self._fit(f"@{nick} ", quip))
             return
-        if chatai.too_similar(line, self._chat_ai_own):
-            # A small model that found a phrase it likes will drill it
-            # into the ground; chat notices ('does this bot just repeat
-            # midnight over and over'). Decline and back off - except on
-            # a DIRECT ask, where silence reads as broken: one
-            # redemption re-ask told to write something completely
-            # different (live-fire: the held follow-up's retry came
-            # back repeating 'negative-split' imagery and the streamer
-            # got nothing).
-            if not quiet and addressed:
-                self._log(f"chat line too similar on a direct ask - "
-                          f"one re-ask: {line[:80]!r}")
-                retry = self._chat_ai_line(self._chat_ai_snapshot(),
-                                           nick, text, vary=True)
-                if retry and not chatai.too_similar(
-                        retry, self._chat_ai_own):
-                    line = retry
-                else:
-                    self._log("chat line declined - still too similar "
-                              "after the re-ask")
+        context = chatai.direct_context(
+            snapshot, self._chat_ai_names, self.cfg.get("prefix", "!"),
+            self.nick)
+        similarity_source = (context[-1][1] if quiet and context else text)
+        if chatai.too_similar(line, self._chat_ai_own,
+                              source=similarity_source):
+            if addressed:
+                # A direct question is not optional chatter. Re-ask once with
+                # the repetition named instead of silently discarding a valid
+                # answer because the persona reused a motif.
+                self._log("direct reply sounded recycled - one retry")
+                line = self._chat_ai_line(snapshot, nick, text, vary=True)
+                if not line or chatai.too_similar(
+                        line, self._chat_ai_own, source=text):
+                    self._say(self._fit(f"@{nick} ",
+                                        chatai.DIRECT_FAILURE_LINE))
+                    self._log("direct reply declined after repetition retry")
                     return
             else:
                 self._log(f"chat line declined - too similar to its own "
                           f"recent lines: {line[:80]!r}")
+                return
+        if quiet:
+            # A quiet opener resumes the actual last HUMAN topic or stays
+            # quiet. This is the output-side guarantee against scheduled
+            # cadence/coffee/trucking slogans unrelated to the room.
+            if not similarity_source or not chatai.grounded(
+                    line, similarity_source):
+                self._log("quiet opener declined - not about the last human "
+                          f"topic: {line[:80]!r}")
+                return
+            if chatai.parrots(line, similarity_source):
+                self._log("quiet opener declined - it repeated the last human "
+                          f"line: {line[:80]!r}")
                 return
         if not quiet and not addressed:
             # A chime must be ABOUT the message it jumps on. Live-fire:
@@ -2448,7 +2600,7 @@ class TwitchBot:
         import llm as llm_mod
         if not self.cfg.get("chat_ai_enabled", False):
             return              # !ask works with the AI off; memory does not
-        if not self._memory.ok or not llm_mod.is_configured(self._opts):
+        if not self._memory.ok or not llm_mod.any_configured(self._opts):
             return
         theirs = [(n, t) for n, t in lines if (n or "").lower()
                   == (nick or "").lower()]
@@ -2684,14 +2836,16 @@ class TwitchBot:
         if chatai.factual_question(q, self._chat_ai_names) \
                 and self._answer_factual(nick, q):
             return
-        if llm_mod.is_configured(self._opts):
+        if llm_mod.any_configured(self._opts):
             snapshot = self._chat_ai_snapshot()
             line = self._chat_ai_line(snapshot, nick, q)
-            if line and chatai.too_similar(line, self._chat_ai_own):
+            if line and chatai.too_similar(
+                    line, self._chat_ai_own, source=q):
                 # An explicit command gets one redemption: ask again with
                 # the repetition named, then take whatever comes.
                 line = self._chat_ai_line(snapshot, nick, q, vary=True)
-            if line and not chatai.too_similar(line, self._chat_ai_own):
+            if line and not chatai.too_similar(
+                    line, self._chat_ai_own, source=q):
                 self._say(self._fit(f"@{nick} ", line))
                 self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
                 self._log(f"chat ai answered {nick}")
@@ -2907,7 +3061,7 @@ def _doctor_questions(cfg: dict) -> None:
     except Exception as exc:
         print(f"  llm module       : import failed - {exc!r}")
         return
-    if not llm_mod.is_configured(cfg):
+    if not llm_mod.any_configured(cfg):
         print("  llm              : NOT configured - questions cannot be "
               "answered. Set llm_api_key (or GROQ_API_KEY / "
               "OPENROUTER_API_KEY), or point llm_base_url at a local Ollama.")
@@ -2941,7 +3095,7 @@ def warn_config(cfg: dict) -> None:
     spicy = spice in ("spicy", "adult", "r", "on", "true", "1", "yes")
     try:
         import llm as llm_mod
-        llm_ok = llm_mod.is_configured(cfg)
+        llm_ok = llm_mod.any_configured(cfg)
     except Exception:
         llm_ok = bool((cfg.get("llm_api_key") or "").strip())
     if spicy and not llm_ok:
@@ -2995,7 +3149,41 @@ def _log_llm_provider(cfg: dict) -> None:
         masked = f"{key[:4]}…{key[-4:]}" if len(key) > 10 else "(set)"
     else:
         masked = "(no key)"
-    print(f"[llm] using {provider} — model {model}, key {masked}")
+    if not key and provider != "local Ollama":
+        print(f"[llm] primary NOT configured — {provider}, model {model}, "
+              "no key")
+    else:
+        print(f"[llm] using {provider} — model {model}, key {masked}")
+
+    # Failover used to be silent when one field was misspelled or missing. The
+    # resulting live log showed endless primary 429s but gave no clue that the
+    # supposed fallback had never become an endpoint.
+    try:
+        import llm as llm_mod
+        fb = llm_mod.fallback_endpoint(cfg)
+        problem = llm_mod.fallback_problem(cfg)
+    except Exception as exc:
+        print(f"[llm] fallback status unavailable: {exc!r}")
+        return
+    if not fb:
+        level = "MISCONFIGURED" if any((cfg.get(k) or "").strip() for k in (
+            "llm_fallback_key", "llm_fallback_api_key",
+            "llm_fallback_base_url", "llm_fallback_url",
+            "llm_fallback_model", "llm_fallback_model_name")) else "OFF"
+        print(f"[llm] fallback {level} — {problem}")
+        return
+    fbase, fkey, fmodel = fb
+    if "openrouter" in fbase.lower():
+        fprovider = "OpenRouter"
+    elif "groq" in fbase.lower():
+        fprovider = "Groq"
+    elif llm_mod._is_local(fbase):
+        fprovider = "local Ollama"
+    else:
+        fprovider = fbase
+    fmasked = ("(no key)" if llm_mod._is_local(fbase) else
+               (f"{fkey[:4]}…{fkey[-4:]}" if len(fkey) > 10 else "(set)"))
+    print(f"[llm] fallback READY — {fprovider}, model {fmodel}, key {fmasked}")
 
 
 def run_selftest(cfg: dict) -> int:
@@ -3024,6 +3212,9 @@ def run_selftest(cfg: dict) -> int:
         "llm_api_key": cfg.get("llm_api_key", ""),
         "llm_base_url": cfg.get("llm_base_url", ""),
         "llm_model": cfg.get("llm_model", ""),
+        "llm_fallback_key": cfg.get("llm_fallback_key", ""),
+        "llm_fallback_base_url": cfg.get("llm_fallback_base_url", ""),
+        "llm_fallback_model": cfg.get("llm_fallback_model", ""),
         "google_api_key": cfg.get("google_api_key", ""),
         "google_cx": cfg.get("google_cx", ""),
         "serper_api_key": cfg.get("serper_api_key", ""),
@@ -3059,7 +3250,7 @@ def run_selftest(cfg: dict) -> int:
     # 3. LLM writer check — this is what makes spicy mode adult.
     try:
         import llm as llm_mod
-        llm_ok = llm_mod.is_configured(cfg)
+        llm_ok = llm_mod.any_configured(cfg)
     except Exception as exc:
         llm_ok = False
         print(f"\n  [FAIL] could not import llm.py: {exc!r}")
@@ -3218,12 +3409,17 @@ def main() -> None:
         _here = os.path.dirname(os.path.abspath(__file__))
         _out = subprocess.run(
             [sys.executable, os.path.join(_here, "check_fixes.py")],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=120, cwd=_here,
         ).stdout or ""
         _m = re.search(r"(\d+)/(\d+) present", _out)
         if _m:
             print(f"[bot] fixes self-check: {_m.group(1)}/{_m.group(2)} "
                   f"present - that is the build you are running")
+            # A count like 155/157 proves something is missing but used to hide
+            # WHAT, forcing another round trip for the full checker output.
+            for _missing in re.findall(
+                    r"^\s*\[ \]\s*(.*?)(?:\s{2,})?$", _out, re.MULTILINE):
+                print(f"[bot] MISSING FIX: {_missing.strip()}")
         else:
             print("[bot] fixes self-check: could not read check_fixes.py "
                   "- is it next to bot.py?")

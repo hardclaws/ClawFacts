@@ -792,14 +792,21 @@ def main() -> int:
         if not _ch.should_speak(**base):
             return False
         for key, value in (("paused", True), ("enabled", False),
-                           ("ambient_off", True), ("kind", None),
-                           ("mention_last", 990.0), ("times", [900.0] * 6)):
+                           ("kind", None), ("mention_last", 990.0)):
             if _ch.should_speak(**{**base, key: value}):
                 return False
+        # Autonomous switches/caps never strand an explicit question.
+        if not _ch.should_speak(**{**base, "ambient_off": True}):
+            return False
+        if not _ch.should_speak(**{**base, "times": [900.0] * 6}):
+            return False
         chime = {**base, "kind": "chime", "roll": 0.9}
         if _ch.should_speak(**chime):
             return False
         if not _ch.should_speak(**{**chime, "roll": 0.1}):
+            return False
+        if _ch.should_speak(**{**chime, "roll": 0.1,
+                               "times": [900.0] * 6}):
             return False
         if _ch.should_speak(**{**chime, "roll": 0.1, "last": 990.0}):
             return False                      # chimes wait out their clock
@@ -869,8 +876,8 @@ def main() -> int:
         return "12/50" in said[-1] and "38 to go" in said[-1]
 
     def _chat_falls_back():
-        """Groq's free tier 429s mid-stream: a configured second
-        provider carries the chat line, and while the primary's breaker
+        """Groq's free tier 429s mid-stream: a configured second provider
+        carries chat and sourced answers, and while the primary's breaker
         window is open it is not even asked."""
         import io as _io
         import json as _json
@@ -905,185 +912,84 @@ def main() -> int:
             got = _llm2.chat_reply("s", "u" * 20, cfg)
             ok2 = got == "Line." and hits == [
                 "https://openrouter.ai/api/v1/chat/completions"]
-            return ok1 and ok2
+            # Sourced answers used to return before reaching the provider
+            # fallback. With the primary breaker open this goes straight to it.
+            hits.clear()
+            got = _llm2.answer_question("q?", ["source"], cfg)
+            ok3 = got == "Line." and hits == [
+                "https://openrouter.ai/api/v1/chat/completions"]
+            return ok1 and ok2 and ok3
         finally:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
-    def _facts_ride_the_fallback():
-        """The second provider used to serve the chat voice only: a
-        Groq 429 muted every fact, question and !ask for its breaker
-        window while a healthy OpenRouter fallback sat idle (live-fire:
-        an evening of rate-limit lines, zero fallback lines). Now the
-        completion path rides it, a dead fallback slug opens its own
-        breaker with a line, and summarize (polish, not substance)
-        sits the window out."""
+    def _openrouter_200_error_is_explicit():
+        """A provider error after HTTP 200 must retain its code and reason."""
         import io as _io
         import json as _json
         import urllib.error as _ue
 
-        cfg = {"llm_api_key": "gsk", "llm_base_url":
-               "https://api.groq.com/openai/v1",
-               "llm_model": "openai/gpt-oss-120b",
-               "llm_fallback_key": "or", "llm_fallback_base_url":
-               "https://openrouter.ai/api/v1",
-               "llm_fallback_model": "mistralai/mistral-nemo"}
-        hits = []
+        original = _llm2.urllib.request.urlopen
 
-        def _fb_ok(req, timeout=60):
-            hits.append(req.full_url)
-            if "groq" in req.full_url:
-                raise _ue.HTTPError(req.full_url, 429, "rate", {},
-                                    _io.BytesIO(b"{}"))
-            return _io.BytesIO(_json.dumps(
-                {"choices": [{"message": {"content": "A fact."}}]}
-            ).encode("utf-8"))
+        def fake(_req, timeout=60):
+            return _io.BytesIO(_json.dumps({
+                "error": {"code": 429, "message": "provider overloaded"}
+            }).encode("utf-8"))
 
-        _orig = _llm2.urllib.request.urlopen
-        _llm2.urllib.request.urlopen = _fb_ok
+        _llm2.urllib.request.urlopen = fake
         try:
-            _llm2.reset_disable_state()
-            ok1 = (_llm2.rewrite_fact("X", "X", ["seed fact."], cfg)
-                   == "A fact."
-                   and hits == [
-                       "https://api.groq.com/openai/v1/chat/completions",
-                       "https://openrouter.ai/api/v1/chat/completions"])
-            hits.clear()
-            ok2 = (_llm2.answer_question("q?", ["source."], cfg)
-                   == "A fact."
-                   and hits == [
-                       "https://openrouter.ai/api/v1/chat/completions"])
-            hits.clear()
-            ok3 = (_llm2.summarize("long fact " * 20, 40, cfg) is None
-                   and not hits)
-        finally:
-            _llm2.urllib.request.urlopen = _orig
-            _llm2.reset_disable_state()
-        if not (ok1 and ok2 and ok3):
+            try:
+                _llm2._request("https://openrouter.ai/api/v1", "k", b"{}")
+            except _ue.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                return exc.code == 429 and "provider overloaded" in detail
             return False
-
-        def _fb_dead(req, timeout=60):
-            if "groq" in req.full_url:
-                raise _ue.HTTPError(req.full_url, 429, "rate", {},
-                                    _io.BytesIO(b"{}"))
-            raise _ue.HTTPError(req.full_url, 404, "gone", {},
-                                _io.BytesIO(b"{}"))
-
-        import contextlib as _cl
-        _llm2.urllib.request.urlopen = _fb_dead
-        try:
-            _llm2.reset_disable_state()
-            out = _io.StringIO()
-            with _cl.redirect_stdout(out):
-                dead1 = _llm2.rewrite_fact("X", "X", ["seed fact."], cfg) \
-                    is None
-            loud = "fallback model not found (HTTP 404)" in out.getvalue()
-            hits.clear()
-            dead2 = (_llm2.rewrite_fact("X", "X", ["seed fact."], cfg)
-                     is None and not hits)
         finally:
-            _llm2.urllib.request.urlopen = _orig
-            _llm2.reset_disable_state()
-        return dead1 and loud and dead2
+            _llm2.urllib.request.urlopen = original
 
-    def _warmup_names_the_fallback():
-        """'The fallback never fired' is undiagnosable from a config
-        that looks right. Startup names what it resolved - or exactly
-        why there is none."""
-        import contextlib as _cl
-        import io as _io
-        _orig = _llm2._call
-        _llm2._call = lambda *a, **k: "OK"
-        try:
-            _llm2.reset_disable_state()
-            out = _io.StringIO()
-            with _cl.redirect_stdout(out):
-                _llm2.warm_up({"llm_api_key": "k"})
-            no_model = ("fallback NOT active - no llm_fallback_model"
-                        in out.getvalue())
-            out = _io.StringIO()
-            with _cl.redirect_stdout(out):
-                _llm2.warm_up(
-                    {"llm_api_key": "k",
-                     "llm_fallback_model": "some/model:free",
-                     "llm_fallback_base_url":
-                         "https://openrouter.ai/api/v1"})
-            no_key = "llm_fallback_key is empty" in out.getvalue()
-            out = _io.StringIO()
-            with _cl.redirect_stdout(out):
-                _llm2.warm_up(
-                    {"llm_api_key": "k", "llm_fallback_key": "or",
-                     "llm_fallback_base_url":
-                         "https://openrouter.ai/api/v1",
-                     "llm_fallback_model": "mistralai/mistral-nemo"})
-            named = ("fallback configured: mistralai/mistral-nemo via "
-                     "openrouter.ai/api/v1") in out.getvalue()
-        finally:
-            _llm2._call = _orig
-            _llm2.reset_disable_state()
-        return no_model and no_key and named
+    def _bot_forwards_chat_options():
+        """The provider test can pass while the real bot still drops the
+        fallback fields when it builds _opts. Exercise that handoff itself."""
+        cfg = dict(
+            _bot.DEFAULTS, nick="n", channel="#c", chat_ai_enabled=True,
+            llm_api_key="primary", llm_fallback_key="fallback-key",
+            llm_fallback_base_url="https://openrouter.ai/api/v1",
+            llm_fallback_model="fallback/model", llm_no_think=True,
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        return (_llm2.fallback_endpoint(b._opts) == (
+                    "https://openrouter.ai/api/v1", "fallback-key",
+                    "fallback/model")
+                and b._opts.get("llm_no_think") is True)
 
-    def _sun_times_answer():
-        """'Docbot what time we expecting sunrise today in Vandalia, IL
-        ?' was answered 'All times are local time for the City of
-        Vandalia.' - a scraped page's footnote. Sun times are data:
-        Open-Meteo answers them (keyless), the state picks between the
-        four Vandalias, and the place survives the trailing '?'."""
-        geo = {"results": [
-            {"name": "Vandalia", "latitude": 38.96, "longitude": -89.09,
-             "admin1": "Illinois"},
-            {"name": "Vandalia", "latitude": 39.89, "longitude": -84.19,
-             "admin1": "Ohio"}]}
-        fc = {"daily": {"sunrise": ["2026-09-15T06:37"],
-                        "sunset": ["2026-09-15T19:04"]}}
-        calls = []
-
-        def fake(url, params, timeout=8.0):
-            calls.append((url, dict(params)))
-            return geo if "geocoding" in url else fc
-
-        _orig = funfacts._http_get_json
-        funfacts._http_get_json = fake
-        try:
-            funfacts._cache.clear()
-            r = funfacts.get_funfact(
-                "what time we expecting sunrise today in Vandalia, IL ?",
-                {"llm_api_key": "k", "answer_questions": True})
-            ok = (r and r["place"] == "Vandalia, IL"
-                  and r["kind"] == "Sun"
-                  and r["fact"] == ("sunrise 6:37 AM, sunset 7:04 PM "
-                                    "today - times are local.")
-                  and calls and calls[1][1]["latitude"] == "38.96")
-            calls.clear()
-            no_http = (funfacts._sun_times("whats sunrise") is None
-                       and not calls)
-            weather = funfacts._weather_header(
-                "how's the weather in Vandalia, IL ?") == (
-                    "Vandalia, IL", "Weather")
-        finally:
-            funfacts._http_get_json = _orig
-            funfacts._cache.clear()
-        return ok and no_http and weather
-
-    def _cut_facts_are_repaired():
-        """The Daft Punk split fact posted cut off mid-quote ('...the
-        last thing I would want to be') - the model squeezed the quote
-        into its char budget and nothing downstream noticed. A cut line
-        is repaired to its last complete clause or dropped."""
-        repaired = funfacts._finish_line(
-            'He cited concerns about the progress of artificial '
-            'intelligence and other technology as to why Daft Punk '
-            'split, saying: "As much as I love this character, the '
-            'last thing I would want to be\u2026')
-        ok = repaired == (
-            'He cited concerns about the progress of artificial '
-            'intelligence and other technology as to why Daft Punk '
-            'split.')
-        ok = ok and funfacts._finish_line("A whole line stands.") == \
-            "A whole line stands."
-        ok = ok and funfacts._finish_line("wages, I will be") == ""
-        ok = ok and callable(getattr(_llm2, "provider_available", None))
-        return ok
+    def _rough_direct_ask_cannot_go_stale():
+        rough = ("Docbot what do we think of people who ride zwift with 0% "
+                 "trainer difficulty? Pussy or its ok?")
+        cfg = dict(
+            _bot.DEFAULTS, nick="TruckingWithDocBot", channel="#c",
+            chat_ai_enabled=True,
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        context = _ch2.direct_context(
+            [("Hardclaws", rough),
+             ("Hardclaws", "docbot old zwift question"),
+             ("kvack", "ordinary room context")],
+            b._chat_ai_names)
+        return (b._chat_ai_kind("Hardclaws", "broadcaster/1", rough)
+                == _ch2.MENTION
+                and not _ch2.factual_question(rough, b._chat_ai_names)
+                and context == [("kvack", "ordinary room context")]
+                and _ch2.recover_direct_line("Safe prose with enough words. "
+                                             * 20) is not None
+                and _ch2.recover_direct_line("x" * 400) is None)
 
     def _subs_count_themselves():
         """Twitch lets only the broadcaster's own token read the sub
@@ -1180,6 +1086,43 @@ def main() -> int:
         return (len(said) == 1 and "1,372 followers" in said[0]
                 and "4 new" in said[0])
 
+    def _current_weather_is_live():
+        """Weather is current Open-Meteo data, never an archive snippet."""
+        saved = (funfacts._osm_geocode, funfacts._http_get_json,
+                 funfacts._lookup_all)
+        funfacts._osm_geocode = lambda _place: {
+            "name": "Marshall", "state": "Illinois",
+            "country": "United States", "lat": 39.39, "lon": -87.69}
+
+        def live(url, params=None, timeout=0):
+            if url != funfacts.OPEN_METEO_API or \
+                    "temperature_2m" not in params.get("current", ""):
+                raise AssertionError((url, params))
+            return {"current": {
+                "temperature_2m": 68.2, "apparent_temperature": 65.8,
+                "relative_humidity_2m": 59, "precipitation": 0,
+                "weather_code": 2, "wind_speed_10m": 11.6,
+                "wind_direction_10m": 250, "wind_gusts_10m": 18.7}}
+
+        funfacts._http_get_json = live
+        funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("weather reached search"))
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            result = funfacts.get_funfact(
+                "what is the weather in Marshall, IL",
+                {"answer_questions": True})
+            return (result.get("kind") == "Weather"
+                    and result.get("place") == "Marshall, Illinois"
+                    and "Currently 68°F" in result.get("fact", "")
+                    and "wind WSW at 12 mph" in result.get("fact", ""))
+        finally:
+            (funfacts._osm_geocode, funfacts._http_get_json,
+             funfacts._lookup_all) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+
     def _weather_and_miner_behave():
         """Live weather is data, not trivia - its header says Weather.
         And the records miner refuses an off-topic article: the US
@@ -1190,6 +1133,11 @@ def main() -> int:
             return False
         if funfacts._weather_header("whats the capital of Australia") != \
                 (None, None):
+            return False
+        if funfacts._clock_12h("2026-09-15T06:38") != "6:38 AM":
+            return False
+        if "OPEN_METEO_API" not in pathlib.Path(
+                "funfacts.py").read_text(encoding="utf-8"):
             return False
         if funfacts._records_on_topic(
                 "Ivory Coast",
@@ -1735,32 +1683,37 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "build unknown" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
-        ("chat survives a rate-limited provider: the fallback answers",
+        ("chat and facts survive a rate-limited provider: fallback answers",
          callable(_llm2.fallback_endpoint)
+         and callable(_llm2.fallback_problem)
          and _llm2.fallback_endpoint({}) is None
          and _llm2.fallback_endpoint({"llm_fallback_key": "k",
                                       "llm_fallback_model": "m"}) is not None
+         and "fallback READY" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
-        ("facts, questions and !ask ride the fallback too",
-         _facts_ride_the_fallback()
-         and "provider_available" in pathlib.Path(
+        ("OpenRouter HTTP-200 errors keep their code and explanation",
+         _openrouter_200_error_is_explicit()
+         and "fallback NOT READY" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "MISSING FIX" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
+        ("a selected free reasoning model is never randomly replaced",
+         (lambda body: body.get("model") ==
+             "nvidia/nemotron-3-ultra-550b-a55b:free"
+             and "models" not in body)(
+                 __import__("json").loads(_llm2._build_body(
+                     "nvidia/nemotron-3-ultra-550b-a55b:free", "u")))
+         and "fallback_model_chain" not in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "fallback model not found" in pathlib.Path(
              "llm.py").read_text(encoding="utf-8")),
-        ("startup names the fallback, or says why there is none",
-         _warmup_names_the_fallback()
-         and "fallback NOT active" in pathlib.Path(
-             "llm.py").read_text(encoding="utf-8")),
-        ("sunrise questions get the actual times (Sun |, no model)",
-         _sun_times_answer()
-         and "_sun_times" in pathlib.Path(
-             "funfacts.py").read_text(encoding="utf-8")
-         and "what time" in pathlib.Path(
-             "funfacts.py").read_text(encoding="utf-8")),
-        ("a fact line cut off mid-quote is repaired, never posted half",
-         _cut_facts_are_repaired()
-         and "_finish_line" in pathlib.Path(
-             "funfacts.py").read_text(encoding="utf-8")),
+        ("the live bot forwards fallback/no-think options to the chat client",
+         _bot_forwards_chat_options()),
+        ("rough direct asks answer; an old ask cannot hijack the next reply",
+         _rough_direct_ask_cannot_go_stale()),
         ("subs the bot sees in chat count toward the sub goal",
          "subgoal_auto_count" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
@@ -1803,19 +1756,28 @@ def main() -> int:
          and "follow_total" in pathlib.Path(
              "access.py").read_text(encoding="utf-8")
          and _follows_question_works()),
-        ("weather is not a FunFact; the records miner stays on topic",
+        ("current weather comes from Open-Meteo, never search snippets",
+         callable(getattr(funfacts, "_weather_answer", None))
+         and _current_weather_is_live()),
+        ("live weather/sunrise are data; the records miner stays on topic",
          callable(getattr(funfacts, "_weather_header", None))
          and callable(getattr(funfacts, "_records_on_topic", None))
          and "kind" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
          and _weather_and_miner_behave()),
-        ("a reply cut off mid-sentence is retried like an empty one",
+        ("cut-off replies retry; generated half-quotes are repaired",
          "_DANGLING_TAIL" in pathlib.Path(
              "llm.py").read_text(encoding="utf-8")
          and bool(_llm2._DANGLING_TAIL.search(
              "If they try to slash wages, I\u2019ll"))
+         and bool(_llm2._DANGLING_TAIL.search(
+             "The last thing I would want to be"))
          and not _llm2._DANGLING_TAIL.search(
-             "Running I-80 tonight, keep the hammer down")),
+             "Running I-80 tonight, keep the hammer down")
+         and callable(getattr(funfacts, "_finish_line", None))
+         and funfacts._finish_line(
+             'Daft Punk split, saying: "the last thing I want') ==
+             "Daft Punk split."),
         ("a direct ask never goes mute on an unusable reply",
          "one retry" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
@@ -1852,20 +1814,14 @@ def main() -> int:
              "chatai.py").read_text(encoding="utf-8")
          and "point them at the !funfact command" not in pathlib.Path(
              "chatai.py").read_text(encoding="utf-8")),
-        ("emoji walls never chime; the bot speaks when spoken to",
+        ("emoji walls never chime; chime cadence is retuned down",
          callable(getattr(_ch2, "chime_worthy", None))
          and not _ch2.chime_worthy("\U0001f3dc\ufe0f\U0001f3dc\ufe0f")
          and _ch2.chime_worthy("crushed a few tootsie rolls today")
-         and _bot.DEFAULTS.get("chat_ai_chance") == 0.0
-         and _bot.DEFAULTS.get("chat_ai_quiet_seconds") >= 300
-         and _bot.DEFAULTS.get("chat_ai_quiet_cooldown") >= 1200
-         and _bot.DEFAULTS.get("chat_ai_cooldown") == 240
-         and _bot.DEFAULTS.get("chat_ai_max_hour") == 12),
-        ("a too-similar reply on a direct ask gets one re-ask",
-         "too similar on a direct ask" in pathlib.Path(
-             "bot.py").read_text(encoding="utf-8")
-         and "COMPLETELY different" in pathlib.Path(
-             "bot.py").read_text(encoding="utf-8")),
+         and _bot.DEFAULTS.get("chat_ai_chance") == 0.10
+         and _bot.DEFAULTS.get("chat_ai_cooldown") == 600
+         and _bot.DEFAULTS.get("chat_ai_max_hour") == 6
+         and _bot.DEFAULTS.get("chat_ai_busy_messages") == 4),
         ("factual questions get the grounded answer before the persona",
          callable(getattr(_ch2, "factual_question", None))
          and _ch2.factual_question("what is a bongo twist")

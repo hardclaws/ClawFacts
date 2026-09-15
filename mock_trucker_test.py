@@ -318,9 +318,12 @@ def test_a_moderator_can_switch_the_bots_own_chatter():
     """The ambient CB clock is gone; !cb off now moderates the chat AI's
     own chatter (chime-ins and quiet-room openers), and says so."""
     b, said = _bot()
+    # Startup silence is deliberately disarmed; simulate an ordinary human
+    # conversation that has armed one contextual follow-up.
+    b._chat_ai_quiet_armed = True
     assert b._cb_switch("amod", MOD, "off") is True
     assert any("doc's own chatter is OFF" in m for m in said), said
-    # and it actually stops the openers
+    # and it actually stops the armed opener
     b._last_chat = time.time() - 3600.0
     assert b._chat_ai_tick() is False, "off must stop the openers"
 

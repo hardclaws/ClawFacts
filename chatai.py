@@ -66,9 +66,13 @@ _RULES = (
     "- NEVER mention or point viewers at commands like !funfact or !ask. "
     "YOU are the one answering: answer yourself, or reply NOTHING TO "
     "SAY.\n"
-    "- Vary every line. Never reuse a word or image from your own recent "
-    "lines (no same drink, snack or time of day), and not every line "
-    "ends with a question.\n"
+    "- Vary every line. Do not recycle phrasing, metaphors or openers from "
+    "your recent lines; necessary words from the current topic are fine. "
+    "Not every line ends with a question.\n"
+    "- Never force truck, coffee, cadence, mileage, workout or negative-split "
+    "references into an unrelated reply. No generic motivation or slogans. "
+    "Sound like a person responding to this conversation, not a coach or a "
+    "scheduled quote bot.\n"
     "- When asked your opinion of a person or their news, give your take "
     "on the SITUATION - never pivot to a different subject.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
@@ -76,6 +80,14 @@ _RULES = (
 )
 
 _EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+
+# Last-resort acknowledgement after both model attempts violate the output
+# rails. This is intentionally not a guessed answer: it tells the viewer the
+# bot heard them, and prevents a later message from looking like the answer.
+DIRECT_FAILURE_LINE = (
+    "I heard you, but my answer got mangled in the gears. Try me once more."
+)
+
 #: A bare dotted word autolinks in chat clients ('config.json' is a real
 #: TLD) - the beef game already bans them, and so does the chat AI.
 _DOMAIN = re.compile(r"\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b")
@@ -107,6 +119,15 @@ def user_prompt(lines: list, nick: str, text: str,
     the generation - was the cost blowing past a 20s timeout on a warm
     model. Callers point these at smaller values for local models."""
     out = []
+    if not quiet and not overheard:
+        # Put the actual ask before the room as well as at the final answer
+        # cue. Some reasoning models latched onto an older question in Recent
+        # chat even though the old prompt named the latest one only at the end.
+        out.append("MESSAGE TO ANSWER (highest priority):")
+        out.append(f"{nick}: {text}")
+        out.append("Answer this message only. Older chat is context, never a "
+                   "different question to answer.")
+        out.append("")
     if own:
         # The bot's own lines are in the room buffer too, and a small
         # model left alone with them mimics itself - the 'midnight
@@ -114,9 +135,9 @@ def user_prompt(lines: list, nick: str, text: str,
         # impossible to miss.
         out.append("Your own last lines - the room just saw these:")
         out.extend(f"- {l}" for l in own[-3:])
-        out.append("Your next line must NOT reuse their words, imagery "
-                   "or openers, and must not end with a question if they "
-                   "did.")
+        out.append("Do not recycle their phrasing, imagery or opener. Words "
+                   "needed for the CURRENT topic are allowed. Do not end with "
+                   "a question merely because the last line did.")
         out.append("")
     if memories:
         out.append("What you remember about people here (from past chat,"
@@ -131,10 +152,11 @@ def user_prompt(lines: list, nick: str, text: str,
     out.append("")
     if quiet:
         out.append(
-            "Nobody has spoken for a while. Say ONE line to get the "
-            "conversation going - a question for chat, a hook from "
-            "your own life, or an observation. Nothing like your last "
-            "few lines.")
+            "Nobody has spoken for a while. Continue the MOST RECENT HUMAN "
+            "topic above with one natural question or observation. It must "
+            "clearly name that topic. Do not give motivation, a slogan, or "
+            "generic truck/coffee/workout/cadence filler. If the last topic "
+            "is not worth reopening, reply NOTHING TO SAY.")
     elif overheard:
         # A chime-in, not a reply: the model must know nobody addressed
         # it, or it treats an overheard remark like a question asked of
@@ -145,9 +167,10 @@ def user_prompt(lines: list, nick: str, text: str,
             "You are jumping in on your own initiative. Reply ONLY if "
             "you genuinely have something to add to exactly what was "
             "said - a relevant quip or a related story about THAT "
-            "subject. Your line must be about what they actually "
-            "said; performing your persona at the room is NOTHING TO "
-            "SAY. When in doubt, reply NOTHING TO SAY.")
+            "subject. Your line must be about what they actually said. No "
+            "generic encouragement and no forced truck, coffee, workout, "
+            "cadence or mileage references. Performing your persona at the "
+            "room is NOTHING TO SAY. When in doubt, reply NOTHING TO SAY.")
     else:
         out.append(f"{nick} just said: {text}")
         out.append("They are talking to YOU: answer THIS message - the "
@@ -172,31 +195,101 @@ def mention_kind(text: str, names) -> str | None:
     return None
 
 
+def direct_context(lines: list, names, prefix: str = "!",
+                   bot_nick: str = "") -> list:
+    """Human conversation context with commands and old bot asks removed.
+
+    Older questions addressed to the bot are competing instructions, not
+    context. Keeping them in the prompt caused "Docbot you ok?" to receive an
+    answer to an earlier Zwift question. Commands are excluded for the same
+    reason (the current ``!ask`` is supplied separately by its caller), and
+    the bot's own lines are already supplied through the dedicated ``own``
+    block. This clean human-only room is also what quiet openers continue.
+    """
+    out = []
+    bot_low = (bot_nick or "").lower()
+    for nick, text in lines or []:
+        t = (text or "").strip()
+        if not t or (bot_low and (nick or "").lower() == bot_low):
+            continue
+        if prefix and t.startswith(prefix):
+            continue
+        if mention_kind(t, names):
+            continue
+        out.append((nick, text))
+    return out
+
+
+def _blocked_output(line: str) -> bool:
+    """Whether normalized model output crosses a non-length safety rail."""
+    if "@" in line:                     # mentions are prepended by the bot
+        return True
+    if _DOMAIN.search(line):
+        return True
+    if len(_EMOJI.findall(line)) > 1:
+        return True          # the rules always said at most one
+    if re.search(r"![a-zA-Z]", line):
+        return True          # command syntax belongs to viewers, not the bot
+    if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
+                 line, re.IGNORECASE):
+        return True          # "check !funfact" died with the redirect rule
+    return bool(funfacts._EXPLICIT.search(line)
+                or funfacts._TASTELESS.search(line))
+
+
 def clean_line(line: str) -> str | None:
     """One safe line of chat, or None. The output gate."""
     line = " ".join((line or "").split()).strip('"\u201c\u201d')
     if not line or len(line) < 12 or len(line) > 280:
         return None
-    if "@" in line:                     # mentions are prepended by the bot
+    return None if _blocked_output(line) else line
+
+
+def recover_direct_line(line: str, limit: int = 240) -> str | None:
+    """Recover a safe short answer from an overlong direct reply.
+
+    Reasoning models occasionally ignore the 240-character instruction and
+    return a paragraph. Throwing the whole answer away made a direct mention
+    look broken. Only LENGTH is recoverable: if any part of the raw output
+    crosses a safety rail, none of it is used. ``trim_to_fit`` keeps a whole
+    sentence where possible and otherwise lands on a clause/word boundary.
+    Ambient chimes never use this -- silence is fine when nobody asked us.
+    """
+    raw = " ".join((line or "").split()).strip('"\u201c\u201d')
+    if len(raw) <= 280 or _blocked_output(raw):
         return None
-    if _DOMAIN.search(line):
+    candidate = funfacts.trim_to_fit(raw, max(80, min(int(limit), 280)))
+    # A pathological token wall ("xxxx..."), base64, etc. is not prose and
+    # trim_to_fit cannot invent a boundary for it.
+    if len(re.findall(r"\b[\w'\u2019-]+\b", candidate)) < 4:
         return None
-    if len(_EMOJI.findall(line)) > 1:
-        return None          # the rules always said at most one
-    if re.search(r"![a-zA-Z]", line):
-        return None          # command syntax belongs to viewers, not the bot
-    if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
-                 line, re.IGNORECASE):
-        return None          # "check !funfact" died with the redirect rule
-    if funfacts._EXPLICIT.search(line) or funfacts._TASTELESS.search(line):
-        return None
-    return line
+    return clean_line(candidate)
 
 
 def declined(raw: str) -> bool:
     """True when the model said it has nothing worth saying."""
     up = (raw or "").strip().upper()
     return (not up) or "NOTHING TO SAY" in up
+
+
+def recent_chat_count(message_times, now: float, window: float = 300.0) -> int:
+    """Number of human messages inside a rolling activity window."""
+    return sum(1 for t in (message_times or []) if now - t <= window)
+
+
+def room_is_busy(message_times, now: float, window: float = 30.0,
+                 messages: int = 4) -> bool:
+    """True while chat is flowing too quickly for an unsolicited bot line.
+
+    Direct mentions do not use this gate. Four human messages in thirty
+    seconds is already a conversation; the bot should listen until asked.
+    """
+    try:
+        threshold = max(2, int(messages))
+        span = max(5.0, float(window))
+    except (TypeError, ValueError):
+        threshold, span = 4, 30.0
+    return recent_chat_count(message_times, now, span) >= threshold
 
 
 def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
@@ -215,7 +308,11 @@ def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
     enough chatter to be worth joining, and they wait out the long
     cooldown.
     """
-    if not enabled or paused or ambient_off or kind is None:
+    if not enabled or paused or kind is None:
+        return False
+    # !cb off is the autonomous-chatter switch. Someone explicitly addressing
+    # the bot is not autonomous chatter and must remain answerable.
+    if ambient_off and kind != MENTION:
         return False
     if kind == MENTION:
         if now - mention_last < mention_cd:
@@ -227,7 +324,12 @@ def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
             return False
         if now - last < chime_cd:
             return False
-    if len([t for t in times if now - t < 3600]) >= max_hour:
+    # The hourly cap is for autonomous chatter. Someone explicitly talking to
+    # the bot still gets an answer (paced by the mention cooldown); otherwise a
+    # lively Q&A hour makes later direct questions disappear behind an ambient
+    # anti-spam rail.
+    if kind != MENTION \
+            and len([t for t in times if now - t < 3600]) >= max_hour:
         return False
     return True
 
@@ -245,6 +347,8 @@ _SMALLTALK = (
     re.compile(r"\bwho are (?:you|u)\b", re.IGNORECASE),
     re.compile(r"\bwhat(?:'s| is|s) your name\b", re.IGNORECASE),
     re.compile(r"\bare (?:you|u) (?:a bot|real|human|alive|an ai)\b",
+               re.IGNORECASE),
+    re.compile(r"\b(?:(?:are|r) )?(?:you|u) (?:ok|okay|alright)\b",
                re.IGNORECASE),
     re.compile(r"\bhow old are (?:you|u)\b", re.IGNORECASE),
     re.compile(r"\bsay something\b", re.IGNORECASE),
@@ -308,27 +412,43 @@ def _content_words(line: str) -> set:
             if w not in _STOPWORDS}
 
 
-def too_similar(line: str, own_lines, jaccard: float = 0.3) -> bool:
-    """True when a candidate line repeats the bot's own recent lines.
+def _phrase_bigrams(line: str, exempt=None) -> set:
+    """Meaningful adjacent-word pairs, excluding pairs made only of filler."""
+    tokens = re.findall(r"[a-z]+(?:['\u2019][a-z]+)?",
+                        (line or "").lower())
+    exempt = exempt or set()
+    out = set()
+    for a, b in zip(tokens, tokens[1:]):
+        phrase = f"{a} {b}"
+        if _content_words(phrase) - exempt:
+            out.add(phrase)
+    return out
 
-    Two signals. A SIGNATURE WORD: any content word already used in two
-    or more of the last lines - the night the model found 'midnight
-    coffee and donuts' it used some form of it in eight straight lines,
-    and chat noticed ('does this bot just repeat midnight over and
-    over'). And plain high overlap with any single recent line."""
-    words = _content_words(line)
-    recent = [_content_words(l) for l in (own_lines or [])[-3:]]
+
+def too_similar(line: str, own_lines, jaccard: float = 0.3,
+                source: str = "") -> bool:
+    """True when a candidate recycles the bot's recent wording.
+
+    Topic words present in the message being answered are exempt: two answers
+    about cadence are allowed to say "cadence". What is rejected is a repeated
+    signature across several bot lines, a shared phrase/template, or high
+    overall overlap. The old rule rejected *any one word* shared with the
+    previous line, which discarded sensible direct answers constantly.
+    """
+    exempt = _content_words(source)
+    words = _content_words(line) - exempt
+    recent_lines = list(own_lines or [])[-3:]
+    recent = [_content_words(l) - exempt for l in recent_lines]
     if not words or not recent:
         return False
-    for w in words:
-        # A signature word across recent lines, OR any content word
-        # from the immediately previous line: live-fire, 'I'm swapping
-        # frozen beans for a steaming oat latte' was followed by 'I'm
-        # swapping stale jerky for a caramel macchiato' - they share
-        # only 'swapping', and the old >= 2-of-3 rule let the template
-        # through twice running.
-        if sum(1 for s in recent if w in s) >= 2 or w in recent[-1]:
-            return True
+    # A word the model has made a motif across at least two previous lines.
+    if any(sum(1 for s in recent if w in s) >= 2 for w in words):
+        return True
+    # A repeated phrase catches template reuse such as "I'm swapping ..."
+    # without treating one necessary shared noun as a duplicate answer.
+    phrases = _phrase_bigrams(line, exempt)
+    if any(phrases & _phrase_bigrams(old, exempt) for old in recent_lines):
+        return True
     for s in recent:
         if s and len(words & s) / len(words | s) >= jaccard:
             return True
@@ -550,6 +670,14 @@ _FACTUAL_Q = re.compile(
     r"how many|how much|how long|how old|how tall|how far)\b",
     re.IGNORECASE)
 _ABOUT_BOT = re.compile(r"\b(?:you|your|u|ur)\b", re.IGNORECASE)
+# Collective phrasing is still an opinion request aimed at the persona:
+# "what do we think of people who ride at 0%?" is not encyclopedia trivia.
+# Keep this narrower than a bare "we" so "what do we know about Mars" can
+# still use the grounded fact engine.
+_OPINION_Q = re.compile(
+    r"^\s*(?:what\s+do\s+(?:we|you|u)\s+think\b|"
+    r"what(?:'s|\s+is)\s+(?:our|your)\s+(?:take|opinion)\b|"
+    r"how\s+do\s+(?:we|you|u)\s+feel\b)", re.IGNORECASE)
 
 
 def strip_address(text: str, names=()) -> str:
@@ -577,7 +705,7 @@ def factual_question(text: str, names=()) -> bool:
     the bot ('doc, what is a bongo twist') is stripped first - mentions
     carry their trigger word."""
     t = strip_address(text, names)
-    if not _FACTUAL_Q.match(t):
+    if not _FACTUAL_Q.match(t) or _OPINION_Q.match(t):
         return False
     return not _ABOUT_BOT.search(t)
 

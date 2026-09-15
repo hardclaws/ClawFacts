@@ -2621,6 +2621,18 @@ def test_a_long_fact_is_cut_at_a_clause_never_a_dangler():
     print("[PASS] a long fact is cut at a clause, never a dangler")
 
 
+def test_a_generated_half_quote_is_repaired_before_chat():
+    cut = ('He cited concerns about preserving Daft Punk as to why they split, '
+           'saying: "As much as I love this character, the last thing I would '
+           'want to be')
+    fixed = funfacts._finish_line(cut)
+    assert fixed == ("He cited concerns about preserving Daft Punk as to why "
+                     "they split."), fixed
+    assert '"' not in fixed and not fixed.endswith(("saying.", "be.")), fixed
+    assert funfacts._finish_line('"unfinished from the first word') == ""
+    print("[PASS] a generated half-quote is repaired before chat")
+
+
 def test_hype_answers_and_demonyms_do_not_count():
     """Round five: "Get ready to meet the world's longest truck \u2014 an
     absolute beast tearing across the wild Australian outback!" The hook
@@ -3043,126 +3055,126 @@ def test_the_geocoder_may_not_substitute_a_different_place():
     print("[PASS] the geocoder cannot substitute a different place")
 
 
-def test_a_cut_off_fact_line_is_repaired():
-    """Live-fire: the Daft Punk split fact posted as 'He cited concerns
-    about ... as to why Daft Punk split, saying: "As much as I love
-    this character, the last thing I would want to be...' - the model
-    squeezed the quote into its character budget and gave up
-    mid-sentence, and every downstream filter saw a line that was short
-    enough and grounded enough. A cut-off line is repaired to its last
-    complete clause (the half-quote goes, not just its ending) or
-    dropped before it can reach the pool."""
-    import llm
-    seed = ('He cited concerns about the progress of artificial '
-            'intelligence and other technology as to why Daft Punk '
-            'split, saying: "As much as I love this character, the '
-            'last thing I would want to be is a robot in real life."')
-    # The exact live-fire cut, model's own ellipsis and all.
-    assert funfacts._finish_line(
-        'He cited concerns about the progress of artificial '
-        'intelligence and other technology as to why Daft Punk split, '
-        'saying: "As much as I love this character, the last thing I '
-        'would want to be\u2026') == (
-        'He cited concerns about the progress of artificial '
-        'intelligence and other technology as to why Daft Punk split.')
-    # Complete lines pass untouched; hopeless fragments die.
-    assert funfacts._finish_line(
-        "A complete line stands as it is.") == "A complete line stands as it is."
-    assert funfacts._finish_line("wages, I will be") == ""
-    # A closed quote is not an open one: complete quotes survive.
-    assert funfacts._finish_line(
-        'He said: "the last thing I would want to be is a robot."') == \
-        'He said: "the last thing I would want to be is a robot."'
-    # And the pool wiring: repair happens before grounding, before chat.
-    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
-    try:
-        llm.is_configured = lambda o: True
-        llm.rewrite_fact = lambda p, l, s, o: (
-            'He cited concerns about the progress of artificial '
-            'intelligence and other technology as to why Daft Punk '
-            'split, saying: "As much as I love this character, the '
-            'last thing I would want to be\u2026\n'
-            'Daft Punk split after 28 years together.\n'
-            'wages, I will be')
-        got = funfacts._llm_facts(
-            "Daft Punk", "daft punk",
-            [seed, "Daft Punk split after 28 years together."], {})
-        assert got == [
-            'He cited concerns about the progress of artificial '
-            'intelligence and other technology as to why Daft Punk split.',
-            'Daft Punk split after 28 years together.'], got
-    finally:
-        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
-    print("[PASS] a cut-off fact line is repaired to a complete clause")
-
-
-def test_sun_times_are_looked_up_not_summarized():
-    """Live-fire: 'Docbot what time we expecting sunrise today in
-    Vandalia, IL ?' was answered 'All times are local time for the City
-    of Vandalia.' - the footnote of a scraped sun-times page, not the
-    time. Sun times are data like the weather: Open-Meteo answers them
-    (free, keyless, no model in the path), the place survives a
-    trailing '?', and 'what time' counts as a specific question whose
-    answer must carry one."""
-    GEO = {"results": [
-        {"name": "Vandalia", "latitude": 38.96, "longitude": -89.09,
-         "admin1": "Illinois"},
-        {"name": "Vandalia", "latitude": 39.89, "longitude": -84.19,
-         "admin1": "Ohio"},
-    ]}
-    FC = {"daily": {"sunrise": ["2026-09-15T06:37", "2026-09-16T06:38"],
-                    "sunset": ["2026-09-15T19:04", "2026-09-16T19:02"]}}
+def test_weather_uses_current_data_not_an_archive_search_snippet():
+    """Exact field report: the bot called an archive-page snippet weather.
+    A weather question must return Open-Meteo's current conditions and never
+    touch the generic lookup ladder, even when the live API has a problem."""
+    saved = (funfacts._osm_geocode, funfacts._http_get_json,
+             funfacts._lookup_all)
     calls = []
+    funfacts._osm_geocode = lambda place: {
+        "name": "Marshall", "state": "Illinois", "country": "United States",
+        "lat": 39.39, "lon": -87.69}
 
-    def fake(url, params, timeout=8.0):
-        calls.append((url, dict(params)))
-        return GEO if "geocoding" in url else FC
+    def _http(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        assert url == funfacts.OPEN_METEO_API, url
+        assert "temperature_2m" in params.get("current", ""), params
+        assert params.get("temperature_unit") == "fahrenheit", params
+        return {"timezone": "America/Chicago",
+                "current": {"time": "2026-09-15T22:10",
+                            "temperature_2m": 68.2,
+                            "apparent_temperature": 65.8,
+                            "relative_humidity_2m": 59,
+                            "precipitation": 0,
+                            "weather_code": 2,
+                            "wind_speed_10m": 11.6,
+                            "wind_direction_10m": 250,
+                            "wind_gusts_10m": 18.7}}
 
-    orig = funfacts._http_get_json
-    funfacts._http_get_json = fake
+    funfacts._http_get_json = _http
+    funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a weather question reached generic search"))
+    question = "what is the weather in Marshall, IL"
     try:
-        funfacts._cache.clear()
-        # His exact question, trailing '?' and all.
-        r = funfacts.get_funfact(
-            "what time we expecting sunrise today in Vandalia, IL ?",
-            {"llm_api_key": "k", "answer_questions": True})
-        assert r and r["place"] == "Vandalia, IL" and r["kind"] == "Sun", r
-        assert r["fact"] == ("sunrise 6:37 AM, sunset 7:04 PM today - "
-                             "times are local."), r["fact"]
-        # 'IL' picked Illinois (38.96) - there are four Vandalias.
-        assert calls[0][0].startswith(
-            "https://geocoding-api.open-meteo.com/v1/search"), calls
-        assert calls[0][1]["name"] == "Vandalia", calls
-        assert calls[1][1]["latitude"] == "38.96", calls
-        assert calls[1][1]["daily"] == "sunrise,sunset", calls
-        # The cached second ask keeps its header and pays no new lookups.
-        calls.clear()
-        again = funfacts.get_funfact(
-            "what time we expecting sunrise today in Vandalia, IL ?",
-            {"llm_api_key": "k", "answer_questions": True})
-        assert again["kind"] == "Sun" and again["fact"] == r["fact"], again
-        assert not calls, calls
-        # Tomorrow, no state: the geocoder's own first Vandalia.
-        r2 = funfacts._sun_times("whats sunset tomorrow in Vandalia")
-        assert r2["facts"] == ["sunrise 6:38 AM, sunset 7:02 PM tomorrow "
-                               "- times are local."], r2
-        # No place, or not a sun question: no HTTP at all, None back.
-        calls.clear()
-        assert funfacts._sun_times("whats sunrise") is None
-        assert funfacts._sun_times("whats the weather in Miami") is None
-        assert not calls, calls
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        got = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got == {
+            "place": "Marshall, Illinois", "kind": "Weather",
+            "fact": ("Currently 68°F with partly cloudy skies; feels like "
+                     "66°F; humidity 59%; wind WSW at 12 mph, gusting to "
+                     "19 mph.")}, got
+        assert len(calls) == 1, calls
+        # Current conditions use a short cache and retain the Weather label.
+        again = funfacts.get_funfact(question, {"answer_questions": True})
+        assert again == got and len(calls) == 1, (again, calls)
+
+        # API failure is honest; archive/search text still cannot take over.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("weather service unavailable"))
+        failed = funfacts.get_funfact(question, {"answer_questions": True})
+        assert failed["kind"] == "Weather", failed
+        assert "couldn't fetch the current weather" in failed["fact"], failed
+        assert "last weeks" not in failed["fact"], failed
     finally:
-        funfacts._http_get_json = orig
-        funfacts._cache.clear()
-    # 'what time' is a specific question: an answer without a time in
-    # it gets the same demand-for-specifics as 'how many'.
-    assert funfacts._SPECIFIC_Q.search("what time we expecting sunrise"), \
-        "what time must count as specific"
-    assert not funfacts._SPECIFIC_Q.search("tell me about Vandalia")
-    # The weather header finds its place through a trailing '?' too.
-    assert funfacts._weather_header(
-        "how's the weather in Vandalia, IL ?") == ("Vandalia, IL", "Weather")
-    print("[PASS] sun times come from Open-Meteo with a 'Sun |' header")
+        (funfacts._osm_geocode, funfacts._http_get_json,
+         funfacts._lookup_all) = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] weather returns current Open-Meteo conditions, never snippets")
+
+
+def test_sunrise_uses_live_clock_data_not_search_debris():
+    """Exact live-fire query: a search snippet said only “all times are local”.
+    Sunrise/sunset must use geocoded Open-Meteo data, include the actual clock
+    time, and retain its non-FunFact label after passing through the cache."""
+    original_geo, original_http = funfacts._osm_geocode, funfacts._http_get_json
+    calls = []
+    funfacts._osm_geocode = lambda place: {
+        "name": "Vandalia", "state": "Illinois", "country": "United States",
+        "lat": 38.96, "lon": -89.09}
+
+    def _http(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        if url == funfacts.OPEN_METEO_GEOCODE_API:
+            return {"results": [
+                {"name": "Vandalia", "admin1": "Ohio",
+                 "country": "United States", "latitude": 39.9,
+                 "longitude": -84.2},
+                {"name": "Vandalia", "admin1": "Illinois",
+                 "admin2": "Fayette", "country": "United States",
+                 "latitude": 38.96, "longitude": -89.09}]}
+        assert url == funfacts.OPEN_METEO_API, url
+        return {"timezone": "America/Chicago",
+                "daily": {"time": ["2026-09-15", "2026-09-16"],
+                          "sunrise": ["2026-09-15T06:38",
+                                      "2026-09-16T06:39"],
+                          "sunset": ["2026-09-15T19:05",
+                                     "2026-09-16T19:03"]}}
+
+    funfacts._http_get_json = _http
+    question = "what time we expecting sunrise today in Vandalia, IL ?"
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        got = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got == {"place": "Vandalia, Illinois",
+                       "fact": "Sunrise is expected around 6:38 AM local time today.",
+                       "kind": "Sunrise"}, got
+        assert len(calls) == 1, calls
+        # Cache output must retain kind; losing it recreated “FunFact | ...”.
+        got2 = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got2["kind"] == "Sunrise" and "6:38 AM" in got2["fact"], got2
+        assert len(calls) == 1, "live lookup ignored its short cache"
+        # If Nominatim is unavailable, Open-Meteo's geocoder is a second
+        # keyless route and must honor the requested state, not the first city
+        # with the same name.
+        funfacts._osm_geocode = lambda place: None
+        tomorrow = funfacts._solar_answer(
+            "what time is sunset tomorrow in Vandalia, IL?")
+        assert tomorrow["kind"] == "Sunset", tomorrow
+        assert tomorrow["place"] == "Vandalia, Illinois", tomorrow
+        assert "7:03 PM" in tomorrow["facts"][0], tomorrow
+        assert [c[0] for c in calls[-2:]] == [
+            funfacts.OPEN_METEO_GEOCODE_API, funfacts.OPEN_METEO_API], calls
+    finally:
+        funfacts._osm_geocode, funfacts._http_get_json = original_geo, original_http
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] sunrise/sunset returns the actual local clock time")
 
 
 def main():
@@ -3254,6 +3266,7 @@ def main():
     test_record_claims_and_glued_lists_never_post()
     test_headings_in_sentence_case_and_captions_never_post()
     test_a_long_fact_is_cut_at_a_clause_never_a_dangler()
+    test_a_generated_half_quote_is_repaired_before_chat()
     test_hype_answers_and_demonyms_do_not_count()
     test_the_question_search_tries_simpler_subjects()
     test_the_records_miner_answers_when_the_model_will_not()
@@ -3267,8 +3280,8 @@ def main():
     test_tavily_supplies_the_sources_a_question_needs()
     test_spicy_mode_still_answers_questions()
     test_the_geocoder_may_not_substitute_a_different_place()
-    test_a_cut_off_fact_line_is_repaired()
-    test_sun_times_are_looked_up_not_summarized()
+    test_weather_uses_current_data_not_an_archive_search_snippet()
+    test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0
 

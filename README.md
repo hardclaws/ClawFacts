@@ -20,7 +20,8 @@ FunFact | Milford, Pennsylvania: Milford was founded in 1796 by Judge John Biddi
    - **Wikipedia** — full-text search → article lead + History, then the most "interesting" sentences are ranked. Wikipedia covers an enormous number of tiny places (hamlets, unincorporated communities, roadhouses).
    - **DuckDuckGo Instant Answers** — fallback if Wikipedia fails or rate-limits.
    - **Geocoder + coordinate search** — if text search finds nothing (very remote spots), the bot geocodes the name with OpenStreetMap's Nominatim (free, no key, covers even tiny villages), retries with the canonical "Name, State", then uses Wikipedia's coordinate search for the nearest notable place.
-   - **`spicy_facts.json`** — a built-in database of verified adult-rated facts (used only in spicy mode).
+   - **Open-Meteo live clock data** — sunrise and sunset questions use the requested place's coordinates and timezone, not search-result snippets or an LLM.
+   - **`spicy_facts.json`** — a built-in database of verified adult-rated facts (used only when spice="spicy").
    - **Google (optional)** — with your own API key + search-engine ID, searches
      the web with `safe=off` for adult-rated local stories.
    - **Optional LLM** — a local Ollama model or your own API key, to rewrite the real facts into punchy adult-humor one-liners.
@@ -243,50 +244,53 @@ chime-ins, quiet-room openers, the memory — is off by default; flip
 fields (any provider, including local Ollama) supply the personality;
 everything else works without a key.
 
-**A second provider for everything the model does.** Groq's free tier
-rate-limits mid-stream (HTTP 429), and one whole evening of the bot
-going quiet on every fact, `!ask` and chat line taught the lesson: the
-fallback used to serve the chat voice only. Fill the `llm_fallback_*`
-fields in `config.json` and a second provider carries chat, facts,
-questions and `!ask` until the window clears — the console announces
-the switch once per outage, both providers are warmed at startup (a
-failed warm-up says so on the console, and startup names the fallback —
-or says in plain English why there is none), and each has its own
-breaker so a dead fallback key or a retired `:free` slug (they rotate!)
-never takes the primary down — or fails silently ever again. The free OpenRouter setup:
-any key from openrouter.ai/keys (no card) plus any model whose slug
-ends in `:free` — verified live and healthy as of September 2026:
-`nvidia/nemotron-3-super-120b-a12b:free` (912ms, 62 t/s, months
-stable — the pick), `thinkingmachines/inkling-small:free` (100%
-uptime), `google/gemma-4-26b-a4b-it:free` and
-`google/gemma-4-31b-it:free`. Skip the free coding agents (Poolside,
-Nex, Cohere Code) and the domain-tuned Lings (Sante = health,
-Fin = finance) — wrong tools for chat. Free slugs rotate (several
-older `:free` listings have
-gone dark), so take whatever is currently free on openrouter.ai/models;
-the free tier allows 20 requests/minute and 50/day — 1,000/day after
-any one-time $10 credit top-up — which is plenty for a fallback that
-only carries the load while Groq's window clears. A local Ollama works
-as the fallback too, with no limits at all. An empty reply — or one cut
-off mid-sentence ("If they try to slash wages, I'll") — a reasoning
-model that thought past its completion budget, the silent miss of a
-held mention, is retried once at a doubled thinking budget before the
-fallback takes the line.
+**A second provider for chat and the fact engine.** Groq's free tier rate-limits
+mid-stream (HTTP 429), and both the chat voice and sourced question
+answers used to go quiet for the two-minute breaker window. Fill the
+`llm_fallback_*` fields in `config.json` and a second provider carries
+chat replies, sourced answers, fact rewrites and summaries until the
+window clears. The console announces the switch once per outage, both
+providers are warmed at startup, and each has its own breaker so a dead
+fallback key never takes the primary down. Startup also prints
+`fallback READY`, `OFF`, or `MISCONFIGURED`; a misspelled or missing
+fallback field can no longer fail invisibly. `READY` at this first line means
+the three config fields form an endpoint; the background probe then prints a
+second `fallback READY` only after a real answer, or `fallback NOT READY` with
+the provider's actual code and message. The common
+`llm_fallback_api_key` spelling is accepted as an alias for
+`llm_fallback_key`.
+
+For zero-cost OpenRouter fallback, use a key from openrouter.ai/keys and a
+specific current model slug ending in `:free`. The bot uses exactly that model:
+it does **not** substitute `openrouter/free`, whose random selection can mix
+reasoning and non-reasoning models with incompatible response behaviour, and
+it never adds a paid model to the configured second-provider path. Free slugs
+rotate and shared capacity can fill, so recheck openrouter.ai/models when the
+warm-up reports `fallback NOT READY`. Account-wide free-tier limits still
+apply. A local Ollama fallback is another zero-cost option with no hosted
+quota. An empty chat reply — or one
+cut off mid-sentence ("If they try to slash wages, I'll") — is retried
+once at a doubled thinking budget before the second provider takes the
+line.
 
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
-  grounded answer beats a charming guess. Weather questions get their
-  own header — `Weather | Saint Clair, Mo: Clear, 76.7°F…` — and
-  sunrise/sunset questions get the actual times — `Sun | Vandalia, IL:
-  sunrise 6:37 AM, sunset 7:04 PM today — times are local.` — straight
-  from Open-Meteo (free, keyless, no model in the path to rate-limit or
-  cut off), because "All times are local time for the City of Vandalia"
-  was a scraped page's footnote, not the time. And when the records
-  miner backs a superlative question, the article it digs through must
-  actually be about the subject (a US freight-lane question once came
-  back with Ivory Coast's GDP — the search loved "coat"~"Côte" and
-  "west coast"). The persona takes over when
+  grounded answer beats a charming guess. Live data gets its own header
+  because it is not trivia. Sunrise/sunset questions are geocoded and
+  answered directly from Open-Meteo — for example,
+  `Sunrise | Vandalia, Illinois: Sunrise is expected around 6:38 AM local time today.`
+  — instead of accepting a search snippet that merely says times are
+  local. Weather questions now take the same direct-data route, including
+  temperature, apparent temperature, humidity and wind from Open-Meteo; for
+  example, `Weather | Marshall, Illinois: Currently 68°F with partly cloudy
+  skies; feels like 66°F; humidity 59%; wind WSW at 12 mph.` An archive-page
+  snippet such as “weather reports from the last weeks” can never become a
+  current-weather answer. When the records miner backs a
+  superlative question, the article it digs through must actually be
+  about the subject (a US freight-lane question once came back with
+  Ivory Coast's GDP — the search loved "coat"~"Côte" and "west
+  coast"). The persona takes over when
   the engine has nothing, and owns opinions and about-the-bot questions
   ("whats your favorite truck") outright. No LLM key configured? The
   ask falls through to the fact engine's question path, which answers
@@ -308,14 +312,19 @@ fallback takes the line.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers (a factual question in a mention gets the fact
   engine's grounded answer, same as `!ask`), at most once per
-  `chat_ai_mention_cooldown` seconds,
-  so it cannot be wound up like a toy. A mention that arrives inside
+  `chat_ai_mention_cooldown` seconds. Viewer wording is not run through
+  the bot's *output* profanity filter: a directly addressed question with
+  rough language is still answered, while the generated reply still has to
+  pass every output rail. Unsafe viewer lines are never retained as ambient
+  model context, so they cannot be parroted into a later reply. The cooldown
+  keeps the bot from being wound up like a toy. A mention that arrives inside
   the cooldown is *held*, not dropped — the bot answers it to the right
   person the moment the cooldown clears (within two minutes; after that
   the moment has passed and answering would be the non-sequitur). And a
   reply that comes back unusable — cut off mid-sentence, too long — is
-  re-asked once before silence: a direct question is never left
-  dangling, and a late answer always answers the message that was
+  re-asked once; a safe overlong answer is then fitted at a complete boundary,
+  or the bot posts an honest retry acknowledgement. A direct question is
+  never left dangling, and a late answer always answers the message that was
   actually sent.
   Channel-stats questions are answered straight from Helix: "docbot,
   how many follows this stream?" gets the live follower total plus how
@@ -328,37 +337,39 @@ fallback takes the line.
   The streamer's own lines never
   trigger chime-ins — he has the floor — but directly addressing the bot
   by name does get a reply.
-- **Chime-ins** — off by default (`chat_ai_chance` 0): the field
-  verdict was that in a flowing conversation the bot's unprompted lines
-  are noise — it speaks when spoken to. Raised above zero, a moment
-  must win the roll, the room must have at least `chat_ai_min_chat`
-  recent messages,
-  `chat_ai_cooldown` seconds (default 240) must have passed since its
-  last unprompted line, and the message it reacts to needs actual words
-  — an emoji wall has characters but no conversation in it. The model
-  is told the message was NOT to it and must genuinely have something to
-  add, or it declines; and an overheard question is never answered with
-  a FunFact — the fact engine answers only questions *addressed* to the
-  bot. A chime must also be **about the message it jumps on**: the
-  reply has to share a content word with what was said, and is declined
-  otherwise — a persona poem at somebody who was talking about
-  something else (live-fire: "The freezer rattles like wind through
-  pine trees…" at a supplement comment) never reaches chat. The
-  conversation is carried by mentions, `!ask` and the openers;
-  chime-ins are accents (default cap 12 an hour), not a second voice in
-  the room.
-- **Quiet-room openers** — when nobody has spoken for
-  `chat_ai_quiet_seconds` (default 300 — a real lull, not a breath),
-  the bot opens the conversation itself (a question for chat, a hook
-  from its own life), at most once per `chat_ai_quiet_cooldown`
-  (default 1200 — twenty minutes; any tighter and a quiet room turns
-  the bot into a timer). A chime-in can only trigger off someone's
-  message, which is impossible in a silent room — exactly when the bot
-  should be doing the talking. Mention replies run on their own clock,
-  so a human answering an opener five seconds later gets a reply, not a
-  cooldown wall.
-- Nothing — mentions, chime-ins and openers included — exceeds
-  `chat_ai_max_hour` lines an hour, and `!cb off` silences all of it.
+- **Contextual chime-ins** — these are for *light* conversation, never a
+  busy room. A moment must win a `chat_ai_chance` roll (default 0.10),
+  the room must have at least `chat_ai_min_chat` recent human messages,
+  and `chat_ai_cooldown` seconds (default 600) must have passed since the
+  last unprompted attempt. If `chat_ai_busy_messages` human lines arrive
+  inside `chat_ai_busy_seconds` (defaults: 4 in 30 seconds), chat has the
+  floor: the bot stays silent unless someone asks or addresses it. Bot
+  echoes, commands, unsafe text and emoji walls do not create an excuse
+  to chime.
+
+  The model is told that the message was NOT to it and may speak only if
+  it has something specific to add. An overheard question is never
+  answered with a FunFact — the fact engine answers only questions
+  *addressed* to the bot. Every chime must be **about the human message
+  it jumps on**: the result has to carry that message's subject, and is
+  declined otherwise. Generic cadence, coffee, trucking, motivation or
+  workout filler does not count just because it matches Doc's persona.
+  A declined attempt still starts the cooldown, so a poor model cannot
+  hammer the room or the API. Chime-ins are accents (default autonomous
+  cap 6 an hour), not a second voice in the conversation.
+- **One contextual follow-up per lull** — a safe ordinary human
+  conversation can arm one follow-up. After
+  `chat_ai_quiet_seconds` (default 300) of silence, the bot may continue
+  that latest topic; it may not invent a generic icebreaker. The attempt
+  consumes the latch whether it speaks or declines. Continued silence
+  therefore never becomes a repeating timer: a new ordinary human
+  conversation must happen before another lull can be armed. Startup
+  silence is not armed, resumed chat cancels queued quiet work, and
+  `chat_ai_quiet_cooldown` (default 900) remains an additional backstop.
+- `chat_ai_max_hour` limits autonomous chime-ins and quiet follow-ups,
+  not directly addressed questions. Mentions use their own clock and
+  remain reliable even when the room is flowing or the autonomous cap
+  is full. `!cb off` still silences all autonomous chat AI.
 - **`!cb off`** silences it for the session, like the other chatter.
 
 What it will never do, by prompt *and* by output filter: tease people
@@ -368,14 +379,17 @@ routed to the fact engine first), guess anything personal about a viewer, or pos
 @mentions or more than one emoji, no command syntax (the persona never
 tells viewers to go use `!funfact` — it answers itself or says nothing).
 It also cannot repeat itself: its own recent lines are named in the
-prompt, and a reply reusing a signature word from them is declined
-(`!ask` gets one "say something completely different" re-ask first) —
-a small modet finds a phrase it likes will otherwise drill it into
-the ground ("midnight coffee and donuts" was a real stream). A model
-with nothing worth saying
-replies `NOTHING TO SAY` and the bot stays quiet — a decline still
-starts the cooldown, so it never hammers the API. The streamer's own
-messages never trigger it: he already has the floor.
+prompt, and an answer that recycles a phrase, distinctive signature or
+most of a recent line is declined. Ordinary topic words are exempt when
+the viewer just used them — mentioning `cadence` again while answering a
+cadence question is not repetition. A directly addressed answer gets one
+"say something completely different" retry before a deterministic
+failure line; autonomous chatter simply declines. That blocks actual
+repeated templates without making real questions silently disappear.
+A model with nothing worth saying replies `NOTHING TO SAY` and the bot
+stays quiet. The streamer's own messages never trigger autonomous chat:
+he already has the floor, though directly addressing the bot still gets
+an answer.
 
 The voice is `bot_personality` in `config.json` — your words, your
 rules — and the built-in default is Doc: a dry-witted old trucker who
@@ -613,12 +627,9 @@ fun facts. Three layers, in order:
    any rowdy stories the supplied facts actually contain, each ≤ 200 chars."*
    The model rewrites **only the supplied facts** (never invents its own),
    returns up to 10 one-liners, and the bot serves the top one first, then a
-   random one on repeat calls. A line the model cut off mid-sentence (it
-   squeezed a long quote into the character budget and gave up — live-fire:
-   *"…as to why Daft Punk split, saying: "As much as I love this character,
-   the last thing I would want to be…"*) is repaired to its last complete
-   clause before it can post; what cannot be repaired is dropped.
-   **This is what makes spicy mode actually spicy**
+   random one on repeat calls. A line cut off mid-quote is repaired to its last
+   complete clause or dropped before it can reach chat. **This is what makes
+   spicy mode actually spicy**
    — but see the note below: for real adult output you want a **local Ollama
    model**, because hosted models are filtered.
 

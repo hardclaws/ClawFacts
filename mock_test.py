@@ -221,13 +221,10 @@ def test_bad_config_is_reported_plainly():
     expected = next(n for n, l in enumerate(bad, 1)
                     if l.strip().startswith('"_llm_options"')) + 1
     assert f"line {expected}, column 3" in text, text
-    # And it must be pointing at a real line of that file, not a guess:
-    # the line json names is the one that actually follows the break.
-    # (Pinned to a key name once; 5b87aff inserted llm_fallback_key
-    # right after _llm_options and the pin went stale - a test failure
-    # that said nothing about the bot.)
-    assert bad[expected - 1] == lines[i + 1], \
-        bad[expected - 1]
+    # And it must print the real line from that file, not a guessed key. The
+    # field after _llm_options changes as new config sections are inserted.
+    reported = bad[expected - 1]
+    assert f"| {reported}" in text, (reported, text)
     assert "does not end with a comma" in text, text
     print("[PASS] a broken config.json names the line and stops the restart loop")
 
