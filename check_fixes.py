@@ -1663,6 +1663,15 @@ def main() -> int:
              "llm.py").read_text(encoding="utf-8")
          and "MISSING FIX" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("a busy free fallback routes only to other free models",
+         _llm2.fallback_model_chain(
+             "https://openrouter.ai/api/v1",
+             "nvidia/nemotron-3-super-120b-a12b:free") == [
+                 "nvidia/nemotron-3-super-120b-a12b:free",
+                 "openrouter/free"]
+         and _llm2.fallback_model_chain(
+             "https://openrouter.ai/api/v1", "paid/model") == [
+                 "paid/model"]),
         ("the live bot forwards fallback/no-think options to the chat client",
          _bot_forwards_chat_options()),
         ("rough direct asks answer; an old ask cannot hijack the next reply",

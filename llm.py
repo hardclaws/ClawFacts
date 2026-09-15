@@ -349,15 +349,38 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
     return user
 
 
+def fallback_model_chain(base: str, model: str) -> list[str]:
+    """The zero-cost model order for an OpenRouter ``:free`` endpoint.
+
+    Keep the operator's chosen model first. If every provider for that model is
+    unavailable, OpenRouter's always-free router can select another currently
+    live free model. No paid slug is introduced, and non-free/local endpoints
+    remain exactly as configured.
+    """
+    chosen = (model or "").strip()
+    chain = [chosen] if chosen else []
+    if ("openrouter" in (base or "").lower()
+            and chosen.lower().endswith(":free")
+            and chosen.lower() != "openrouter/free"):
+        chain.append("openrouter/free")
+    return chain
+
+
 def _build_body(model: str, user_prompt: str, system: str = None,
                 max_tokens: int = None, hard_nothink: bool = False,
                 reasoning_budget: int = None,
-                temperature: float = None) -> str:
+                temperature: float = None,
+                models: list[str] = None) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
-    body = {"model": model, "messages": messages}
+    # OpenRouter's ``models`` array moves to the next MODEL after all
+    # providers for the preferred model fail. This is especially important for
+    # shared-capacity :free slugs: provider failover alone can exhaust every
+    # host for one model while other free models are still answering.
+    body = ({"models": models, "messages": messages} if models else
+            {"model": model, "messages": messages})
     if hard_nothink:
         body["think"] = False
     if _REASONING.search(model):
@@ -459,13 +482,14 @@ def _call(base: str, model: str, key: str, user_prompt: str,
           system: str = None, timeout: float = 60.0,
           max_tokens: int = None, hard_nothink: bool = False,
           reasoning_budget: int = None,
-          temperature: float = None) -> str:
+          temperature: float = None,
+          models: list[str] = None) -> str:
     return _request(base, key,
                     _build_body(model, user_prompt, system,
                                 max_tokens=max_tokens,
                                 hard_nothink=hard_nothink,
                                 reasoning_budget=reasoning_budget,
-                                temperature=temperature),
+                                temperature=temperature, models=models),
                     timeout=timeout)
 
 
@@ -583,9 +607,16 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
             print(f"[llm] POST {fbase}/chat/completions  model={fmodel} "
                   f"(chat fallback, timeout {fb_timeout}s)", flush=True)
         try:
+            chain = fallback_model_chain(fbase, fmodel)
+            fallback_options = {
+                "timeout": fb_timeout,
+                "max_tokens": 120,
+                "hard_nothink": _hard_nothink(cfg, fbase),
+            }
+            if len(chain) > 1:
+                fallback_options["models"] = chain
             text = _call(fbase, fmodel, fkey, prompt, system,
-                         timeout=fb_timeout, max_tokens=120,
-                         hard_nothink=_hard_nothink(cfg, fbase))
+                         **fallback_options)
             _note_fallback_line(model, fmodel)
             return text
         except urllib.error.HTTPError as exc:
@@ -625,12 +656,20 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
     breaker instead of making a configured-but-dead endpoint look ready.
     """
     started = time.time()
+    chain = fallback_model_chain(base, model) if fallback else [model]
+    routed_models = chain if len(chain) > 1 else None
+    warm_options = {
+        "timeout": 90.0,
+        "max_tokens": 24,
+        "hard_nothink": _hard_nothink(cfg, base),
+    }
+    if routed_models:
+        warm_options["models"] = routed_models
     try:
         text = _call(base, model, key,
                      _maybe_nothink("Reply with exactly: OK", cfg),
                      "You are a warm-up probe. Reply with exactly: OK.",
-                     timeout=90.0, max_tokens=24,
-                     hard_nothink=_hard_nothink(cfg, base))
+                     **warm_options)
     except urllib.error.HTTPError as exc:
         # A warm-up failure must SAY so. OpenRouter may put this error in a
         # 200 body; _request normalises that envelope into the same path.
@@ -656,11 +695,11 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
         # tight cap can cut the answer right out of the budget. One
         # generous retry, still in the background where nobody waits.
         try:
+            retry_options = dict(warm_options, max_tokens=200)
             text = _call(base, model, key,
                          _maybe_nothink("Reply with exactly: OK", cfg),
                          "You are a warm-up probe. Reply with exactly: OK.",
-                         timeout=90.0, max_tokens=200,
-                         hard_nothink=_hard_nothink(cfg, base))
+                         **retry_options)
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
@@ -852,6 +891,9 @@ def _complete_provider(base: str, model: str, key: str, user: str,
                 call_options["reasoning_budget"] = reasoning_budget
             if temperature is not None:
                 call_options["temperature"] = temperature
+            chain = fallback_model_chain(base, m) if fallback else [m]
+            if len(chain) > 1:
+                call_options["models"] = chain
             text = _call(base, m, key, _maybe_nothink(user, cfg), system,
                          **call_options)
             if cfg.get("debug"):
