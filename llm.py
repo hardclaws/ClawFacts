@@ -296,7 +296,8 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 
 
 def _build_body(model: str, user_prompt: str, system: str = None,
-                max_tokens: int = None, hard_nothink: bool = False) -> str:
+                max_tokens: int = None, hard_nothink: bool = False,
+                reasoning_budget: int = None) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -305,7 +306,11 @@ def _build_body(model: str, user_prompt: str, system: str = None,
     if hard_nothink:
         body["think"] = False
     if _REASONING.search(model):
-        body["max_completion_tokens"] = 300
+        # The completion budget covers thinking AND answer for a
+        # reasoning model - too tight and the answer is what gets
+        # squeezed out (an empty 200; live-fire: a held mention
+        # 'answered' at 17:33:23 came back with nothing at 17:33:24).
+        body["max_completion_tokens"] = reasoning_budget or 300
         body["reasoning_effort"] = "low"
     else:
         body["max_tokens"] = max_tokens or 300
@@ -346,11 +351,13 @@ def _request(base: str, key: str, body: bytes,
 
 def _call(base: str, model: str, key: str, user_prompt: str,
           system: str = None, timeout: float = 60.0,
-          max_tokens: int = None, hard_nothink: bool = False) -> str:
+          max_tokens: int = None, hard_nothink: bool = False,
+          reasoning_budget: int = None) -> str:
     return _request(base, key,
                     _build_body(model, user_prompt, system,
                                 max_tokens=max_tokens,
-                                hard_nothink=hard_nothink),
+                                hard_nothink=hard_nothink,
+                                reasoning_budget=reasoning_budget),
                     timeout=timeout)
 
 
@@ -398,8 +405,27 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
             text = _call(base, model, key, prompt, system,
                          timeout=timeout, max_tokens=120,
                          hard_nothink=_hard_nothink(cfg, base))
-            _note_primary_line()
-            return text
+            if not text:
+                # An empty 200 is the reasoning model thinking past its
+                # cap, or a filter fluke - not a decline (that is the
+                # literal NOTHING TO SAY). One retry at a doubled
+                # thinking budget; a cheap second, not a loop.
+                print(f"[llm] {model} returned an empty chat reply - "
+                      f"one retry with a bigger thinking budget",
+                      flush=True)
+                text = _call(base, model, key, prompt, system,
+                             timeout=timeout, max_tokens=120,
+                             hard_nothink=_hard_nothink(cfg, base),
+                             reasoning_budget=600)
+            if text:
+                _note_primary_line()
+                return text
+            # Still nothing: fall through to the fallback, if there is
+            # one - an unanswered mention is the worst silence the bot
+            # has (live-fire: the streamer's held message, 17:33:24).
+            if fb:
+                print(f"[llm] {model} returned nothing twice - the "
+                      f"fallback takes this one", flush=True)
         except urllib.error.HTTPError as exc:
             _disable(exc.code)
             if exc.code == 404:

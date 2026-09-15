@@ -942,6 +942,42 @@ def main() -> int:
                   "USERNOTICE #c")
         return b._subgoal.get("current") == 2 and b._jobs.empty()
 
+    def _empty_reply_retried():
+        """A reasoning model that thinks past its completion budget
+        returns an empty 200 (live-fire: a held mention 'answered' at
+        17:33:23 came back with nothing at 17:33:24). One retry at a
+        doubled budget, then the fallback carries the line."""
+        import io as _io
+        import json as _json
+
+        cfg = {"llm_api_key": "gsk", "llm_base_url":
+               "https://api.groq.com/openai/v1",
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_key": "or", "llm_fallback_base_url":
+               "https://openrouter.ai/api/v1",
+               "llm_fallback_model": "mistralai/mistral-nemo"}
+        hits = []
+
+        def _fake(req, timeout=60):
+            hits.append(req.full_url)
+            r = "Line." if "openrouter" in req.full_url else ""
+            return _io.BytesIO(_json.dumps(
+                {"choices": [{"message": {"content": r}}]}
+            ).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fake
+        try:
+            _llm2.reset_disable_state()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            return (got == "Line."
+                    and len(hits) == 3
+                    and hits[-1] == "https://openrouter.ai/api/v1/"
+                                   "chat/completions")
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
+
     def _chat_ai_remembers_and_forgets():
         """The chat AI's memory: a log pruned to 90 days, distilled
         per-viewer facts injected into its prompts, a 25-fact cap, and
@@ -1475,6 +1511,12 @@ def main() -> int:
                               "yeah I hipped him to that supplement")
          and "not about what was said" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("an empty chat reply is retried once, then the fallback takes it",
+         "reasoning_budget" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "empty chat reply" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and _empty_reply_retried()),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

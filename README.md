@@ -263,7 +263,10 @@ gone dark), so take whatever is currently free on openrouter.ai/models;
 the free tier allows 20 requests/minute and 50/day — 1,000/day after
 any one-time $10 credit top-up — which is plenty for a fallback that
 only carries chat while Groq's window clears. A local Ollama works as
-the fallback too, with no limits at all. Fun facts and `!ask`'s trivia
+the fallback too, with no limits at all. An empty reply — a reasoning
+model that thought past its completion budget, the silent miss of a
+held mention — is retried once at a doubled thinking budget before the
+fallback takes the line. Fun facts and `!ask`'s trivia
 pass keep their own model-level fallbacks; this one is for the chat
 voice.
 

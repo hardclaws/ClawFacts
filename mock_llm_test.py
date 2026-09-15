@@ -277,7 +277,9 @@ def main():
         FAKE_BODY["choices"][0]["message"]["content"] = \
             "<think>\nthe user wants OK. I will say it."
         got = llm.chat_reply("s", "u", {"llm_api_key": "k"})
-        assert got == "", got            # cut inside the think: no answer
+        assert not got, got         # cut inside the think: no answer
+        # (an empty reply is retried once at a bigger budget now; the
+        # retry hits the same cut think block and still has no answer)
     finally:
         FAKE_BODY.clear()
         FAKE_BODY.update(orig_body)
@@ -444,6 +446,61 @@ def main():
     finally:
         llm.urllib.request.urlopen = orig
     print("[PASS] both providers down: two breakers, no request storm")
+
+    # An EMPTY reply (live-fire: a held mention 'answered' at 17:33:23
+    # came back with nothing at 17:33:24 - the reasoning model thought
+    # past its completion budget) gets ONE retry at a doubled thinking
+    # budget, and only then hands the line to the fallback.
+    def _empty_chain(groq_replies, fallback_reply):
+        state = {"bodies": []}
+
+        def _fake(req, timeout=60):
+            captured.append({"url": req.full_url, "headers": req.headers,
+                             "body": req.data.decode("utf-8"),
+                             "timeout": timeout})
+            if "groq" in req.full_url:
+                state["bodies"].append(json.loads(req.data.decode()))
+                r = groq_replies[len(state["bodies"]) - 1]
+            else:
+                r = fallback_reply
+            return io.BytesIO(json.dumps(
+                {"choices": [{"message": {"content": r}}]}
+            ).encode("utf-8"))
+        return _fake, state
+
+    # Retry answers it: two Groq calls, the second at the doubled budget.
+    _fake, state = _empty_chain(["", "Second try."], "FB.")
+    llm.urllib.request.urlopen = _fake
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "Second try.", got
+        assert len(captured) == 2, [c["url"] for c in captured]
+        budgets = [json.loads(c["body"]).get("max_completion_tokens")
+                   for c in captured]
+        assert budgets == [300, 600], budgets
+        assert not llm._unavailable(), "an empty reply is not a breaker"
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    # Two empties: the fallback carries the line.
+    _fake, _ = _empty_chain(["", ""], "FB line.")
+    llm.urllib.request.urlopen = _fake
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "FB line.", got
+        assert [c["url"] for c in captured] == [
+            "https://api.groq.com/openai/v1/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] an empty chat reply is retried once at a doubled "
+          "budget, then the fallback takes it")
 
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
