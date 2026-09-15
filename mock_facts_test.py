@@ -3043,6 +3043,68 @@ def test_the_geocoder_may_not_substitute_a_different_place():
     print("[PASS] the geocoder cannot substitute a different place")
 
 
+def test_weather_uses_current_data_not_an_archive_search_snippet():
+    """Exact field report: the bot called an archive-page snippet weather.
+    A weather question must return Open-Meteo's current conditions and never
+    touch the generic lookup ladder, even when the live API has a problem."""
+    saved = (funfacts._osm_geocode, funfacts._http_get_json,
+             funfacts._lookup_all)
+    calls = []
+    funfacts._osm_geocode = lambda place: {
+        "name": "Marshall", "state": "Illinois", "country": "United States",
+        "lat": 39.39, "lon": -87.69}
+
+    def _http(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        assert url == funfacts.OPEN_METEO_API, url
+        assert "temperature_2m" in params.get("current", ""), params
+        assert params.get("temperature_unit") == "fahrenheit", params
+        return {"timezone": "America/Chicago",
+                "current": {"time": "2026-09-15T22:10",
+                            "temperature_2m": 68.2,
+                            "apparent_temperature": 65.8,
+                            "relative_humidity_2m": 59,
+                            "precipitation": 0,
+                            "weather_code": 2,
+                            "wind_speed_10m": 11.6,
+                            "wind_direction_10m": 250,
+                            "wind_gusts_10m": 18.7}}
+
+    funfacts._http_get_json = _http
+    funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a weather question reached generic search"))
+    question = "what is the weather in Marshall, IL"
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        got = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got == {
+            "place": "Marshall, Illinois", "kind": "Weather",
+            "fact": ("Currently 68°F with partly cloudy skies; feels like "
+                     "66°F; humidity 59%; wind WSW at 12 mph, gusting to "
+                     "19 mph.")}, got
+        assert len(calls) == 1, calls
+        # Current conditions use a short cache and retain the Weather label.
+        again = funfacts.get_funfact(question, {"answer_questions": True})
+        assert again == got and len(calls) == 1, (again, calls)
+
+        # API failure is honest; archive/search text still cannot take over.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("weather service unavailable"))
+        failed = funfacts.get_funfact(question, {"answer_questions": True})
+        assert failed["kind"] == "Weather", failed
+        assert "couldn't fetch the current weather" in failed["fact"], failed
+        assert "last weeks" not in failed["fact"], failed
+    finally:
+        (funfacts._osm_geocode, funfacts._http_get_json,
+         funfacts._lookup_all) = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] weather returns current Open-Meteo conditions, never snippets")
+
+
 def test_sunrise_uses_live_clock_data_not_search_debris():
     """Exact live-fire query: a search snippet said only “all times are local”.
     Sunrise/sunset must use geocoded Open-Meteo data, include the actual clock
@@ -3205,6 +3267,7 @@ def main():
     test_tavily_supplies_the_sources_a_question_needs()
     test_spicy_mode_still_answers_questions()
     test_the_geocoder_may_not_substitute_a_different_place()
+    test_weather_uses_current_data_not_an_archive_search_snippet()
     test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0

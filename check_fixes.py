@@ -1086,6 +1086,43 @@ def main() -> int:
         return (len(said) == 1 and "1,372 followers" in said[0]
                 and "4 new" in said[0])
 
+    def _current_weather_is_live():
+        """Weather is current Open-Meteo data, never an archive snippet."""
+        saved = (funfacts._osm_geocode, funfacts._http_get_json,
+                 funfacts._lookup_all)
+        funfacts._osm_geocode = lambda _place: {
+            "name": "Marshall", "state": "Illinois",
+            "country": "United States", "lat": 39.39, "lon": -87.69}
+
+        def live(url, params=None, timeout=0):
+            if url != funfacts.OPEN_METEO_API or \
+                    "temperature_2m" not in params.get("current", ""):
+                raise AssertionError((url, params))
+            return {"current": {
+                "temperature_2m": 68.2, "apparent_temperature": 65.8,
+                "relative_humidity_2m": 59, "precipitation": 0,
+                "weather_code": 2, "wind_speed_10m": 11.6,
+                "wind_direction_10m": 250, "wind_gusts_10m": 18.7}}
+
+        funfacts._http_get_json = live
+        funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("weather reached search"))
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            result = funfacts.get_funfact(
+                "what is the weather in Marshall, IL",
+                {"answer_questions": True})
+            return (result.get("kind") == "Weather"
+                    and result.get("place") == "Marshall, Illinois"
+                    and "Currently 68°F" in result.get("fact", "")
+                    and "wind WSW at 12 mph" in result.get("fact", ""))
+        finally:
+            (funfacts._osm_geocode, funfacts._http_get_json,
+             funfacts._lookup_all) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+
     def _weather_and_miner_behave():
         """Live weather is data, not trivia - its header says Weather.
         And the records miner refuses an off-topic article: the US
@@ -1718,6 +1755,9 @@ def main() -> int:
          and "follow_total" in pathlib.Path(
              "access.py").read_text(encoding="utf-8")
          and _follows_question_works()),
+        ("current weather comes from Open-Meteo, never search snippets",
+         callable(getattr(funfacts, "_weather_answer", None))
+         and _current_weather_is_live()),
         ("live weather/sunrise are data; the records miner stays on topic",
          callable(getattr(funfacts, "_weather_header", None))
          and callable(getattr(funfacts, "_records_on_topic", None))

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import random
 import re
@@ -47,7 +48,7 @@ USER_AGENT = ("ClawFacts/1.0 "
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
-OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # sunrise/sunset
+OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # weather + solar
 OPEN_METEO_GEOCODE_API = "https://geocoding-api.open-meteo.com/v1/search"
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
@@ -3191,6 +3192,127 @@ def _weather_header(question: str):
     return place, "Weather"
 
 
+_WEATHER_CODES = {
+    0: "clear skies",
+    1: "mainly clear skies",
+    2: "partly cloudy skies",
+    3: "overcast skies",
+    45: "fog",
+    48: "freezing fog",
+    51: "light drizzle",
+    53: "drizzle",
+    55: "heavy drizzle",
+    56: "light freezing drizzle",
+    57: "heavy freezing drizzle",
+    61: "light rain",
+    63: "rain",
+    65: "heavy rain",
+    66: "light freezing rain",
+    67: "heavy freezing rain",
+    71: "light snow",
+    73: "snow",
+    75: "heavy snow",
+    77: "snow grains",
+    80: "light rain showers",
+    81: "rain showers",
+    82: "heavy rain showers",
+    85: "light snow showers",
+    86: "heavy snow showers",
+    95: "thunderstorms",
+    96: "thunderstorms with light hail",
+    99: "thunderstorms with heavy hail",
+}
+_WIND_POINTS = ("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
+
+
+def _weather_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _weather_answer(question: str):
+    """Current conditions from Open-Meteo, or ``False`` when not weather.
+
+    Weather search results routinely describe archive pages (the exact field
+    report was “Weather reports from the last weeks ... with highs and lows”).
+    A weather question therefore owns this path completely: it either returns
+    measured current conditions or an honest temporary failure, and can never
+    fall through to Wikipedia/search snippets or an LLM paraphrase.
+    """
+    place, kind = _weather_header(question)
+    if kind is None:
+        return False
+    if not place:
+        return {"place": "requested place", "kind": "Weather",
+                "facts": ["I need a city or town to check the weather."]}
+
+    geo = _osm_geocode(place) or _open_meteo_geocode(place)
+    label = place
+    if geo:
+        label = ", ".join(x for x in (geo.get("name"), geo.get("state")) if x)
+    if not geo:
+        print(f"[funfacts] could not geocode weather place: {place}", flush=True)
+        return {"place": label, "kind": "Weather", "_ttl": _BUSY_TTL,
+                "facts": ["I couldn't fetch the current weather right now; "
+                          "try me again in a minute."]}
+
+    try:
+        data = _http_get_json(
+            OPEN_METEO_API,
+            {"latitude": geo["lat"], "longitude": geo["lon"],
+             "current": ("temperature_2m,apparent_temperature,"
+                         "relative_humidity_2m,precipitation,weather_code,"
+                         "wind_speed_10m,wind_direction_10m,wind_gusts_10m"),
+             "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
+             "precipitation_unit": "inch", "timezone": "auto"},
+            timeout=10)
+        current = data.get("current") if isinstance(data, dict) else None
+        if not isinstance(current, dict):
+            raise ValueError("response has no current conditions")
+        temperature = _weather_number(current.get("temperature_2m"))
+        if temperature is None:
+            raise ValueError("response has no current temperature")
+        code = _weather_number(current.get("weather_code"))
+        conditions = _WEATHER_CODES.get(int(code), "unknown conditions") \
+            if code is not None else "unknown conditions"
+        feels = _weather_number(current.get("apparent_temperature"))
+        humidity = _weather_number(current.get("relative_humidity_2m"))
+        wind = _weather_number(current.get("wind_speed_10m"))
+        direction = _weather_number(current.get("wind_direction_10m"))
+        gusts = _weather_number(current.get("wind_gusts_10m"))
+        precipitation = _weather_number(current.get("precipitation"))
+    except Exception as exc:
+        print(f"[funfacts] weather lookup failed: {exc!r}", flush=True)
+        return {"place": label, "kind": "Weather", "_ttl": _BUSY_TTL,
+                "facts": ["I couldn't fetch the current weather right now; "
+                          "try me again in a minute."]}
+
+    pieces = [f"Currently {temperature:.0f}°F with {conditions}"]
+    if feels is not None:
+        pieces.append(f"feels like {feels:.0f}°F")
+    if humidity is not None:
+        pieces.append(f"humidity {humidity:.0f}%")
+    if wind is not None:
+        bearing = ""
+        if direction is not None:
+            bearing = " " + _WIND_POINTS[
+                int((direction % 360) / 22.5 + 0.5) % len(_WIND_POINTS)]
+        wind_text = f"wind{bearing} at {wind:.0f} mph"
+        if gusts is not None and gusts >= wind + 3:
+            wind_text += f", gusting to {gusts:.0f} mph"
+        pieces.append(wind_text)
+    if precipitation is not None and precipitation > 0:
+        pieces.append(f"precipitation {precipitation:.2f} in")
+    fact = "; ".join(pieces) + "."
+    print(f"[funfacts] current weather for {label}: {fact}", flush=True)
+    return {"place": label, "kind": "Weather", "_ttl": 300,
+            "facts": [fact]}
+
+
 def _question_place(question: str) -> str:
     """The header for an answered question: itself, trimmed at a word."""
     topic = " ".join(question.split())
@@ -3563,11 +3685,16 @@ def get_funfact(location: str, options=None):
             _cache.pop(key, None)
 
     if entry is None:
-        # Live clock data is not a place fun fact and must never go through a
-        # search snippet or an LLM. ``False`` means this is not a solar query;
-        # a dict (including a transparent fetch failure) is the whole answer.
-        solar = _solar_answer(location.strip())
-        result = None if solar is False else solar
+        # Live conditions and clock data are not place fun facts and must never
+        # go through a search snippet or an LLM. ``False`` means the specialist
+        # did not recognise its query; a dict (including a transparent fetch
+        # failure) is the whole answer.
+        weather = _weather_answer(location.strip())
+        if weather is not False:
+            result = weather
+        else:
+            solar = _solar_answer(location.strip())
+            result = None if solar is False else solar
         if result is None and llm_only:
             facts = _llm_only_facts(location.strip(), limit, opts)
             if facts:

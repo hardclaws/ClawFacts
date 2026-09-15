@@ -595,6 +595,21 @@ def test_factual_questions_get_the_engine_first():
         assert b.said[-1] == ("Sunrise | Vandalia, Illinois: Sunrise is "
                               "expected around 6:38 AM local time today."), b.said
         assert not persona, persona
+        # Exact weather field report: current measured conditions keep their
+        # Weather label; an archive-page snippet can never impersonate them.
+        bot_mod.get_funfact = lambda q, o: {
+            "place": "Marshall, Illinois", "kind": "Weather",
+            "fact": ("Currently 68°F with partly cloudy skies; feels like "
+                     "66°F; humidity 59%; wind WSW at 12 mph.")}
+        b._chat_ai_mention_last = 0.0
+        b._on_message("Hardclaws", "#t",
+                      "Docbot what is the weather in Marshall, IL",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert b.said[-1] == (
+            "Weather | Marshall, Illinois: Currently 68°F with partly cloudy "
+            "skies; feels like 66°F; humidity 59%; wind WSW at 12 mph."), b.said
+        assert not persona, persona
         # The engine has nothing: the persona still gets its chance
         bot_mod.get_funfact = lambda q, o: None
         b._reply_ask("kvack", "what is a flux capacitor")

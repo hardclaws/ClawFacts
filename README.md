@@ -283,8 +283,12 @@ line.
   answered directly from Open-Meteo — for example,
   `Sunrise | Vandalia, Illinois: Sunrise is expected around 6:38 AM local time today.`
   — instead of accepting a search snippet that merely says times are
-  local. Weather answers likewise use `Weather | Saint Clair, Mo: …`;
-  and when the records miner backs a
+  local. Weather questions now take the same direct-data route, including
+  temperature, apparent temperature, humidity and wind from Open-Meteo; for
+  example, `Weather | Marshall, Illinois: Currently 68°F with partly cloudy
+  skies; feels like 66°F; humidity 59%; wind WSW at 12 mph.` An archive-page
+  snippet such as “weather reports from the last weeks” can never become a
+  current-weather answer. When the records miner backs a
   superlative question, the article it digs through must actually be
   about the subject (a US freight-lane question once came back with
   Ivory Coast's GDP — the search loved "coat"~"Côte" and "west
