@@ -320,6 +320,13 @@ model on CPU would otherwise burn the whole budget.)
 
 Three box-specific notes:
 
+- **Prompt size.** On CPU the model reads every token of the prompt
+  before writing a word — that read, not the generation, is what blows
+  past a 20s timeout on a *warm* model. For local models the bot sends
+  a smaller room (8 chat lines instead of 15) and fewer memories (4
+  instead of 8); hosted APIs keep the full context, it costs them
+  nothing.
+
 - **`llm_no_think: true`** matters with Qwen3-family models. They
   "think" before answering, and on CPU that turns a one-line reply into
   a half-minute stall — every timeout goes off and the bot goes quiet.

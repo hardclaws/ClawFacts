@@ -1963,11 +1963,20 @@ class TwitchBot:
             chatai.DEFAULT_PERSONA
         speakers = [n for n, _ in lines[-6:]] + [nick]
         memories = self._memory.recall(speakers) if self._memory.ok else []
+        # A local model on CPU reads the whole prompt before writing a
+        # word - that read, not the generation, is what blew a 20s
+        # timeout on a warm model. Send it a smaller room and fewer
+        # memories; hosted APIs keep the full context, it costs them
+        # nothing.
+        local = llm_mod._is_local(
+            (self._opts.get("llm_base_url") or "").strip())
         try:
             raw = llm_mod.chat_reply(
                 chatai.system_prompt(persona),
                 chatai.user_prompt(lines, nick, text, memories,
-                                   quiet=quiet),
+                                   quiet=quiet,
+                                   max_lines=8 if local else 15,
+                                   max_memories=4 if local else 8),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")

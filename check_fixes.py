@@ -1321,6 +1321,13 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("local prompts are trimmed: 8 room lines, 4 memories",
+         "max_lines=8 if local" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "max_memories=4 if local" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "max_lines: int = 15" in pathlib.Path(
+             "chatai.py").read_text(encoding="utf-8")),
         ("local models get a local-sized chat budget (30s, 120 tokens)",
          "default_to" in pathlib.Path("llm.py").read_text(encoding="utf-8")
          and "max_tokens=120" in pathlib.Path(

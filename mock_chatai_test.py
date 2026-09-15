@@ -165,6 +165,40 @@ def test_the_streamer_can_address_the_bot_but_it_never_butts_in():
     print("[PASS] the streamer can address the bot; it never butts in")
 
 
+def test_local_models_get_a_smaller_room_to_read():
+    """On CPU the model reads every prompt token before writing a word -
+    that read, not the generation, blew a 20s timeout on a warm model
+    (the user's chat_ai_timeout WAS set). Local models get 8 room lines
+    and 4 memories instead of 15 and 8; hosted keeps the lot."""
+    room = [("n%d" % i, "filler line %d" % i) for i in range(20)]
+    p15 = chatai.user_prompt(room, "x", "hi")
+    assert "filler line 19" in p15 and "filler line 4" not in p15
+    p8 = chatai.user_prompt(room, "x", "hi", max_lines=8)
+    assert "filler line 19" in p8 and "filler line 11" not in p8
+    mem = [("n%d" % i, "fact %d" % i) for i in range(6)]
+    pm = chatai.user_prompt([], "x", "hi", memories=mem, max_memories=4)
+    assert "fact 3" in pm and "fact 4" not in pm
+
+    # And the bot wires the trim to local base_urls.
+    b = _bot(llm_api_key="", llm_base_url="http://127.0.0.1:11434/v1")
+    seen = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c: (seen.append(u) or "a line")
+    try:
+        for i in range(12):
+            b._on_message("v%d" % i, "#t", "filler line %d" % i,
+                          "v%d" % i, "")
+        while not b._jobs.empty():
+            b._jobs.get()
+        b._chat_ai_line(b._chat_ai_snapshot(), "kvack", "hello there")
+        assert seen, "the model was never asked"
+        assert "filler line 11" in seen[0], seen[0][-200:]
+        assert "filler line 3" not in seen[0], seen[0][-200:]
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] local models get 8 room lines and 4 memories")
+
+
 def test_smalltalk_keeps_the_bot_alive_when_the_model_is_down():
     """A dead model slug used to mean total silence on direct address and,
     for !ask, a Wikipedia fact about the word 'today'. Chatty messages now
@@ -480,6 +514,7 @@ def main():
     test_the_streamer_can_address_the_bot_but_it_never_butts_in()
     test_unsafe_or_lazy_lines_never_post()
     test_ask_answers_with_persona_then_facts()
+    test_local_models_get_a_smaller_room_to_read()
     test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()
     test_memory_roundtrip_and_forget()
     test_the_bot_remembers_and_forgets()

@@ -67,21 +67,27 @@ def system_prompt(persona: str = "") -> str:
 
 
 def user_prompt(lines: list, nick: str, text: str,
-                memories: list = None, quiet: bool = False) -> str:
+                memories: list = None, quiet: bool = False,
+                max_lines: int = 15, max_memories: int = 8) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
     them. `quiet` is the dead-room case: no one said anything, and the
-    bot's job is to get the conversation going."""
+    bot's job is to get the conversation going.
+
+    max_lines/max_memories trim the prompt: a local model on CPU has to
+    READ every token of it before writing a word, and that read - not
+    the generation - was the cost blowing past a 20s timeout on a warm
+    model. Callers point these at smaller values for local models."""
     out = []
     if memories:
         out.append("What you remember about people here (from past chat,"
                    " may be stale):")
-        out.extend(f"- {n}: {f}" for n, f in memories[:8])
+        out.extend(f"- {n}: {f}" for n, f in memories[:max_memories])
         out.append("")
     out.append("Recent chat (it has gone quiet):" if quiet
                else "Recent chat:")
-    out.extend(f"{n}: {t}" for n, t in lines[-15:])
+    out.extend(f"{n}: {t}" for n, t in lines[-max_lines:])
     out.append("")
     if quiet:
         out.append(
