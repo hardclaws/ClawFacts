@@ -3407,10 +3407,13 @@ def main() -> None:
     try:
         import subprocess
         _here = os.path.dirname(os.path.abspath(__file__))
-        _out = subprocess.run(
-            [sys.executable, os.path.join(_here, "check_fixes.py")],
+        _checker = os.path.join(_here, "check_fixes.py")
+        _run = subprocess.run(
+            [sys.executable, _checker],
             capture_output=True, text=True, timeout=120, cwd=_here,
-        ).stdout or ""
+            encoding="utf-8", errors="replace",
+        )
+        _out = _run.stdout or ""
         _m = re.search(r"(\d+)/(\d+) present", _out)
         if _m:
             print(f"[bot] fixes self-check: {_m.group(1)}/{_m.group(2)} "
@@ -3420,11 +3423,22 @@ def main() -> None:
             for _missing in re.findall(
                     r"^\s*\[ \]\s*(.*?)(?:\s{2,})?$", _out, re.MULTILINE):
                 print(f"[bot] MISSING FIX: {_missing.strip()}")
-        else:
+        elif not os.path.exists(_checker):
             print("[bot] fixes self-check: could not read check_fixes.py "
                   "- is it next to bot.py?")
-    except Exception:
-        print("[bot] fixes self-check: could not run check_fixes.py")
+        else:
+            # The file is there; the checker itself died before it could
+            # print a count (a check raised, an import failed). That used to
+            # be reported as "could not read", which sent people looking for
+            # a missing file when the traceback held the actual answer.
+            print(f"[bot] fixes self-check: check_fixes.py failed "
+                  f"(exit code {_run.returncode}) before printing a count")
+            _err = (_run.stderr or "").strip()
+            for _line in (_err or "(no error output)").splitlines()[-25:]:
+                print(f"[bot] fixes self-check | {_line}")
+    except Exception as exc:
+        print(f"[bot] fixes self-check: could not run check_fixes.py - "
+              f"{type(exc).__name__}: {exc}")
 
     if not do_selftest:
         warn_config(cfg)

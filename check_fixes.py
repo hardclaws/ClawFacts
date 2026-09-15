@@ -1278,6 +1278,63 @@ def main() -> int:
         return getattr(_bot.TwitchBot, "_BEEF_GAPS", None) is None \
             and hasattr(_bot.TwitchBot, "_beef_gap")
 
+    def _reminder_clock_zones_are_self_contained():
+        """'01:30PDT' and '01:30 UTC-7' are fixed offsets that reminders.py
+        resolves on its own; they must never depend on zoneinfo. Windows
+        ships no IANA database, so ZoneInfo("America/Los_Angeles") raises
+        there unless tzdata was pip-installed, and asserting on that name
+        made this line read as a missing fix on every Windows box. zoneinfo
+        is switched off for the duration so the abbreviation and numeric
+        paths are proven self-contained even on a machine that has it."""
+        import datetime as _dt
+        import reminders as _rem
+
+        def utc_clock(stamp):
+            return _dt.datetime.fromtimestamp(
+                stamp, _dt.timezone.utc).strftime("%H:%M")
+
+        saved = _rem.zoneinfo
+        _rem.zoneinfo = None
+        try:
+            for spec, label, clock in (
+                    ("01:30PDT", "PDT", "08:30"),        # PDT is UTC-7
+                    ("1:30pm PDT", "PDT", "20:30"),      # meridiem, then zone
+                    ("01:30 UTC-7", "UTC-7", "08:30"),   # numeric offset
+                    ("01:30 +0930", "+0930", "16:00")):  # half-hour offset
+                due, got, _ = _rem.parse_clock(spec)
+                if due is None or got != label or utc_clock(due) != clock:
+                    return False
+            # An IANA name is still told apart from "am". Without tz data
+            # it is refused with a reason - never misread, never a crash.
+            due, why, _ = _rem.parse_clock("01:30 America/Los_Angeles")
+            return due is None and "not a timezone I know" in str(why)
+        finally:
+            _rem.zoneinfo = saved
+
+    def _state_files_are_written_atomically():
+        """storage.save_json() lands the file through a temp + os.replace().
+        tempfile.mkstemp() returns an OPEN descriptor as well as a path; the
+        old one-liner kept it open, and Windows will not replace a file that
+        another handle holds (WinError 32), so the save failed there - and
+        it leaked one temp file per run everywhere. Close the descriptor
+        first, save, read it back, then remove everything that was made."""
+        import json
+        import shutil
+        import storage as _storage
+        folder = tempfile.mkdtemp(prefix="clawfacts-check-")
+        fd, path = tempfile.mkstemp(dir=folder, suffix=".json")
+        os.close(fd)
+        try:
+            if not _storage.save_json(path, {"ok": 1}):
+                return False
+            with open(path, encoding="utf-8") as fh:
+                if json.load(fh) != {"ok": 1}:
+                    return False
+            # The swap must leave no .tmp-* file beside the real one.
+            return os.listdir(folder) == [os.path.basename(path)]
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -1443,9 +1500,7 @@ def main() -> int:
          __import__("reminders").parse_delay("60mins")[0] == 3600.0
          and __import__("reminders").parse_delay("1h30m")[0] == 5400.0),
         ("!reminder takes a clock time with a timezone (01:30PDT)",
-         __import__("reminders").parse_clock("01:30PDT")[1] == "PDT"
-         and __import__("reminders").parse_clock(
-             "01:30 America/Los_Angeles")[1] == "America/Los_Angeles"),
+         _reminder_clock_zones_are_self_contained()),
         ("reminders survive a restart",
          hasattr(__import__("reminders").ReminderSet, "save")
          and hasattr(__import__("bot").TwitchBot(
@@ -1920,8 +1975,7 @@ def main() -> int:
          hasattr(__import__("access").Helix("c", "t", "1"), "channel_info")
          and _last_seen_is_sourced()),
         ("state files are written atomically",
-         __import__("storage").save_json(
-             __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),
+         _state_files_are_written_atomically()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
