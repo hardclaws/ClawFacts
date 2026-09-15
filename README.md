@@ -268,7 +268,11 @@ everything else works without a key.
   the bot answers (a factual question in a mention gets the fact
   engine's grounded answer, same as `!ask`), at most once per
   `chat_ai_mention_cooldown` seconds,
-  so it cannot be wound up like a toy. The streamer's own lines never
+  so it cannot be wound up like a toy. A mention that arrives inside
+  the cooldown is *held*, not dropped — the bot answers it to the right
+  person the moment the cooldown clears (within two minutes; after that
+  the moment has passed and answering would be the non-sequitur).
+  The streamer's own lines never
   trigger chime-ins — he has the floor — but directly addressing the bot
   by name does get a reply.
 - **Chime-ins** — on a busy channel it occasionally adds a line of its

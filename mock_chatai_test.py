@@ -296,6 +296,56 @@ def test_emoji_walls_never_chime():
     print("[PASS] emoji walls never chime; real lines and mentions do")
 
 
+def test_a_held_mention_is_answered_late_to_the_right_person():
+    """Live-fire: 'pick a number 1-100 @truckingwithdocbot' arrived
+    inside the mention cooldown, was silently held, and a later chime
+    answered the number game TO SOMEONE ELSE ('@Etchedchampion Pick
+    42...'). A direct question never dangles: it is held, and the keeper
+    answers it to the right person the moment the cooldown clears - or
+    drops it after two minutes, when answering would be the
+    non-sequitur."""
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c: "Forty-two. Obviously."
+    try:
+        T0 = time.time()
+        b._chat_ai_mention_last = T0 - 30      # a reply 30s ago: held
+        b._on_message("Yeyeboi", "#t",
+                      "pick a number 1-100 @truckingwithdocbot",
+                      "yeyeboi", "")
+        assert b._jobs.empty(), "should be held, not enqueued"
+        assert b._chat_ai_pending is not None
+        assert any("held" in l for l in logs), logs
+        # 40s later the cooldown has cleared: answered, to Yeyeboi.
+        assert b._chat_ai_tick(now=T0 + 40) is True
+        # _do_chime re-checks the cooldown against real time; the tick
+        # above ran at synthetic T0+40, so move the last-reply timestamp
+        # with it, exactly as the wall clock would have.
+        b._chat_ai_mention_last = T0 - 200
+        _drain(b)
+        assert b.said == ["@Yeyeboi Forty-two. Obviously."], b.said
+        assert b._chat_ai_pending is None
+    finally:
+        llm.chat_reply = orig
+    # Stale pending (over two minutes) is dropped, not answered.
+    b2 = _bot(llm_api_key="k")
+    b2._last_chat = time.time()            # quiet gate closed
+    b2._chat_ai_pending = ("kvack", "doc hello there", time.time() - 300)
+    assert b2._chat_ai_tick() is False
+    assert b2._chat_ai_pending is None
+    # And the hourly cap still rules: a fresh pending is dropped when
+    # the bot is capped.
+    b3 = _bot(llm_api_key="k")
+    b3._last_chat = time.time()
+    b3._chat_ai_pending = ("kvack", "doc hello there", time.time())
+    b3._chat_ai_times = [time.time()] * bot_mod.DEFAULTS["chat_ai_max_hour"]
+    assert b3._chat_ai_tick() is False
+    assert b3._chat_ai_pending is None
+    print("[PASS] a held mention is answered late, to the right person")
+
+
 def test_the_bot_cannot_repeat_itself():
     """Live-fire: the model found 'midnight coffee and donuts' and used
     some form of it in eight straight lines ('does this bot just repeat
@@ -811,6 +861,7 @@ def main():
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
+    test_a_held_mention_is_answered_late_to_the_right_person()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
     test_no_failed_chat_attempt_is_silent()

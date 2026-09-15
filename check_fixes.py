@@ -1322,6 +1322,13 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("a held mention is answered late, to the right person",
+         "_chat_ai_pending" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "will answer when" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "answering" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("the bot cannot repeat itself or redirect to commands",
          _ch2.too_similar("Midnight snacks and that endless horizon",
                           ["Midnight coffee, fresh donuts, and the road",

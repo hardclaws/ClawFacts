@@ -57,6 +57,8 @@ _RULES = (
     "- Vary every line. Never reuse a word or image from your own recent "
     "lines (no same drink, snack or time of day), and not every line "
     "ends with a question.\n"
+    "- When asked your opinion of a person or their news, give your take "
+    "on the SITUATION - never pivot to a different subject.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
     "- If nothing is worth saying, reply with exactly: NOTHING TO SAY\n"
 )

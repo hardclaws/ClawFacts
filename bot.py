@@ -407,6 +407,7 @@ class TwitchBot:
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
+        self._chat_ai_pending = None            # a mention held by cooldown
         self._chat_ai_names = set(
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
@@ -1948,23 +1949,28 @@ class TwitchBot:
                 paused=self.paused,
                 ambient_off=self._cb_ambient_off,
                 kind=kind, roll=random.random(),
-                chance=float(self.cfg.get("chat_ai_chance", 0.4)),
+                chance=float(self.cfg.get("chat_ai_chance", 0.25)),
                 now=time.time(), last=self._chat_ai_last,
                 mention_last=self._chat_ai_mention_last,
                 mention_cd=float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)),
-                chime_cd=float(self.cfg.get("chat_ai_cooldown", 120)),
+                chime_cd=float(self.cfg.get("chat_ai_cooldown", 240)),
                 times=self._chat_ai_times,
-                max_hour=int(self.cfg.get("chat_ai_max_hour", 20)),
+                max_hour=int(self.cfg.get("chat_ai_max_hour", 12)),
                 buffer_len=buffer_len,
                 min_chat=int(self.cfg.get("chat_ai_min_chat", 5))):
-            if kind == chatai.MENTION:
-                # The only user-visible silence that is not the model's
-                # fault: someone addressed the bot inside the 60s mention
-                # cooldown or past the hourly cap. Say so in the log, or
-                # it reads as the bot being broken.
-                self._log(f"mention from {nick} held - mention cooldown "
-                          f"or the hourly cap (a rail, not a bug)")
+            if kind == chatai.MENTION and self.cfg.get(
+                    "chat_ai_enabled", False) \
+                    and not self.paused and not self._cb_ambient_off:
+                # A direct question never dangles. Held by the cooldown
+                # (or the cap), it is answered to the RIGHT person the
+                # moment the rail clears - the keeper tick picks it up.
+                # Left dangling, a chime answers it to whoever spoke
+                # next: live-fire, 'pick a number 1-100' was answered to
+                # someone else entirely.
+                self._chat_ai_pending = (nick, message, time.time())
+                self._log(f"mention from {nick} held - will answer when "
+                          f"the cooldown clears (a rail, not a bug)")
             return
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
@@ -2038,6 +2044,22 @@ class TwitchBot:
         if self.paused or self._cb_ambient_off:
             return False
         now = time.time() if now is None else now
+        # A mention held by the cooldown is answered now, to the person
+        # who asked. Two minutes staleness: after that the moment has
+        # passed and answering would be the non-sequitur, not the fix.
+        p = self._chat_ai_pending
+        if p is not None:
+            self._chat_ai_pending = None
+            if (now - p[2] <= 120
+                    and now - self._chat_ai_mention_last >= float(
+                        self.cfg.get("chat_ai_mention_cooldown", 60))
+                    and len([t for t in self._chat_ai_times
+                             if now - t < 3600]) < int(
+                        self.cfg.get("chat_ai_max_hour", 12))):
+                self._log(f"answering {p[0]}'s held message")
+                self._jobs.put((p[0], (p[0] or "").lower(), "",
+                                "chime", p[1]))
+                return True
         if now - self._last_chat < float(self.cfg.get(
                 "chat_ai_quiet_seconds", 90)):
             return False                # chat is alive; the message path rules
