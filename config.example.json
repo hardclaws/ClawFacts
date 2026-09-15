@@ -26,10 +26,10 @@
   "_llm_options": "The three llm_* fields above are set for OpenRouter (recommended for adult-aligned facts). Other providers: Groq -> key 'gsk_...', base 'https://api.groq.com/openai/v1', model 'openai/gpt-oss-120b'. Local Ollama -> key '' (empty), base 'http://localhost:11434/v1', model 'llama3.1:8b'. Other OpenRouter models: 'sao10k/l3.3-euryale-70b' (edgiest), 'cognitivecomputations/dolphin-mistral-24b-venice-edition' (uncensored), 'mistralai/mistral-nemo' (cheapest).",
   "chat_ai_enabled": false,
   "_chat_ai": "The bot's own voice in chat. When enabled: !ask anything gets a persona answer (needs the llm_* fields; without a key, !ask falls back to the fact engine), the bot replies when addressed by one of chat_ai_names, it occasionally chimes in on a busy channel, and when nobody has spoken for chat_ai_quiet_seconds it opens the conversation itself. Bounded: chat_ai_mention_cooldown between mention replies, chat_ai_cooldown between unprompted lines on a busy channel, chat_ai_quiet_cooldown between quiet-room openers, chat_ai_chance is the odds per eligible moment, chat_ai_max_hour is the hard cap, and !cb off silences it for the session. bot_personality empty = the built-in Doc voice.",
-  "chat_ai_cooldown": 120,
+  "chat_ai_cooldown": 240,
   "chat_ai_mention_cooldown": 60,
-  "chat_ai_chance": 0.4,
-  "chat_ai_max_hour": 20,
+  "chat_ai_chance": 0.25,
+  "chat_ai_max_hour": 12,
   "chat_ai_min_chat": 5,
   "chat_ai_names": [
     "doc",

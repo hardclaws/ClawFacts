@@ -843,8 +843,8 @@ def main() -> int:
         bsrc = pathlib.Path("bot.py").read_text(encoding="utf-8")
         if bsrc.count("chatai.smalltalk") < 2:
             return False
-        if "return m or chatai.CHIME" not in bsrc:
-            return False
+        if "chime_worthy(text) else None" not in bsrc:
+            return False          # emoji walls must not be chime triggers
         lsrc = pathlib.Path("llm.py").read_text(encoding="utf-8")
         if lsrc.count("_model_404_hint(") < 4:
             return False          # def + the three failure paths
@@ -1322,6 +1322,13 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("emoji walls never chime; chime cadence is retuned down",
+         callable(getattr(_ch2, "chime_worthy", None))
+         and not _ch2.chime_worthy("\U0001f3dc\ufe0f\U0001f3dc\ufe0f")
+         and _ch2.chime_worthy("crushed a few tootsie rolls today")
+         and _bot.DEFAULTS.get("chat_ai_chance") == 0.25
+         and _bot.DEFAULTS.get("chat_ai_cooldown") == 240
+         and _bot.DEFAULTS.get("chat_ai_max_hour") == 12),
         ("factual questions get the grounded answer before the persona",
          callable(getattr(_ch2, "factual_question", None))
          and _ch2.factual_question("what is a bongo twist")

@@ -217,6 +217,23 @@ _INTERROGATIVE = re.compile(
     r"are|was|were|do|does|did|can|could|would|should|tell|name)\b",
     re.IGNORECASE)
 
+#: A message worth chiming in on needs actual words. Emojis, "???",
+#: numbers and single twitch-emote characters are characters but not
+#: conversation - the model asked to react to a picture produces a
+#: monologue about nothing (live-fire: a desert-emoji wall got
+#: "Midnight desert runs: engine hum, hot sand...").
+_ALPHA = re.compile(r"[A-Za-z]")
+
+
+def chime_worthy(text: str) -> bool:
+    """True when a message has enough words in it to be worth the bot's
+    own two cents: at least 4 characters and 3 letters. Mentions and
+    !ask are NOT gated by this - a direct address always deserves an
+    answer, however it is phrased."""
+    t = (text or "").strip()
+    return len(t) >= 4 and len(_ALPHA.findall(t)) >= 3
+
+
 #: Factual questions about a third-party thing. These have a real answer
 #: the fact engine can look up; the persona guessing ("sounds like a spin
 #: on a roadside snack") is worse than the engine's grounded answer or an

@@ -159,10 +159,15 @@ DEFAULTS = {
     # chat_ai_cooldown, and nothing exceeds chat_ai_max_hour lines an hour.
     # !cb off silences it for the session, like the other chatter.
     "chat_ai_enabled": False,
-    "chat_ai_cooldown": 120,
+    # Chime-in cadence, retuned after field feedback ("seems to jump on
+    # a lot when people are just chatting"): the conversation is carried
+    # by mention replies, !ask and the quiet-room openers; chime-ins are
+    # accents, not a second voice in the room. 0.25 roll + a 4-minute
+    # cooldown + a 12/hour cap.
+    "chat_ai_cooldown": 240,
     "chat_ai_mention_cooldown": 60,
-    "chat_ai_chance": 0.4,
-    "chat_ai_max_hour": 20,
+    "chat_ai_chance": 0.25,
+    "chat_ai_max_hour": 12,
     "chat_ai_min_chat": 5,
     # The quiet-room half: when nobody has spoken for chat_ai_quiet_seconds,
     # the bot opens the conversation itself (a question, a hook) rather than
@@ -1923,7 +1928,9 @@ class TwitchBot:
             # addressing the bot, and ignoring it reads as broken - so
             # mentions reply, chime-ins stay off for him.
             return m
-        return m or chatai.CHIME
+        # A chime-in needs actual words to react to: an emoji wall has
+        # characters but no conversation in it.
+        return m or (chatai.CHIME if chatai.chime_worthy(text) else None)
 
     def _maybe_chime(self, nick: str, login: str, kind: str,
                      message: str) -> None:

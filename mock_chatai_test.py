@@ -255,6 +255,47 @@ def test_a_tease_gets_a_comeback_when_the_model_is_down():
     print("[PASS] a tease gets a Doc comeback when the model is down")
 
 
+def test_emoji_walls_never_chime():
+    """Live-fire: a viewer's emoji wall (no words at all) won the chime
+    roll and the model produced a monologue about desert runs. A chime
+    needs actual words; a mention always answers, however phrased."""
+    assert not chatai.chime_worthy("\U0001f3dc\ufe0f\U0001f3dc\ufe0f\U0001f3dc\ufe0f")
+    assert not chatai.chime_worthy("???")
+    assert not chatai.chime_worthy("123")
+    assert not chatai.chime_worthy("LUL")
+    assert chatai.chime_worthy("crushed a few tootsie rolls today")
+
+    b = _bot(llm_api_key="k")
+    orig_roll, orig_reply = bot_mod.random, llm.chat_reply
+    llm.chat_reply = lambda s, u, c: "never needed"
+    try:
+        # Fill the room with the roll FAILING, so the fillers themselves
+        # never chime...
+        bot_mod.random = _FixedRoll(1.0)
+        for i in range(6):
+            b._on_message("v%d" % i, "#t", "filler chatter line %d" % i,
+                          "v%d" % i, "")
+        assert b._jobs.empty(), b._jobs.qsize()
+        # ...then let every roll win: the emoji wall still cannot chime
+        bot_mod.random = _FixedRoll(0.0)
+        b._on_message("kvack", "#t", "\U0001f3dc\ufe0f\U0001f3dc\ufe0f\U0001f3dc\ufe0f",
+                      "kvack", "")
+        assert b._jobs.empty(), b._jobs.qsize()
+        # ...but a real line still chimes
+        b._on_message("kvack", "#t", "man the wind out here is brutal",
+                      "kvack", "")
+        assert b._jobs.qsize() == 1, b._jobs.qsize()
+        # A mention on an emoji-ish line still answers
+        b._chat_ai_last = 0.0
+        b._on_message("kvack", "#t", "doc \U0001f3dc\ufe0f",
+                      "kvack", "")
+        assert b._jobs.qsize() == 2, b._jobs.qsize()
+    finally:
+        bot_mod.random = orig_roll
+        llm.chat_reply = orig_reply
+    print("[PASS] emoji walls never chime; real lines and mentions do")
+
+
 def test_factual_questions_get_the_engine_first():
     """Field report: !ask 'what is a bongo twist?' was answered with a
     persona GUESS ('sounds like a spin on a roadside snack') while the
@@ -707,6 +748,7 @@ def main():
     test_ask_answers_with_persona_then_facts()
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
+    test_emoji_walls_never_chime()
     test_factual_questions_get_the_engine_first()
     test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()
