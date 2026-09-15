@@ -3048,12 +3048,58 @@ def _question_wiki_hits(subject: str):
     return []
 
 
+_WEATHER_Q = re.compile(r"\bweather\b", re.IGNORECASE)
+_IN_PLACE = re.compile(
+    r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
+
+
+def _weather_header(question: str):
+    """(place, 'Weather') for a weather question, else (None, None).
+
+    Live weather came through the question path and posted as
+    'FunFact | whats the weather like in Saint Clair, Mo: Clear,
+    76.7F...' - the DATA was right, the label was wrong. Weather is
+    data, not trivia: it gets its own header and the place as the
+    label instead of the whole question."""
+    if not _WEATHER_Q.search(question or ""):
+        return None, None
+    m = _IN_PLACE.search((question or "").strip())
+    place = " ".join(m.group(1).split()) if m else None
+    return place, "Weather"
+
+
 def _question_place(question: str) -> str:
     """The header for an answered question: itself, trimmed at a word."""
     topic = " ".join(question.split())
     if len(topic) > 60:
         topic = topic[:60].rsplit(" ", 1)[0] + "\u2026"
     return topic
+
+
+#: Geography and filler that carry no subject: 'west coast USA' must
+#: not let an article about a different coast answer the question.
+_GENERIC_GEO = frozenset("""
+west east north south coast coasts usa united states america american
+state country world move moving common
+""".split())
+
+
+def _records_on_topic(title: str, extract: str, subject: str) -> bool:
+    """True when the article is about the subject.
+
+    Live-fire: 'whats the most common produce to move from west coat
+    to east coast USA' was answered with Ivory Coast's GDP - the miner
+    took the first search hit and never checked it was on topic (the
+    search loved 'coat'~'Cote' and 'west' and 'coast'). The bar: the
+    article's title or opening must share one DISTINCTIVE subject word
+    - 'longest truck' -> 'Road train... a trucking vehicle' shares
+    'truck'; Ivory Coast shares only generic geography."""
+    words = [w for w in re.split(r"[^a-z0-9]+", _fold(subject or ""))
+             if len(w) >= 4 and w not in _GENERIC_GEO]
+    if not words:
+        return True          # nothing distinctive - trust the search
+    hay = _fold((title or "") + " " + (extract or "")[:400])
+    return any(w in hay for w in words)
 
 
 def _mine_records(subject: str):
@@ -3069,8 +3115,19 @@ def _mine_records(subject: str):
         hits = _question_wiki_hits(subject)
         if not hits:
             return [], ""
-        title = hits[0]["title"]
-        deep = _wiki_extract(title, exchars=0)
+        title = ""
+        deep = ""
+        for hit in hits[:3]:
+            t = hit["title"]
+            d = _wiki_extract(t, exchars=0)
+            if not d:
+                continue
+            if not _records_on_topic(t, d, subject):
+                print(f"[funfacts] records: '{t}' is not about "
+                      f"'{subject[:50]}' - skipped", flush=True)
+                continue
+            title, deep = t, d
+            break
         if not deep:
             return [], ""
         keep = []
@@ -3242,7 +3299,9 @@ def _answer_question(question: str, opts: dict, limit: int):
         if facts:
             print(f"[funfacts] answered from the record lines of {src} "
                   f"(the model path had nothing)", flush=True)
-            return {"place": _question_place(question), "facts": facts[:4]}
+            wplace, kind = _weather_header(question)
+            return {"place": wplace or _question_place(question),
+                    "facts": facts[:4], "kind": kind}
     return None
 
 
@@ -3354,7 +3413,9 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
     # its own best label; long ones are trimmed at a word boundary.
     print(f"[funfacts] answered a question from {len(sources)} source "
           f"line(s): {question[:60]}", flush=True)
-    return {"place": _question_place(question), "facts": lines[:4]}
+    wplace, kind = _weather_header(question)
+    return {"place": wplace or _question_place(question),
+            "facts": lines[:4], "kind": kind}
 
 
 def get_funfact(location: str, options=None):

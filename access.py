@@ -504,6 +504,23 @@ class Helix:
               f"followers (total={total}).", flush=True)
         return True
 
+    def follow_total(self):
+        """The channel's total follower count, or None. The same endpoint
+        self_test probes - the number the startup log prints and then
+        throws away. 'How many follows this stream?' is the question the
+        bot could always have answered: total now minus total at
+        startup."""
+        if not self.usable or not self.broadcaster_id:
+            return None
+        try:
+            data = self._fetch("/helix/channels/followers",
+                               {"broadcaster_id": self.broadcaster_id,
+                                "first": 1})
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError):
+            return None
+        return data.get("total")
+
 
 def _iso_to_epoch(stamp: str):
     if not stamp:

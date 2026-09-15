@@ -655,6 +655,51 @@ def test_chimes_answer_what_was_said():
     print("[PASS] chimes answer what was said, or the bot stays quiet")
 
 
+def test_the_follower_count_is_one_question_away():
+    """Live-fire: 'docbot do you know how many follows we have received
+    this stream?' got 'I don't have the current follower count on hand
+    right now' - while the startup probe had printed total=1368 and
+    thrown it away. The bot keeps the baseline now and answers from
+    Helix: total now, new since it came online."""
+    from types import SimpleNamespace
+    b = _bot(llm_api_key="k")
+    b._access.helix = SimpleNamespace(follow_total=lambda: 1372)
+    b._follows_start = 1368
+    engine = []
+    orig_fact, orig_reply = bot_mod.get_funfact, llm.chat_reply
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or None)
+    llm.chat_reply = lambda s, u, c: "I have no idea, honestly."
+    try:
+        b._on_message("Hardclaws", "#t",
+                      "docbot do you know how many follows we have "
+                      "received this stream?", "hardclaws",
+                      "broadcaster/1")
+        _drain(b)
+        assert b.said and "1,372 followers" in b.said[0], b.said
+        assert "4 new since I came online" in b.said[0], b.said
+        assert engine == [], "the fact engine was asked for follows"
+        # No baseline yet: still answers the total.
+        b2 = _bot(llm_api_key="k")
+        b2._access.helix = SimpleNamespace(follow_total=lambda: 1368)
+        b2._on_message("kvack", "#t", "doc whats the follower count",
+                       "kvack", "")
+        _drain(b2)
+        assert b2.said and "1,368 followers" in b2.said[0], b2.said
+        assert b2._follows_start == 1368, "first ask sets the baseline"
+        # No Helix at all: falls through to the persona, honestly.
+        b3 = _bot(llm_api_key="k")
+        b3._access.helix = None
+        b3._on_message("kvack", "#t", "doc how many followers do we have",
+                       "kvack", "")
+        _drain(b3)
+        assert b3.said and "no idea" in b3.said[0], b3.said
+    finally:
+        bot_mod.get_funfact = orig_fact
+        llm.chat_reply = orig_reply
+    print("[PASS] the follower count is one question away "
+          "(total + new since baseline)")
+
+
 def test_mention_notes_are_remembered_and_recalled():
     """Live-fire: 'Docbot take a mental note its 2:49am ... and
     @TruckingWithDoc just took a piss in Sullivan,MO Truck stop' had
@@ -1129,6 +1174,7 @@ def main():
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()
+    test_the_follower_count_is_one_question_away()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
     test_mods_can_switch_the_bots_voice()

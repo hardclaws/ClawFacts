@@ -405,6 +405,7 @@ class TwitchBot:
         self._access = access.AccessControl(cfg, self._build_helix(cfg))
         self._broadcaster_id = ""
         self._last_probe = 0.0              # last follower-permission probe
+        self._follows_start = None           # followers at startup
         self.paused = False                 # !bot off (moderators only)
         # Mod-owned state, both persisted next to the code so they survive a
         # restart. A reminder set for tomorrow must not be lost to an update.
@@ -1900,7 +1901,14 @@ class TwitchBot:
         # only feedback is a chat message that never changes.
         if helix.authorised is not True and time.time() - self._last_probe >= 300.0:
             self._last_probe = time.time()
-            helix.self_test()
+            if helix.self_test():
+                # 'How many follows this stream?' needs the baseline; the
+                # startup probe already fetches it, so keep it this time.
+                if self._follows_start is None:
+                    try:
+                        self._follows_start = helix.follow_total()
+                    except Exception:
+                        pass
         return self._broadcaster_id
 
     def _note_denial(self, nick: str, login: str, reason: str, wait: float) -> None:
@@ -2219,6 +2227,47 @@ class TwitchBot:
         self._jobs.put(("", "", "", "chime", ""))
         return True
 
+    #: 'how many follows this stream', 'follower count' - channel stats
+    #: the bot can answer from Helix, not trivia for the fact engine.
+    _FOLLOWS_Q = re.compile(
+        r"\bhow many (?:new )?follow(?:ers?|s)?\b"
+        r"|\bfollow(?:er)?s? count\b", re.IGNORECASE)
+
+    def _follows_question(self, text: str) -> bool:
+        return bool(self._FOLLOWS_Q.search(text or ""))
+
+    def _say_follows(self, nick: str) -> bool:
+        """Answer a follower-count question from Helix. False lets the
+        persona answer honestly (it has no number) - which is what
+        happened before, except the bot DID have the number all along:
+        the startup probe prints it and never kept it."""
+        helix = self._access.helix
+        if helix is None:
+            return False
+        try:
+            total = helix.follow_total()
+        except Exception as exc:
+            self._log(f"follow count lookup failed: {exc!r}")
+            return False
+        if total is None:
+            self._log("follow count lookup returned nothing")
+            return False
+        if self._follows_start is None:
+            self._follows_start = total
+            self._say(f"@{nick} {total:,} followers right now.")
+            self._log(f"follow count answered: {total} (no baseline)")
+            return True
+        new = max(0, total - self._follows_start)
+        if new:
+            self._say(f"@{nick} {total:,} followers now - {new:,} new "
+                      f"since I came online.")
+        else:
+            self._say(f"@{nick} {total:,} followers, none new since I "
+                      f"came online.")
+        self._log(f"follow count answered: {total} "
+                  f"({new} new since baseline)")
+        return True
+
     def _asks_about_someone(self, text: str) -> bool:
         """True when the question is about a PERSON, not trivia.
 
@@ -2264,6 +2313,16 @@ class TwitchBot:
         # the engine too: 'when and where did @TruckingWithDoc last
         # take a piss?' is a recall question, and the encyclopedia
         # answered it with a weigh station (live-fire).
+        # 'How many follows this stream?' is a channel-stats question:
+        # the bot holds the number (the startup probe fetches it) and
+        # must not hand it to the encyclopedia or shrug.
+        if not quiet and self._follows_question(text) \
+                and self._say_follows(nick):
+            now = time.time()
+            self._chat_ai_times = [t for t in self._chat_ai_times
+                                   if now - t < 3600] + [now]
+            self._chat_ai_mention_last = now
+            return
         addressed = chatai.mention_kind(text, self._chat_ai_names)
         if not quiet and addressed \
                 and chatai.factual_question(text, self._chat_ai_names) \
@@ -2752,7 +2811,9 @@ class TwitchBot:
             return
         place = result.get("place") or argument
         fact = _CONTROL.sub("", " ".join(result["fact"].split()))
-        prefix = f"{self.cfg.get('fact_prefix', 'FunFact')} | {place}: "
+        name = result.get('kind') \
+            or self.cfg.get('fact_prefix', 'FunFact')
+        prefix = f"{name} | {place}: "
         limit = int(self.cfg.get("max_message_chars", 450))
         # Fit the fact to what is left of the message budget, ending on a
         # sentence boundary rather than chopping one in half.

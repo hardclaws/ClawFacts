@@ -2696,6 +2696,52 @@ def test_the_question_search_tries_simpler_subjects():
     print("[PASS] the question search falls back to simpler subjects")
 
 
+def test_the_records_miner_stays_on_topic():
+    """Live-fire: 'whats the most common produce to move from west coat
+    to east coast USA and then whats the most popular east back west'
+    was answered 'In 2023, Ivory Coast had the second-highest GDP per
+    capita in West Africa' - the miner took the first search hit and
+    never checked it was about the subject. An off-topic article is
+    skipped now; a question no article answers gets NO records answer
+    rather than a confident non sequitur."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                # The search really does love Ivory Coast for this.
+                return {"query": {"search": [{"title": "Ivory Coast"}]}}
+            return {"query": {"pages": [{"title": "Ivory Coast", "extract":
+                "Ivory Coast is a country on the southern coast of West "
+                "Africa. In 2023, Ivory Coast had the second-highest GDP "
+                "per capita in West Africa, behind Cape Verde."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    Q = ("whats the most common produce to move from west coat to east "
+         "coast USA and then whats the most popular east back west")
+    try:
+        # The unit gate, both ways.
+        assert not funfacts._records_on_topic(
+            "Ivory Coast",
+            "Ivory Coast is a country on the southern coast of West "
+            "Africa.", funfacts._question_subject(Q))
+        assert funfacts._records_on_topic(
+            "Road train", "A road train is a trucking vehicle.",
+            "longest truck transporting goods")
+        # End to end: no model answer, miner refuses the off-topic hit.
+        llm.is_configured = lambda o: False
+        got = funfacts._answer_question(Q, {}, 200)
+        assert got is None, got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the records miner refuses an off-topic article "
+          "(Ivory Coast is not about freight lanes)")
+
+
 def test_the_records_miner_answers_when_the_model_will_not():
     """Round six: the question now declined - the model path dead-ends (hype
     refused, decline) and nothing else could answer. The article's own
@@ -3089,6 +3135,7 @@ def main():
     test_hype_answers_and_demonyms_do_not_count()
     test_the_question_search_tries_simpler_subjects()
     test_the_records_miner_answers_when_the_model_will_not()
+    test_the_records_miner_stays_on_topic()
     test_caption_dates_never_post()
     test_an_answer_may_not_add_what_the_sources_do_not_say()
     test_a_page_title_is_not_a_source()

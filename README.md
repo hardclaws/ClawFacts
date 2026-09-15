@@ -273,7 +273,13 @@ voice.
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
-  grounded answer beats a charming guess. The persona takes over when
+  grounded answer beats a charming guess. Weather questions get their
+  own header — `Weather | Saint Clair, Mo: Clear, 76.7°F…` — because
+  live data is not trivia; and when the records miner backs a
+  superlative question, the article it digs through must actually be
+  about the subject (a US freight-lane question once came back with
+  Ivory Coast's GDP — the search loved "coat"~"Côte" and "west
+  coast"). The persona takes over when
   the engine has nothing, and owns opinions and about-the-bot questions
   ("whats your favorite truck") outright. No LLM key configured? The
   ask falls through to the fact engine's question path, which answers
@@ -300,6 +306,12 @@ voice.
   the cooldown is *held*, not dropped — the bot answers it to the right
   person the moment the cooldown clears (within two minutes; after that
   the moment has passed and answering would be the non-sequitur).
+  Channel-stats questions are answered straight from Helix: "docbot,
+  how many follows this stream?" gets the live follower total plus how
+  many are new since the bot came online (the baseline the startup
+  probe fetches). And a question about a *person* — anyone @-mentioned
+  or anyone the bot holds memories of — is answered from those
+  memories, never routed at the encyclopedia.
   Several people asking in one window are queued (up to three) and
   answered in order, each to their own asker.
   The streamer's own lines never

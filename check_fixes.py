@@ -978,6 +978,54 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _follows_question_works():
+        """'How many follows this stream?' is answered from Helix with
+        the startup baseline - the number the old bot printed at boot
+        and then threw away."""
+        from types import SimpleNamespace
+        b = _bot.TwitchBot(
+            dict(_bot.DEFAULTS, nick="n", channel="#c",
+                 oauth_token="oauth:x", chat_ai_enabled=True,
+                 llm_api_key="k",
+                 memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+                 beef_state_path=os.path.join(
+                     tempfile.mkdtemp(), "b.json"),
+                 persona_state_path=os.path.join(
+                     tempfile.mkdtemp(), "p.json"),
+                 subgoal_state_path=os.path.join(
+                     tempfile.mkdtemp(), "s.json")))
+        said = []
+        b._say = said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = SimpleNamespace(follow_total=lambda: 1372)
+        b._follows_start = 1368
+        b._chat_ai_mention_last = 0.0
+        b._do_chime("Hardclaws",
+                    "docbot how many follows have we received this stream")
+        return (len(said) == 1 and "1,372 followers" in said[0]
+                and "4 new" in said[0])
+
+    def _weather_and_miner_behave():
+        """Live weather is data, not trivia - its header says Weather.
+        And the records miner refuses an off-topic article: the US
+        freight-lane question was answered with Ivory Coast's GDP."""
+        wplace, kind = funfacts._weather_header(
+            "whats the weather like in Saint Clair, Mo")
+        if wplace != "Saint Clair, Mo" or kind != "Weather":
+            return False
+        if funfacts._weather_header("whats the capital of Australia") != \
+                (None, None):
+            return False
+        if funfacts._records_on_topic(
+                "Ivory Coast",
+                "Ivory Coast is a country on the southern coast of West "
+                "Africa.",
+                "common produce move west coat east coast usa"):
+            return False
+        return funfacts._records_on_topic(
+            "Road train", "A road train is a trucking vehicle.",
+            "longest truck transporting goods")
+
     def _notes_are_kept():
         """'docbot take a mental note X' stores X (mods only, under the
         person it is about), and a question about a person is answered
@@ -1557,6 +1605,17 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "check_fixes.py" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("the follower count is one question away (Helix + baseline)",
+         callable(getattr(_bot.TwitchBot, "_say_follows", None))
+         and "follow_total" in pathlib.Path(
+             "access.py").read_text(encoding="utf-8")
+         and _follows_question_works()),
+        ("weather is not a FunFact; the records miner stays on topic",
+         callable(getattr(funfacts, "_weather_header", None))
+         and callable(getattr(funfacts, "_records_on_topic", None))
+         and "kind" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and _weather_and_miner_behave()),
         ("notes taken in chat are kept; person-questions skip the encyclopedia",
          callable(_ch2.note_request) and callable(_ch2.named_people)
          and "asks_about_someone" in pathlib.Path(
