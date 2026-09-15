@@ -655,6 +655,70 @@ def test_chimes_answer_what_was_said():
     print("[PASS] chimes answer what was said, or the bot stays quiet")
 
 
+def test_mention_notes_are_remembered_and_recalled():
+    """Live-fire: 'Docbot take a mental note its 2:49am ... and
+    @TruckingWithDoc just took a piss in Sullivan,MO Truck stop' had
+    nowhere to go, and the later quiz got persona mush. Notes are
+    stored now (mods only, under the person they are about), and a
+    question about a person is answered from memory - never routed at
+    the fact engine, which answered this one with a weigh station."""
+    # The parser: subject from the @mention, filler stripped, and the
+    # streamer's real typo ('mental not') parses like 'mental note'.
+    for line in ("docbot take a mental not its 2:49am and "
+                 "@TruckingWithDoc took a piss in Sullivan,MO truck stop",
+                 "docbot take a mental note its 2:49am and "
+                 "@TruckingWithDoc took a piss in Sullivan,MO truck stop"):
+        subj, payload = chatai.note_request(line)
+        assert subj == "TruckingWithDoc", (subj, payload)
+        assert "2:49am" in payload and "Sullivan" in payload, payload
+    assert chatai.note_request("docbot hows it going") is None
+    assert chatai.note_request("docbot take a mental note") is None
+    subj, payload = chatai.note_request("doc remember that kvack runs 5ks")
+    assert subj is None and payload == "kvack runs 5ks", (subj, payload)
+
+    b = _bot(llm_api_key="k")
+    # The streamer takes the note; the ack is queued like any line.
+    b._on_message("Hardclaws", "#t",
+                  "docbot take a mental note its 2:49am and "
+                  "@TruckingWithDoc took a piss in Sullivan,MO truck stop",
+                  "hardclaws", "broadcaster/1")
+    _drain(b)
+    assert any("Noted" in s for s in b.said), b.said
+    got = b._memory.recall(["TruckingWithDoc"])
+    assert got and "Sullivan" in got[0][1], got
+    # A viewer cannot plant notes about people.
+    b._on_message("kvack", "#t",
+                  "docbot take a mental note kvack is the coolest",
+                  "kvack", "")
+    assert not b._memory.recall(["kvack"]), "a viewer note was stored"
+    # The quiz: the fact engine is never asked, the stored note is in
+    # the prompt, and the answer carries it.
+    prompts, engine = [], []
+    orig_reply, orig_fact = llm.chat_reply, bot_mod.get_funfact
+    llm.chat_reply = lambda s, u, c: (prompts.append(u) or
+                                      "2:49am, Sullivan MO truck stop")
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or None)
+    try:
+        b._chat_ai_mention_last = 0.0
+        b._on_message("Hardclaws", "#t",
+                      "docbot when and where did @TruckingWithDoc last "
+                      "take a piss?", "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert engine == [], engine
+        # The quiz prompt carries the stored note (the last prompt may
+        # be the post-reply distill pass - check them all).
+        assert any("Sullivan" in p for p in prompts), prompts
+        # The viewer's denied note was never answered - no prompt was
+        # ever framed as a reply to kvack (the room buffer still shows
+        # the line, which is correct: it was said in chat).
+        assert not any("kvack just said" in p for p in prompts), prompts
+        assert b.said and "Sullivan" in b.said[-1], b.said
+    finally:
+        llm.chat_reply = orig_reply
+        bot_mod.get_funfact = orig_fact
+    print("[PASS] notes are stored on request and answered from memory")
+
+
 def test_no_failed_chat_attempt_is_silent():
     """'are you a Miami Dolphins fan as well?' got no reply AND no log
     line. Three paths were silent - a mention held by its cooldown, the
@@ -1064,6 +1128,7 @@ def main():
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
+    test_mention_notes_are_remembered_and_recalled()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
     test_mods_can_switch_the_bots_voice()

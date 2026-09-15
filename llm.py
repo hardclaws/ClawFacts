@@ -405,11 +405,14 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
             text = _call(base, model, key, prompt, system,
                          timeout=timeout, max_tokens=120,
                          hard_nothink=_hard_nothink(cfg, base))
-            if not text:
-                # An empty 200 is the reasoning model thinking past its
-                # cap, or a filter fluke - not a decline (that is the
-                # literal NOTHING TO SAY). One retry at a doubled
-                # thinking budget; a cheap second, not a loop.
+            if not text or len(text) < 12:
+                # An empty 200 - or a fragment ('The', 'CyclingWith',
+                # both live-fire, cut off before the answer started) -
+                # is the reasoning model thinking past its cap, or a
+                # filter fluke; not a decline (that is the literal
+                # NOTHING TO SAY). One retry at a doubled thinking
+                # budget; a cheap second, not a loop. 12 is the
+                # cleaner's floor: below it the line could never post.
                 print(f"[llm] {model} returned an empty chat reply - "
                       f"one retry with a bigger thinking budget",
                       flush=True)

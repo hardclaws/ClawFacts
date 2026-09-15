@@ -235,8 +235,9 @@ def main():
         assert llm.chat_timed_out() is True
         llm._call = (lambda base, model, key, user, system=None,
                      timeout=60.0, max_tokens=None, hard_nothink=False:
-                     "fine")
-        assert llm.chat_reply("s", "u", {"llm_api_key": "k"}) == "fine"
+                     "fine and rolling again")
+        assert llm.chat_reply("s", "u", {"llm_api_key": "k"}) == \
+            "fine and rolling again"
         assert llm.chat_timed_out() is False
         # The question path: 5 sources and a 30s budget locally, 8 and 60
         # hosted.
@@ -496,6 +497,22 @@ def main():
             "https://api.groq.com/openai/v1/chat/completions",
             "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    # A fragment ('The', 'CyclingWith' - both live-fire, cut off before
+    # the answer started and then rejected by the cleaner) is as good
+    # as empty: same single retry at the doubled budget.
+    _fake, _ = _empty_chain(["The", "A full line this time."], "FB.")
+    llm.urllib.request.urlopen = _fake
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "A full line this time.", got
+        budgets = [json.loads(c["body"]).get("max_completion_tokens")
+                   for c in captured]
+        assert budgets == [300, 600], budgets
         llm.reset_disable_state()
     finally:
         llm.urllib.request.urlopen = orig

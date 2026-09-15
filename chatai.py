@@ -363,6 +363,46 @@ def parrots(line: str, source: str, jaccard: float = 0.6) -> bool:
     return len(words & src) / len(words | src) >= jaccard
 
 
+#: 'take a mental note...', 'make a note...', 'remember this...'. The
+#: speaker is TELLING the bot to store what follows - live-fire, the
+#: streamer logged 'its 2:49am on the 15th September 2026 and
+#: @TruckingWithDoc just took a piss in Sullivan,MO Truck stop' and the
+#: bot had nowhere to put it, so the later quiz got persona mush.
+_NOTE_ASK = re.compile(
+    r"\b(?:take|make)\s+(?:a\s+)?(?:mental\s+not?e?s?|note)\b[\s:,-]*"
+    r"|\bremember\s+(?:this|that)\b[\s:,-]*", re.IGNORECASE)
+_AT_NAME = re.compile(r"@([A-Za-z0-9_]{3,})")
+
+
+def note_request(text: str):
+    """('take a mental note X') -> (subject nick or None, X), or None.
+
+    The subject is the @-mentioned name in the payload when there is
+    one (the note is ABOUT them), else the speaker. None when the
+    message is not a note ask or the payload is too small to keep -
+    memory holds facts of 8-200 characters."""
+    m = _NOTE_ASK.search(text or "")
+    if not m:
+        return None
+    payload = (text or "")[m.end():].strip()
+    payload = re.sub(r"^(?:its|it's|it is|that)\b\s*", "", payload,
+                     count=1, flags=re.IGNORECASE).strip()
+    if not 8 <= len(payload) <= 200:
+        return None
+    at = _AT_NAME.search(payload)
+    return (at.group(1) if at else None, payload)
+
+
+def named_people(text: str) -> list:
+    """Names a message might be about: @mentions as typed, plus
+    capitalised words (display names are CamelCase - CyclingWithDoc).
+    Recall questions name their subject, and that person may not have
+    spoken recently enough to sit in the room buffer."""
+    out = list(_AT_NAME.findall(text or ""))
+    out += re.findall(r"\b([A-Z][a-zA-Z0-9]{3,})\b", text or "")
+    return out
+
+
 #: The voice library. Mods switch between these at runtime (!persona set),
 #: so each has to be a fully-formed character that can carry one-liners
 #: in a rowdy trucking chat. All of them sit under the same HARD RULES -

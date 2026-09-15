@@ -978,6 +978,41 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _notes_are_kept():
+        """'docbot take a mental note X' stores X (mods only, under the
+        person it is about), and a question about a person is answered
+        from memory, never routed at the fact engine."""
+        b = _bot.TwitchBot(
+            dict(_bot.DEFAULTS, nick="n", channel="#truckingwithdoc",
+                 oauth_token="oauth:x", chat_ai_enabled=True,
+                 llm_api_key="k",
+                 memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+                 beef_state_path=os.path.join(
+                     tempfile.mkdtemp(), "b.json"),
+                 persona_state_path=os.path.join(
+                     tempfile.mkdtemp(), "p.json"),
+                 subgoal_state_path=os.path.join(
+                     tempfile.mkdtemp(), "s.json")))
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        parsed = _ch2.note_request(
+            "docbot take a mental not its 2:49am and @TruckingWithDoc "
+            "took a piss in Sullivan,MO truck stop")
+        if not parsed or parsed[0] != "TruckingWithDoc":
+            return False
+        b._maybe_chime("Hardclaws", "hardclaws", _ch2.MENTION,
+                       "docbot take a mental note its 2:49am and "
+                       "@TruckingWithDoc took a piss in Sullivan,MO "
+                       "truck stop", "broadcaster/1")
+        _, _, _, command, argument = b._jobs.get_nowait()
+        if command != "say" or "Noted" not in argument:
+            return False
+        got = b._memory.recall(["TruckingWithDoc"])
+        if not got or "Sullivan" not in got[0][1]:
+            return False
+        return b._asks_about_someone(
+            "when and where did @TruckingWithDoc last take a piss?")
+
     def _chat_ai_remembers_and_forgets():
         """The chat AI's memory: a log pruned to 90 days, distilled
         per-viewer facts injected into its prompts, a 25-fact cap, and
@@ -1522,6 +1557,13 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "check_fixes.py" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("notes taken in chat are kept; person-questions skip the encyclopedia",
+         callable(_ch2.note_request) and callable(_ch2.named_people)
+         and "asks_about_someone" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "len(text) < 12" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and _notes_are_kept()),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

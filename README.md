@@ -435,6 +435,15 @@ instruction that one viewer's fact is never quoted at somebody else —
 and a chime has to be grounded in the message it answers regardless of
 what anyone's facts inspired.
 
+**Taking a note on request:** "docbot, take a mental note…" or
+"remember this…" (moderators; needs `chat_ai_enabled`) stores the rest
+of the message as a memory under the person it's about — the
+@-mentioned name if there is one, else the speaker — and the bot
+confirms with "Noted.". Asking about a person afterwards ("when and
+where did @TruckingWithDoc last take a piss?") is answered from those
+memories, never routed to the fact engine: a question about a person in
+the room is a recall question, not trivia.
+
 Deliberate limits: only public chat is recorded, and only while
 `chat_ai_enabled` is true — the feature owns its data. Health details,
 politics, religion, finances and anything intimate are never kept

@@ -821,7 +821,7 @@ class TwitchBot:
                 self._memory.note(nick, login, message)
             kind = self._chat_ai_kind(nick, badges, message)
             if kind:
-                self._maybe_chime(nick, login, kind, message)
+                self._maybe_chime(nick, login, kind, message, badges)
         prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
@@ -2021,13 +2021,41 @@ class TwitchBot:
         return m or (chatai.CHIME if chatai.chime_worthy(text) else None)
 
     def _maybe_chime(self, nick: str, login: str, kind: str,
-                     message: str) -> None:
+                     message: str, badges: str = "") -> None:
         """Gate the moment, then hand the composing to a worker.
 
         The LLM call takes seconds and must never block the read loop; a
         job does the waiting. Failed attempts bump _chat_ai_last too (in
         _do_chime), so a declining model cannot be billed in a loop.
         """
+        # A note ('docbot, take a mental note X') is a command, not
+        # chatter: it is stored and acknowledged whatever the roll and
+        # the cooldowns say - the streamer logs moments mid-conversation
+        # ('2:49am, Sullivan MO truck stop') and quizzes the bot later.
+        # Like everything the memory keeps, notes need chat_ai_enabled.
+        if kind == chatai.MENTION \
+                and self.cfg.get("chat_ai_enabled", False):
+            note = chatai.note_request(message)
+            if note:
+                # A note ask is CONSUMED here whatever the answer is:
+                # passed on, the model would happily pretend it noted
+                # something it cannot store ('sure, noted!' as a lie).
+                if access.tier_from_badges(badges) not in ("broadcaster",
+                                                           "moderator"):
+                    self._log(f"note from {nick} ignored - not a mod")
+                    return
+                subject, payload = note
+                who = subject or nick
+                if not self._memory.ok:
+                    self._log("note not kept - memory db unavailable")
+                    ack = "my memory file isn't available right now"
+                else:
+                    kept = self._memory.remember(who, [payload])
+                    self._log(f"noted for {who} (kept {kept}): "
+                              f"{payload[:60]!r}")
+                    ack = "Noted." if kept else "Already had that one."
+                self._jobs.put(("", "", "", "say", f"@{nick} {ack}"))
+                return
         with self._chat_lock:
             buffer_len = len(self._chat_buf)
         if not chatai.should_speak(
@@ -2080,7 +2108,20 @@ class TwitchBot:
         import llm as llm_mod
         persona = self._persona_text()
         speakers = [n for n, _ in lines[-6:]] + [nick]
-        memories = self._memory.recall(speakers) if self._memory.ok else []
+        # ...and whoever the line itself is about: a recall question
+        # names its subject ('when did @TruckingWithDoc last stop'),
+        # and the subject may not have spoken recently enough to sit in
+        # the room buffer. The streamer is always a candidate - the
+        # channel is about him. Case variants because memory keys are
+        # the name as it was stored ('TruckingWithDoc' vs
+        # 'truckingwithdoc').
+        named = chatai.named_people(text)
+        streamer = (self.cfg.get("channel") or "").lstrip("#")
+        candidates = (speakers + named + [streamer]
+                      + [n.lower() for n in named if n]
+                      + [streamer.lower() if streamer else ""])
+        memories = self._memory.recall(
+            candidates) if self._memory.ok else []
         # A local model on CPU reads the whole prompt before writing a
         # word - that read, not the generation, is what blew a 20s
         # timeout on a warm model. Send it a smaller room and fewer
@@ -2178,6 +2219,29 @@ class TwitchBot:
         self._jobs.put(("", "", "", "chime", ""))
         return True
 
+    def _asks_about_someone(self, text: str) -> bool:
+        """True when the question is about a PERSON, not trivia.
+
+        Live-fire: 'when and where did @TruckingWithDoc last take a
+        piss?' went to the fact engine and came back a weigh-station
+        fact. Any @-mentioned name, the streamer's own name, or someone
+        the bot holds memories of makes it the persona's question - the
+        memories are injected into its prompt."""
+        t = text or ""
+        if re.search(r"@[A-Za-z0-9_]{3,}", t):
+            return True
+        streamer = (self.cfg.get("channel") or "").lstrip("#")
+        if streamer:
+            if re.search(r"(?<![a-z0-9])" + re.escape(streamer.lower())
+                         + r"(?![a-z0-9])", t.lower()):
+                return True
+        if self._memory.ok:
+            named = chatai.named_people(t)
+            named = named + [n.lower() for n in named if n]
+            if named and self._memory.recall(named):
+                return True
+        return False
+
     def _do_chime(self, nick: str, text: str) -> None:
         """A bot-initiated line of chat, composed off the read loop.
 
@@ -2196,10 +2260,14 @@ class TwitchBot:
         # failure mode. Overheard questions do NOT get this: 'Where ya
         # cuttin thru with Illinois?' was asked of the room, and the
         # chime path answering it with a FunFact was the bot answering a
-        # question nobody asked it.
+        # question nobody asked it. And a question about a PERSON skips
+        # the engine too: 'when and where did @TruckingWithDoc last
+        # take a piss?' is a recall question, and the encyclopedia
+        # answered it with a weigh station (live-fire).
         addressed = chatai.mention_kind(text, self._chat_ai_names)
         if not quiet and addressed \
                 and chatai.factual_question(text, self._chat_ai_names) \
+                and not self._asks_about_someone(text) \
                 and self._answer_factual(nick, text):
             now = time.time()
             self._chat_ai_times = [t for t in self._chat_ai_times
