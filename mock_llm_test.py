@@ -166,6 +166,20 @@ def main():
         assert body["messages"][-1]["content"].endswith("OK"), body
         assert llm.warm_up({}) is False      # unconfigured: no request
         assert len(captured) == 1, captured
+        # An empty reply is odd but must not be silent: a missing
+        # warm-up line in the log reads as the feature being off.
+        import contextlib
+        import io as _io2
+        orig_call2 = llm._call
+        llm._call = lambda *a, **k: ""
+        out = _io2.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                got = llm.warm_up({"llm_api_key": "k"})
+        finally:
+            llm._call = orig_call2
+        assert got is False
+        assert "empty reply" in out.getvalue(), out.getvalue()
     finally:
         llm.urllib.request.urlopen = orig
     print("[PASS] warm-up loads the model at startup; unconfigured skips")

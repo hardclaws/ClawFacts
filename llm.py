@@ -335,6 +335,11 @@ def warm_up(cfg: dict) -> bool:
         print(f"[llm] warm-up OK - {model} is loaded and answering "
               f"({time.time() - started:.1f}s)", flush=True)
         return True
+    # An empty reply is odd but not fatal - chat lines will try anyway.
+    # It must not be SILENT, though: a missing warm-up line in the log is
+    # indistinguishable from the feature being off.
+    print(f"[llm] warm-up got an empty reply from {model} - chat lines "
+          f"will try anyway", flush=True)
     return False
 
 

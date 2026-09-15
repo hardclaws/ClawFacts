@@ -178,6 +178,17 @@ the saved refresh token renews them silently).
 
 That's it. The bot joins chat and starts answering `!funfact <place>`.
 
+### Keeping the log
+
+The console window IS the bot's log — but it scrolls away and dies with
+the window. Set `"log_file": "bot.log"` in `config.json` and everything
+the console shows (including crash tracebacks) is also appended to that
+file. Watch it live in PowerShell:
+
+```
+Get-Content .\bot.log -Wait
+```
+
 ## Running it 24/7
 
 The bot is a tiny standard-library Python script — the easiest way to keep it

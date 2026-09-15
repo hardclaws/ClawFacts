@@ -181,6 +181,10 @@ DEFAULTS = {
     # 90 days; distilled per-viewer facts stay until a mod runs
     # !forget <viewer>, which erases everything held about them.
     "memory_db_path": "chat_memory.db",
+    # Keep the console log in a file too (e.g. "bot.log"): everything the
+    # window shows, plus crash tracebacks, survives the scrollback.
+    # Empty = console only.
+    "log_file": "",
     # Shout out whoever raids in, and let a moderator trigger one with !so.
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
@@ -2522,6 +2526,25 @@ def run_doctor(cfg: dict) -> int:
     return 1
 
 
+class _Tee:
+    """Writes to the console AND a log file, so the log survives the
+    window scrolling away. Enabled by setting "log_file" in config.json
+    (e.g. "bot.log"); empty means console only, the default."""
+
+    def __init__(self, stream, path: str):
+        self._stream = stream
+        self._fh = open(path, "a", encoding="utf-8", errors="replace")
+
+    def write(self, data) -> int:
+        self._stream.write(data)
+        self._fh.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        self._fh.flush()
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     force_login = "--login" in sys.argv
@@ -2544,6 +2567,15 @@ def main() -> None:
         # handed to the LLM. Without this a wrong fact can only be guessed at.
         import funfacts
         funfacts.DEBUG = True
+
+    # Keep the log: everything the console shows also lands in a file,
+    # including crash tracebacks (stderr is teed too). The console window
+    # scrolls away and dies with the window; the file does not.
+    log_path = (cfg.get("log_file") or "").strip()
+    if log_path:
+        sys.stdout = _Tee(sys.stdout, log_path)
+        sys.stderr = _Tee(sys.stderr, log_path)
+        print(f"[log] also writing everything to {log_path}")
 
     if not do_selftest:
         warn_config(cfg)

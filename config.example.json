@@ -66,5 +66,7 @@
   "llm_no_think": false,
   "_llm_no_think": "Set true when llm_model is a Qwen3-family model running locally (qwen3:8b, qwen3:4b): appends Qwen3's /no_think switch to every prompt so the model answers directly instead of thinking first - on CPU, thinking turns a one-line chat reply into a half-minute stall.",
   "chat_ai_quiet_seconds": 90,
-  "chat_ai_quiet_cooldown": 150
+  "chat_ai_quiet_cooldown": 150,
+  "log_file": "",
+  "_log_file": "Set to a filename (e.g. \"bot.log\") and everything the console shows is also appended to that file - including crash tracebacks - so the log survives the window scrolling away. Watch it live with PowerShell: Get-Content .\\bot.log -Wait. Empty = console only."
 }

@@ -506,6 +506,18 @@ def main():
         return 1
     print("[PASS] the bot read its own moderator badge from USERSTATE on join")
 
+    # The log tee: everything the console shows also lands in the file.
+    import io as _io
+    import tempfile as _tf
+    buf = _io.StringIO()
+    _lp = os.path.join(_tf.mkdtemp(), "log.txt")
+    tee = bot_mod._Tee(buf, _lp)
+    tee.write("hello log\n")
+    tee.flush()
+    assert buf.getvalue() == "hello log\n", buf.getvalue()
+    assert open(_lp, encoding="utf-8").read() == "hello log\n"
+    print("[PASS] the log tee writes to the console and the file")
+
     print(f"[PASS] !help and !smk female/male/any -> "
           f"{len(helps)} help line(s), {len(smk)} round(s)")
     if not turned_away:
