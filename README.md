@@ -251,8 +251,14 @@ clears — the console announces the switch once per outage, both
 providers are warmed at startup, and each has its own breaker so a dead
 fallback key never takes the primary down. The free OpenRouter setup:
 any key from openrouter.ai/keys (no card) plus any model whose slug
-ends in `:free` — `google/gemma-4-31b-it:free` was live and $0 when
-last checked. Free slugs rotate (several older `:free` listings have
+ends in `:free` — verified live and healthy as of September 2026:
+`nvidia/nemotron-3-super-120b-a12b:free` (912ms, 62 t/s, months
+stable — the pick), `thinkingmachines/inkling-small:free` (100%
+uptime), `google/gemma-4-26b-a4b-it:free` and
+`google/gemma-4-31b-it:free`. Skip the free coding agents (Poolside,
+Nex, Cohere Code) and the domain-tuned Lings (Sante = health,
+Fin = finance) — wrong tools for chat. Free slugs rotate (several
+older `:free` listings have
 gone dark), so take whatever is currently free on openrouter.ai/models;
 the free tier allows 20 requests/minute and 50/day — 1,000/day after
 any one-time $10 credit top-up — which is plenty for a fallback that
