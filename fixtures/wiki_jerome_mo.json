@@ -1,0 +1,57 @@
+{
+  "_note": "Verbatim titles/extracts from en.wikipedia.org for the two searches _wikipedia() runs for 'Jerome, Missouri': gsrsearch='Jerome, Missouri' and gsrsearch='jerome'. Fetched 2026-08-27.",
+  "queries": {
+    "Jerome, Missouri": [
+      {
+        "title": "Jerome, Missouri",
+        "extract": "Jerome is an unincorporated community in western Phelps County, Missouri, United States. It is located on the Gasconade River near Interstate 44, and is approximately ten miles west of Rolla, near the edge of the Mark Twain National Forest.\n\n\n== History ==\nJerome was originally called \"Fremont Town\", and under the latter name was platted in 1867 when the railroad was extended through the neighborhood.\n\n\n== References =="
+      },
+      {
+        "title": "Jerome (disambiguation)",
+        "extract": ""
+      },
+      {
+        "title": "Jerome Sally",
+        "extract": ""
+      },
+      {
+        "title": "Jerome Barnes",
+        "extract": "Jerome Barnes is an American politician who was a member of the Missouri House of Representatives from the 28th district. Elected in 2016, he assumed office in January 2017.\nHe was succeeded in office by his wife Donna Barnes.\n\n\n== Early life and education ==\nBarnes was born in Mississippi. He attended Longview Community College (now Metropolitan Community College) in the Kansas City metropolitan area."
+      },
+      {
+        "title": "Three Billboards Outside Ebbing, Missouri",
+        "extract": "Three Billboards Outside Ebbing, Missouri is a 2017 dark comedy crime film written, directed, and produced by Martin McDonagh."
+      },
+      {
+        "title": "Leonard Jerome",
+        "extract": "Leonard Walter Jerome (November 3, 1817 – March 3, 1891) was an American financier in Brooklyn, New York, and the maternal grandfather of Winston Churchill."
+      }
+    ],
+    "jerome": [
+      {
+        "title": "Jerome",
+        "extract": "Jerome of Stridon (; Latin: Eusebius Sophronius Hieronymus; Ancient Greek: Εὐσέβιος Σωφρόνιος Ἱερώνυμος; c. 342–347 – 30 September 420), also known as Hieronymus, was an early Christian priest, confessor, theologian, translator, and historian; he is commonly known as Saint Jerome.\nHe is best known for his translation of the Bible into Latin (the translation that became known as the Vulgate), which was commissioned by Pope Damasus I, and his commentaries on the whole Bible. Jerome attempted to create a translation of the Old Testament based on a Hebrew version, rather than the Septuagint, as prior Latin Bible translations had done. His list of writings is extensive.\nJerome was known for his teachings on Christian moral life, especially those in cosmopolitan centers such as Rome."
+      },
+      {
+        "title": "Jerome K. Jerome",
+        "extract": "Jerome Klapka Jerome (2 May 1859 – 14 June 1927) was an English writer and humorist, best known for the comic travelogue Three Men in a Boat (1889)."
+      },
+      {
+        "title": "Jerome (disambiguation)",
+        "extract": ""
+      },
+      {
+        "title": "Jerome Flynn",
+        "extract": "Jerome Patrick Flynn (born 16 March 1963) is a British actor and singer. He is best known for his role as Bronn in the HBO fantasy series Game of Thrones."
+      },
+      {
+        "title": "Jérôme Bonaparte",
+        "extract": "Jérôme Bonaparte (born Girolamo Buonaparte; 15 November 1784 – 24 June 1860) was the youngest brother of Napoleon I."
+      },
+      {
+        "title": "Jerome Miller",
+        "extract": "Jerome Miller may refer to: Jerome A. Miller (born 1946), American philosopher"
+      }
+    ]
+  }
+}

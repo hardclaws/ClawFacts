@@ -3,7 +3,11 @@
 Run:  python3 mock_facts_test.py
 """
 
+import io
 import time
+
+import json
+import pathlib
 
 import funfacts
 
@@ -14,6 +18,73 @@ def test_trim():
     assert len(t) <= 200, len(t)
     assert t.endswith("…"), t
     print(f"[PASS] trim -> {len(t)} chars")
+
+
+def test_trim_keeps_whole_sentences():
+    """Sarcoxie, MO posted "...contributing buildings that…" — chopped mid
+    sentence, because the only clause break inside the first 200 characters
+    landed at 89 chars, under the keep-if-long-enough threshold, so it fell
+    through to a word chop. A complete 145-character sentence was right there."""
+    fact = ("Sarcoxie's Public Square Historic District, a national historic district in "
+            "Jasper County, is listed on the National Register of Historic Places. The "
+            "district contains contributing buildings that date from the late nineteenth "
+            "and early twentieth centuries, including the original courthouse.")
+    out = funfacts._trim(fact, 200)
+    assert len(out) <= 200, len(out)
+    assert not out.endswith("…"), "still chopping a sentence in half: %r" % out
+    assert out.endswith("Historic Places."), out
+    # A single long sentence with no break still has to be cut somewhere.
+    assert funfacts._trim("word " * 150, 200).endswith("…")
+    # ...and text already inside the limit is untouched.
+    assert funfacts._trim("Short and complete.", 200) == "Short and complete."
+    # An abbreviation is not a sentence end: splitting here dropped the
+    # punchline off the Frein fact.
+    frein = ("Eric Matthew Frein was identified as the sole suspect of the ambush and was "
+             "sought by federal and state authorities for the ambush, until his apprehension "
+             "at 6 p.m. on Thursday, October 30, ending a 48-day manhunt.")
+    assert funfacts._sentence_parts(frein) == [frein], funfacts._sentence_parts(frein)
+    # One 214-char sentence cannot keep its tail inside 200, so it still ends
+    # on a clause break - but the tail must not be a dangling word.
+    out = funfacts._trim(frein, 200)
+    assert len(out) <= 200 and out.endswith("…"), out
+    tail = out[:-1].rsplit(" ", 1)[-1].lower()
+    assert tail not in {"a", "the", "an", "and", "until", "at", "of", "on"}, out
+    print(f"[PASS] trim keeps whole sentences -> {len(out)} chars, no ellipsis")
+
+
+def test_smk_game():
+    """!smk female|male|any — three distinct names from the right pool."""
+    import extras
+    import names
+    for gender in ("female", "male"):
+        pool = set(names.pool.available(gender))
+        picks, label = extras.get_smk(gender)
+        assert label == gender
+        assert len(picks) == 3 and len(set(picks)) == 3, picks
+        assert all(n in pool for n in picks), picks
+    both = set(names.pool.available("any"))
+    picks, label = extras.get_smk("any")
+    assert label == "any" and len(set(picks)) == 3
+    assert all(n in both for n in picks)
+    # Unknown or missing argument falls back to a mixed round, never crashes.
+    for arg in ("", "bogus", None):
+        assert extras.get_smk(arg)[1] == "any"
+    # Shorthands work too.
+    assert extras.get_smk("f")[1] == "female"
+    assert extras.get_smk("M")[1] == "male"
+
+    # Every entry carries what the person is known for, so a round is
+    # playable by people who do not recognise every name in the pool.
+    for name, job in names.SEED_FEMALE + names.SEED_MALE:
+        assert name.strip() and job.strip(), (name, job)
+    picks, _ = extras.get_smk("any")
+    line = extras.format_smk(picks)
+    assert line.count("(") == 3 and line.count(")") == 3, line
+    assert ", " in line and line.count(", ") == 2, line
+    for name, job in picks:
+        assert f"{name} ({job})" in line, line
+    assert extras.format_smk([("Prince", "")]) == "Prince"
+    print(f"[PASS] !smk draws three distinct names, each with a job: {line}")
 
 
 def test_rotation():
@@ -234,6 +305,45 @@ def test_definition_filter():
     print(f"[PASS] definition filter -> kept {f[0]!r}")
 
 
+def test_editorialising_is_not_a_rewrite():
+    """A rewrite may re-word; it may not add character the source lacks.
+
+    Live output was "Aubrey Plaza: actress, comedian, producer, writer - and
+    deadpan delivered with extra deadpan." That invents no name, date, place,
+    event or claim, so it cleared every existing check and reached chat. What
+    it invented was an opinion, bolted on as a trailing clause.
+    """
+    seed = ["Aubrey Plaza (born June 26, 1984) is an American actress, "
+            "comedian, producer, and writer."]
+    quip = ("Aubrey Plaza: actress, comedian, producer, writer - and deadpan "
+            "delivered with extra deadpan.")
+    assert funfacts._grounded_filter([quip], "Aubrey Plaza", "Aubrey Plaza",
+                                     seed) == [], "the quip reached chat"
+    # A faithful re-wording of the same seed must survive.
+    faithful = ("Aubrey Plaza is an American actress, comedian, producer "
+                "and writer.")
+    assert funfacts._grounded_filter([faithful], "Aubrey Plaza",
+                                     "Aubrey Plaza", seed), "over-filtering"
+    # So must a paraphrase that swaps in synonyms and an abbreviation - the
+    # earlier word-count rule wrongly dropped both of these.
+    girard = ["It is believed that Girard takes its name from Stephen Girard, "
+              "a French American philanthropist who was the founder of the "
+              "Girard Bank and Girard College in Philadelphia."]
+    paraphrase = ("Some claim Girard owes its name to Stephen Girard, that "
+                  "French American bank founder from Philly. Could be.")
+    assert funfacts._grounded_filter([paraphrase], "Girard, Ohio",
+                                     "girard, OH", girard), "abbreviation lost"
+    assert funfacts._grounded_filter(
+        ["The first public execution happened in 1888."], "X", "X",
+        ["The town's first public execution drew a crowd in 1888."]), "synonym lost"
+    # And praise appended as a clause is still dropped.
+    praise = ("Girard is a village in Trumbull County with a thriving arts "
+              "scene everyone loves.")
+    assert funfacts._grounded_filter([praise], "Girard, Ohio", "girard, OH",
+                                     girard) == []
+    print("[PASS] an LLM rewrite cannot add character the source never had")
+
+
 def test_explicit_filter():
     import llm
     orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
@@ -243,7 +353,8 @@ def test_explicit_filter():
             "1. The saloon brawls here were legendary.\n"
             "2. A porn studio opened in town in 1972.\n"
             "3. The first public execution happened in 1888.\n")
-        seed = ["The saloon brawls were legendary in 1888."]
+        seed = ["The saloon brawls were legendary in 1888.",
+                "The town's first public execution drew a crowd in 1888."]
         got = funfacts._llm_facts("X", "X", seed, {})
         assert got == ["The saloon brawls here were legendary.",
                        "The first public execution happened in 1888."], got
@@ -253,6 +364,74 @@ def test_explicit_filter():
     finally:
         llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
     print("[PASS] explicit-content filter drops sexual lines, keeps the rest")
+
+
+def test_tasteless_filter():
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    seed = ["A public hanging was carried out in the town square in 1888.",
+            "The inn runs a murder mystery dinner every month."]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "1. The town threw a hanging party in 1888.\n"
+            "2. A public hanging went down in the town square in 1888.\n"
+            "3. The inn's murder mystery dinner is a monthly thing.\n")
+        got = funfacts._llm_facts("X", "X", seed, {})
+        # "hanging party" is dropped as tasteless even though it is grounded;
+        # the plain telling of the same fact and the real murder-mystery
+        # dinner survive.
+        assert "hanging party" not in " ".join(got), got
+        assert any("1888" in f for f in got), got
+        assert any("murder mystery dinner" in f for f in got), got
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] taste filter drops 'hanging party' framing, keeps the fact")
+
+
+def test_invented_claim_filter():
+    """The exact two lines the bot posted for `!funfact girard, OH`.
+
+    Girard's whole Wikipedia article yields one seed fact (the canal), plus a
+    regional dig hit on Trumbull County — nowhere near a hanging or a drug
+    mule. Neither line may reach chat.
+    """
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    seed = [
+        "It was first settled in 1800 but remained static until the Ohio and "
+        "Erie Canal was completed.",
+        funfacts._AREA_PREFIX +
+        "The Trumbull Correctional Institution is a medium-security prison for "
+        "men located in Leavittsburg, Trumbull County, Ohio and operated by the "
+        "Ohio Department of Rehabilitation and Correction.",
+    ]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Girard's no choir boy - it's the only place in Trumbull County "
+            "where a hanging party went down.\n"
+            "This town's so fast and loose with drugs, one local broke records "
+            "as a mule.\n"
+            "Girard's the only town in Trumbull County with a prison.\n"
+            "Girard was first settled in 1800 and stayed quiet until the Ohio "
+            "and Erie Canal was finished.\n")
+        got = funfacts._llm_facts("Girard, Ohio", "girard, OH", seed, {})
+        # The hanging boast ("hanging" is nowhere in the seeds), the drug-mule
+        # boast ("drugs"/"mule"/"records" are nowhere in the seeds) and the
+        # county-prison fact re-attributed to the town must all be dropped.
+        assert got == ["Girard was first settled in 1800 and stayed quiet until "
+                       "the Ohio and Erie Canal was finished."], got
+        # Every line invented -> empty, so the bot posts the plain real facts.
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Girard's no choir boy - it's the only place in Trumbull County "
+            "where a hanging party went down.\n"
+            "This town's so fast and loose with drugs, one local broke records "
+            "as a mule.\n")
+        assert funfacts._llm_facts("Girard, Ohio", "girard, OH", seed, {}) == []
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] claim grounding drops the invented Girard hanging/mule facts")
 
 
 def test_grounded_filter():
@@ -281,6 +460,257 @@ def test_grounded_filter():
     finally:
         llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
     print("[PASS] grounded filter drops invented names/dates, keeps seed-grounded lines")
+
+
+def test_county_hanging_reattribution():
+    """A county-wide hanging story must never become the town's claim to fame.
+
+    The line below reached chat as `!funfact girard, OH`. The only hanging in
+    Trumbull County was Ira West Gardner's 1830s execution in Warren — Girard
+    has nothing to do with it — and the seeds can carry that sentence
+    *without* the regional prefix (any harvest path can surface it), so the
+    filter has to catch the re-attribution itself.
+    """
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    hang = ("Ira West Gardner was the only man hanged in Trumbull County, "
+            "executed for the 1832 murder of his stepdaughter Maria Buel.")
+    seeds = [
+        "It was first settled in 1800 but remained static until the Ohio and "
+        "Erie Canal was completed.",
+        hang,  # unprefixed: region dig wasn't the source this time
+    ]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Girard, Ohio: home to Trumbull County's one and only hanging. "
+            "That's right, they really dropped the axe on this one guy.\n")
+        # "one and only" is scoped to the county, so it needs a fact that
+        # names Girard — and "dropped the axe" is tasteless framing besides.
+        assert funfacts._llm_facts("Girard, Ohio", "girard, OH", seeds, {}) == []
+        # The honest regional telling still passes: it claims nothing for
+        # Girard, so the county-level fact is enough to back it.
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Over in Trumbull County, Ira West Gardner was the only man hanged "
+            "there, executed in 1832 for murdering his stepdaughter.\n")
+        got = funfacts._llm_facts("Girard, Ohio", "girard, OH",
+                                  seeds + [funfacts._AREA_PREFIX + hang], {})
+        assert got and "Trumbull County" in got[0], got
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] county hanging can't be re-attributed to the town")
+
+
+def test_search_seeds_and_query():
+    """The debug log for `!funfact girard, OH`: the bot asked the web for
+    "history crime scandal", got a truncated page title, a crime-stats SEO
+    line and one police story, then let the model pad that into invented dark
+    history. The query must ask for interesting, and the noise must never be
+    treated as ground truth.
+    """
+    import json
+    import urllib.request
+
+    # 1. spicy mode must not ask the web for crime.
+    seen = {}
+    orig_get = funfacts._http_get_json
+
+    def fake_get(url, params, timeout=8.0):
+        seen["q"] = params.get("q")
+        return {"items": []}
+
+    funfacts._http_get_json = fake_get
+    try:
+        funfacts._google_search("girard, OH", True, 200,
+                                {"google_api_key": "k", "google_cx": "cx"})
+        assert "crime" not in seen["q"], seen
+        assert seen["q"] == "girard, OH history facts famous landmark record", seen
+    finally:
+        funfacts._http_get_json = orig_get
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"organic": []}).encode()
+
+    def fake_open(req, timeout=10):
+        captured["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    orig_open = urllib.request.urlopen
+    urllib.request.urlopen = fake_open
+    try:
+        funfacts._serper_search("girard, OH", True, 200, {"serper_api_key": "k"})
+        assert "crime" not in captured["body"]["q"], captured
+        assert captured["body"]["q"] == ("girard, OH history facts famous "
+                                         "landmark record"), captured
+    finally:
+        urllib.request.urlopen = orig_open
+
+    # 2. search noise is never ranked as a fact.
+    noise = [
+        "The Only Man Ever Hanged in Trumbull County: A True ...",
+        "Explore crime rates for Girard, OH including murder, assault, and "
+        "property crime statistics.",
+        "Past Times Arcade in Girard holds the Guinness World Record for the "
+        "largest free-play pinball and arcade collection, over 600 machines.",
+    ]
+    assert funfacts._is_junk_seed(noise[0]), noise[0]
+    assert funfacts._is_junk_seed(noise[1]), noise[1]
+    assert not funfacts._is_junk_seed(noise[2]), noise[2]
+    facts = funfacts._ranked_facts(noise, spice=True, limit=200, count=6)
+    assert facts == [noise[2]], facts
+    print("[PASS] search asks for interesting, and titles/SEO noise can't be facts")
+
+
+def test_short_year_grounding():
+    """The line the bot actually posted from that log: the seeds said "Jan. 4"
+    with no year at all, and the model supplied "back in '04"."""
+    import llm
+    orig_rw, orig_cfg = llm.rewrite_fact, llm.is_configured
+    seeds = ["Kristen V. Schmidt, of Girard, Ohio, charged with murder",
+             "Kristen V. Schmidt, 30, was originally charged with felonious "
+             "assault after a Jan. 4 shooting on Dearborn Street."]
+    try:
+        llm.is_configured = lambda o: True
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "The last thing Kristen V. Schmidt's boyfriend expected? A bullet "
+            "from his own gal on Dearborn Street back in '04. True story.\n")
+        assert funfacts._llm_facts("girard, OH", "girard, OH", seeds, {}) == []
+        # The same line without the invented year survives.
+        llm.rewrite_fact = lambda p, l, s, o: (
+            "Kristen V. Schmidt of Girard was charged with murder after a "
+            "shooting on Dearborn Street.\n")
+        got = funfacts._llm_facts("girard, OH", "girard, OH", seeds, {})
+        assert got and "Dearborn Street" in got[0], got
+    finally:
+        llm.rewrite_fact, llm.is_configured = orig_rw, orig_cfg
+    print("[PASS] invented '04-style years are dropped, undated lines survive")
+
+
+def test_region_word_boundaries():
+    """'United States' is not another region.
+
+    Nearly every US article lead reads "a city in X County, <State>, United
+    States", and the substring check treated that as a foreign mention — so
+    harvest() skipped the town's OWN article and the lookup fell through to web
+    search (which is where the fabricated Girard crime facts came from).
+    """
+    cases = [
+        ("Girard is a city in southern Trumbull County, Ohio, United States.", "oh", False),
+        ("Milford is a borough in Pike County, Pennsylvania, United States.", "pa", False),
+        ("Lakemont is a place in Blair County, Pennsylvania, United States.", "wa", True),
+        # Word boundaries: Arkansas is not Kansas, West Virginia is not Virginia.
+        ("Little Rock is the capital of Arkansas, United States.", "oh", True),
+        ("Morgantown is a city in West Virginia, United States.", "wv", False),
+        ("Girard is a city in Kansas, United States.", "oh", True),
+    ]
+    for text, region, want in cases:
+        got = funfacts._text_names_other_region(text, region)
+        assert got == want, (text, region, want, got)
+    print("[PASS] region check: 'United States' is home, Kansas != Arkansas")
+
+
+def test_attraction_ranking():
+    """A town's actual claim to fame must out-rank its census stub.
+
+    "The arcade boasts 600 pinball machines" scored 0 — no _STRONG word
+    matched — so the "score < 2" tail-trim dropped it, which is why Girard's
+    best fact (Past Times Arcade's Guinness record) never reached chat.
+    """
+    sents = [
+        "The arcade boasts 600 pinball machines, some dating back almost a "
+        "century and others just released.",
+        "One of the oldest remaining buildings in Girard, the Henry Barnhisel "
+        "House, shares tales of community and family history.",
+        "The population was 9,603 at the 2020 census.",
+        "Explore crime rates for Girard, OH including murder, assault, and "
+        "property crime statistics.",
+    ]
+    facts = funfacts._ranked_facts(sents, spice=True, limit=200, count=6)
+    assert any("pinball" in f for f in facts), facts
+    assert any("Barnhisel" in f for f in facts), facts
+    assert not any("population" in f for f in facts), facts
+    assert not any("crime rates" in f for f in facts), facts
+    print(f"[PASS] attraction facts rank -> {len(facts)} kept, pinball + Barnhisel in")
+
+
+def test_llm_only_mode():
+    """`"fact_source": "llm"` — one prompt, no retrieval at all.
+
+    Opt-in. The grounded filter can't run (there are no source facts to
+    compare against), so this asserts what still holds: the explicit/taste
+    filters, the character limit, and the fallback when the model admits it
+    knows nothing reliable.
+    """
+    import llm
+    orig_free, orig_cfg = llm.freeform_facts, llm.is_configured
+    orig_lookup = funfacts._lookup_all
+    calls = []
+
+    def fake_lookup(*a, **kw):
+        calls.append(a)
+        return {"place": "Girard, Ohio", "facts": ["It was first settled in 1800."]}
+
+    try:
+        funfacts._cache.clear()
+        funfacts._lookup_all = fake_lookup
+        llm.is_configured = lambda o: True
+        llm.freeform_facts = lambda p, l, o: (
+            "1. Girard is named for Stephen Girard, the Philadelphia "
+            "philanthropist who founded Girard Bank.\n"
+            "2. Past Times Arcade there holds the Guinness record for the "
+            "largest free-play pinball collection.\n"
+            "3. A porn studio opened in town in 1972.\n"
+            "4. The town threw a hanging party back in the day.\n")
+        r = funfacts.get_funfact("girard, OH",
+                                 {"fact_source": "llm", "max_fact_chars": 200})
+        assert r and r["fact"].startswith("Girard is named for Stephen Girard"), r
+        assert not calls, "retrieval must be skipped in llm mode"
+        facts = funfacts._cache["llm:girard, oh"]["facts"]
+        assert len(facts) == 2, facts              # explicit + tasteless dropped
+        assert all(len(f) <= 200 for f in facts), facts
+        assert not any("porn" in f or "hanging party" in f for f in facts), facts
+
+        # Model says it knows nothing reliable -> fall back to real sources.
+        funfacts._cache.clear()
+        llm.freeform_facts = lambda p, l, o: "NOTHING RELIABLE"
+        r2 = funfacts.get_funfact("girard, OH", {"fact_source": "llm"})
+        assert r2 and "1800" in r2["fact"], r2
+        assert calls, "should have fallen back to the sources"
+    finally:
+        llm.freeform_facts, llm.is_configured = orig_free, orig_cfg
+        funfacts._lookup_all = orig_lookup
+    print("[PASS] fact_source=llm -> one prompt, filters still apply, fallback works")
+
+
+def test_namesake_ranking():
+    """"Named after <somebody>" is a real fun fact, not filler — Girard, OH is
+    named for the Philadelphia philanthropist Stephen Girard, and that used to
+    be scored below the census boilerplate and never posted."""
+    sents = [
+        "Girard is a city in southern Trumbull County, Ohio, United States, "
+        "along the Mahoning River.",
+        "The population was 9,603 at the 2020 census.",
+        "It is believed that Girard takes its name from Stephen Girard, a "
+        "French American philanthropist who was the founder of the Girard Bank "
+        "and Girard College in Philadelphia.",
+        "It was first settled in 1800 but remained static until the Ohio and "
+        "Erie Canal was completed.",
+    ]
+    facts = funfacts._ranked_facts(funfacts._filter_definitions(sents),
+                                   limit=200, count=8)
+    assert any("Stephen Girard" in f for f in facts), facts
+    assert any("1800" in f for f in facts), facts
+    assert not any("population was" in f for f in facts), facts
+    print(f"[PASS] namesake facts rank -> {len(facts)} facts, Stephen Girard kept")
 
 
 def test_weird_fallback():
@@ -335,6 +765,9 @@ def test_region_dig():
         funfacts._wiki_search_extracts = fake
         r = funfacts._region_dig("Lords Valley, PA", [], 200)
         assert any("honeymoon capital" in f for f in r), r
+        # Regional results are labelled so they are never read — or rewritten —
+        # as facts about the town itself.
+        assert all(f.startswith(funfacts._AREA_PREFIX) for f in r), r
         # A sentence that doesn't name the county/state must be ignored.
         funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: (
             [{"title": "Somewhere, Ohio", "extract":
@@ -423,6 +856,181 @@ def test_meta_line_filter():
         llm.rewrite_fact = orig
 
 
+def test_spicy_dig_respects_the_region():
+    """'!funfact Mount Vernon, MO' posted "the Mount Vernon Place Historic
+    District scored a spot on the National Register back on November 11, 1971."
+    That district is in Baltimore, Maryland (NRHP 71001037), around Baltimore's
+    Washington Monument - it has nothing to do with the Lawrence County town.
+
+    _spicy_dig searches by place name alone and its only gate was "the sentence
+    contains the name", so any Mount Vernon anywhere qualified. harvest() has
+    always checked the region; this path never did."""
+    fixture = json.loads((pathlib.Path(__file__).resolve().parent
+                          / "fixtures" / "wiki_mount_vernon_mo.json").read_text())
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = (
+        lambda q, exchars=7000, limit=2: fixture["queries"].get(q.strip(), []))
+    try:
+        found = funfacts._spicy_dig(
+            "Mount Vernon, Missouri", "Mount Vernon, MO",
+            ["Mount Vernon was platted in 1845."], 200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+
+    joined = " ".join(found).lower()
+    for bad in ("baltimore", "maryland", "november 11, 1971"):
+        assert bad not in joined, "wrong-place fact leaked: %r in %r" % (bad, found)
+    assert any("Lawrence County Courthouse" in f for f in found), found
+    assert len(found) == len(set(found)), "the same line came back twice: %r" % found
+    print("[PASS] the spicy dig can't borrow another state's landmark")
+
+
+def test_padded_praise_is_dropped():
+    """The prompt forbids "made-up puns or cute filler" and the model does it
+    anyway: Mount Vernon came back as "keeps its past alive through a historic
+    downtown square and those classic small-town traditions everyone loves."
+    No seed supports any of that, and a compliment cannot be grounded."""
+    padded = [
+        "Founded way back in 1845, Mt. Vernon keeps its past alive through a "
+        "historic downtown square and those classic small-town traditions "
+        "everyone loves.",
+        "Girard has a small-town charm everyone loves.",
+        "This hidden gem is steeped in history.",
+        "It's a quaint, picture-perfect spot worth a visit.",
+    ]
+    seeds = ["Mount Vernon was platted in 1845.", "Girard was platted in 1803.",
+             "The downtown square dates to 1845."]
+    assert funfacts._grounded_filter(
+        padded, "Mount Vernon, Missouri", "Mount Vernon, MO", seeds) == []
+
+    # Positive control: real facts the seeds actually contain must survive.
+    real = [
+        "Stony Dell Resort opened in 1932: a spring-fed pool, stone cabins and "
+        "a restaurant built in Ozark giraffe stone.",
+        "Stanley Ketchel, the Michigan Assassin, was shot in the back at a "
+        "ranch near Conway on October 15, 1910.",
+        "Past Times Arcade in Girard holds a Guinness record for its 600 "
+        "pinball machines.",
+    ]
+    kept = funfacts._grounded_filter(real, "Girard, Ohio", "Girard, OH", list(real))
+    assert len(kept) == len(real), kept
+    print("[PASS] padded praise dropped, real facts kept")
+
+
+def test_namesake_company_is_not_harvested():
+    """'!funfact Conway, missouri' at 10:52 posted "this town's got quite the
+    maritime library stacked up despite being nowhere near the ocean."
+
+    Both supporting seeds came from Conway Publishing (pageid 29203197), a
+    British imprint of Bloomsbury:
+      "It is best known for its publications dealing with nautical subjects."
+      "Over its history, it has built an extensive catalogue of books
+       specialising in maritime heritage, ship design and construction..."
+    Neither sentence names Conway, and requiring the place name is not the fix:
+    the Lakemont Park / Leap-The-Dips sentence never says "Lakemont" either, and
+    that harvest is the good case. The discriminator is whether the article is
+    about a place at all."""
+    fixture = json.loads((pathlib.Path(__file__).resolve().parent
+                          / "fixtures" / "wiki_conway_mo.json").read_text())
+    orig = (funfacts._wiki_search_extracts, funfacts._wiki_extract)
+    funfacts._wiki_search_extracts = (
+        lambda q, exchars=4000, limit=6: fixture["queries"].get(q.strip(), []))
+    funfacts._wiki_extract = lambda t, exchars=0: ""
+    try:
+        facts = (funfacts._wikipedia("Conway, missouri", spice=True, limit=200)
+                 or {}).get("facts") or []
+    finally:
+        funfacts._wiki_search_extracts, funfacts._wiki_extract = orig
+
+    joined = " ".join(facts).lower()
+    for bad in ("maritime", "nautical", "ship design", "bloomsbury", "publisher"):
+        assert bad not in joined, "publisher fact leaked: %r in %r" % (bad, facts)
+
+    pub = fixture["queries"]["conway"][1]["extract"]
+    assert "Conway Publishing" in pub
+    assert funfacts._is_non_place_article(pub), "the imprint must be rejected"
+    # ...while a genuine attraction article sharing the town's name stays.
+    assert not funfacts._is_non_place_article(
+        "Lakemont Park opened in 1894 as a trolley park. Among its notable "
+        "attractions is Leap-The-Dips, the world's oldest surviving roller coaster.")
+    print("[PASS] a namesake company can't lend a town its facts")
+
+
+def test_namesake_articles_are_not_harvested():
+    """'!funfact Jerome, Missouri' at 10:40 posted four seeds and three of them
+    were about other Jeromes: Saint Jerome of Stridon ("He is best known for his
+    translation of the Bible into Latin") and Jerome Barnes, a Missouri state
+    representative ("Barnes was born in Mississippi"). Searching the bare word
+    returns every person who shares the town's name, and each of those titles
+    scores 120 in _title_relevance, so they cleared the >= 70 gate."""
+    fixture = json.loads((pathlib.Path(__file__).resolve().parent
+                          / "fixtures" / "wiki_jerome_mo.json").read_text())
+    orig = (funfacts._wiki_search_extracts, funfacts._wiki_extract)
+    funfacts._wiki_search_extracts = (
+        lambda q, exchars=4000, limit=6: fixture["queries"].get(q.strip(), []))
+    funfacts._wiki_extract = lambda t, exchars=0: ""
+    try:
+        facts = (funfacts._wikipedia("Jerome, Missouri", spice=True, limit=200)
+                 or {}).get("facts") or []
+    finally:
+        funfacts._wiki_search_extracts, funfacts._wiki_extract = orig
+
+    assert facts, "the town's own history fact must survive"
+    assert "Fremont Town" in facts[0], facts
+    joined = " ".join(facts).lower()
+    for bad in ("bible", "vulgate", "pope", "christian moral", "barnes", "mississippi"):
+        assert bad not in joined, "namesake fact leaked: %r in %r" % (bad, facts)
+
+    # The gate itself: biographies rejected, places and attractions kept.
+    assert funfacts._is_person_article(fixture["queries"]["jerome"][0]["extract"])
+    assert funfacts._is_person_article(
+        "Jerome Barnes is an American politician who was a member of the "
+        "Missouri House of Representatives.")
+    assert not funfacts._is_person_article(
+        "Jerome is an unincorporated community in western Phelps County, Missouri.")
+    assert not funfacts._is_person_article(
+        "Lakemont Park is an amusement park in Altoona, Pennsylvania, home to "
+        "Leap-The-Dips, the world's oldest surviving roller coaster.")
+    print("[PASS] namesake people can't lend a town its facts")
+
+
+def test_search_key_beats_duckduckgo():
+    """A configured Serper key must be consulted before DuckDuckGo. It used to
+    sit last in the ladder, which returns on the first source that yields
+    anything at all - so one dull DDG blurb ended the search and the key was
+    never used. That is what happened for Jerome, Missouri."""
+    order = []
+    orig = (funfacts._wikipedia, funfacts._duckduckgo,
+            funfacts._google_search, funfacts._serper_search)
+    funfacts._wikipedia = lambda *a, **k: None
+    funfacts._duckduckgo = lambda *a, **k: (
+        order.append("duckduckgo"),
+        {"place": "Jerome, Missouri",
+         "facts": ["It is located on the Gasconade River near Interstate 44."]})[1]
+    funfacts._google_search = lambda *a, **k: (order.append("google"), None)[1]
+    funfacts._serper_search = lambda *a, **k: (
+        order.append("serper"),
+        {"place": "Jerome, Missouri",
+         "facts": ["Stony Dell Resort opened in 1932."]})[1]
+    try:
+        with_key = funfacts._try_sources(
+            "Jerome, Missouri", True, 200, {"serper_api_key": "k"})
+        # Serper answers, so the ladder stops there and DDG is never spent on.
+        assert "serper" in order, order
+        assert "duckduckgo" not in order or order.index("serper") < order.index("duckduckgo"), order
+        assert with_key["facts"] == ["Stony Dell Resort opened in 1932."], with_key
+
+        # Without a key the ladder still degrades gracefully to DuckDuckGo.
+        order.clear()
+        funfacts._serper_search = lambda *a, **k: (order.append("serper"), None)[1]
+        no_key = funfacts._try_sources("Jerome, Missouri", True, 200, {})
+        assert "duckduckgo" in order and no_key, (order, no_key)
+    finally:
+        (funfacts._wikipedia, funfacts._duckduckgo,
+         funfacts._google_search, funfacts._serper_search) = orig
+    print("[PASS] a configured Serper key is consulted before DuckDuckGo")
+
+
 def test_serper_source():
     # No key -> None without any network call.
     assert funfacts._serper_search("Xyzzy, ZZ", False, 200, {}) is None
@@ -501,11 +1109,2085 @@ def test_busy_unavailable():
     print("[PASS] busy marker only while sources are rate-limited")
 
 
+
+def test_namesake_person_stubs():
+    """A bare 'Name, epithet, epithet' stub is a Wikipedia title, not a fact
+    about the town — and a namesake person is a false fact waiting to happen.
+    DuckDuckGo's results for 'girard, OH' led with Joe Girard (born Detroit)
+    and Hugo Girard (Canadian), and the model turned one into a local."""
+    stubs = [
+        "Joe Girard, Guinness Book of World Records winning American salesman",
+        "Hugo Girard, Canadian Strongman, former World Champion",
+    ]
+    for s in stubs:
+        assert funfacts._is_person_stub(s), f"stub not caught: {s}"
+    real = [
+        "It is believed that Girard takes its name from Stephen Girard, a French "
+        "American philanthropist who founded the Girard Bank in Philadelphia.",
+        "Girard's first high school was opened in 1861 as Girard Union High "
+        "School; its current variation was originally opened in the 1920s.",
+        "It was first settled in 1800 but remained static until the Ohio and Erie "
+        "Canal was completed.",
+        "Past Times Arcade in Girard has more than 600 pinball machines.",
+    ]
+    for s in real:
+        assert not funfacts._is_person_stub(s), f"real fact wrongly dropped: {s}"
+    ranked = funfacts._ranked_facts(stubs + real, spice=True, limit=200)
+    assert ranked, "ranking dropped everything"
+    for f in ranked:
+        assert not funfacts._is_person_stub(f), f"stub reached the pool: {f}"
+    assert "Joe Girard" not in " ".join(ranked)
+    assert "Hugo Girard" not in " ".join(ranked)
+
+
+def test_residence_claim_needs_a_seed():
+    """The exact lines from the 08:51 debug log: the model adopted a Detroit
+    salesman as a local ('called Girard home'), while the true Stephen Girard
+    naming fact was dropped over the abbreviation 'Philly'. Both fixed."""
+    seeds = [
+        "Joe Girard, Guinness Book of World Records winning American salesman",
+        "It is believed that Girard takes its name from Stephen Girard, a French "
+        "American philanthropist who was the founder of the Girard Bank and "
+        "Girard College in Philadelphia.",
+        "Girard's first high school was opened in 1861 as Girard Union High "
+        "School; its current variation was originally opened in the 1920s.",
+        "Hugo Girard, Canadian Strongman, former World Champion",
+        "It was first settled in 1800 but remained static until the Ohio and Erie "
+        "Canal was completed.",
+    ]
+    lines = [
+        "Joe Girard, Guinness Book of World Records winning American salesman, "
+        "called Girard home—talk about local flavor.",
+        "The settlement dates back to 1800, got moving when the Ohio and Erie "
+        "Canal finished up here.",
+        "Some claim Girard owes its name to Stephen Girard, that French American "
+        "bank founder from Philly. Could be.",
+    ]
+    kept = funfacts._grounded_filter(lines, "Girard, Ohio", "girard, OH", seeds)
+    joined = " ".join(kept)
+    assert "called Girard home" not in joined, "namesake adopted as a local"
+    assert "Philly" in joined, "true line dropped over an abbreviation"
+    # A residence claim is fine when a seed actually places someone in town.
+    placed = seeds + ["Suffragist Elizabeth Hauser was born in Girard in 1873 and "
+                      "edited the Girard Grit."]
+    line = "Suffragist Elizabeth Hauser was born in Girard in 1873 and edited the Girard Grit."
+    assert funfacts._grounded_filter([line], "Girard, Ohio", "girard, OH", placed), \
+        "a sourced residence claim must survive"
+
+
+def test_curated_girard_facts():
+    """The facts we verified by hand must reach chat even when Wikipedia is
+    rate-limited and the web sources return namesakes."""
+    res = funfacts._spicy_db("girard, OH", 200)
+    assert res, "no curated entry for Girard, OH"
+    assert res["place"] == "Girard, Ohio", res["place"]
+    text = " ".join(res["facts"])
+    for needle in ("Past Times Arcade", "Guinness", "1,041", "Barnhisel",
+                   "1993", "1836", "Elizabeth Hauser"):
+        assert needle in text, f"missing from curated facts: {needle}"
+    assert all(len(f) <= 200 for f in res["facts"]), "curated fact over 200 chars"
+    assert not any(funfacts._is_person_stub(f) for f in res["facts"])
+
+
+def test_llm_preamble_dropped():
+    """The 08:51 reply opened with 'Girard, Ohio's got some real characters for
+    the record books...' and that preamble was posted as the first fact."""
+    reply = ("Girard, Ohio's got some real characters for the record books, and "
+             "not just the strongman type. Just don't ask us how it got the "
+             "name\u2014sources disagree. Here's the real deal:\n\n"
+             "- It was first settled in 1800 but remained static until the Ohio "
+             "and Erie Canal was completed.\n"
+             "- Girard Union High School first opened its doors way back in "
+             "1861; the current building's been around since the 1920s.")
+    import llm
+    orig = (llm.is_configured, llm.rewrite_fact)
+    llm.is_configured = lambda opts=None: True
+    llm.rewrite_fact = lambda *a, **k: reply
+    try:
+        out = funfacts._llm_facts("Girard, Ohio", "girard, OH",
+                                  ["It was first settled in 1800 but remained "
+                                   "static until the Ohio and Erie Canal was "
+                                   "completed."],
+                                  {"spice": "spicy", "llm_api_key": "x"})
+    finally:
+        llm.is_configured, llm.rewrite_fact = orig
+    assert out, "every line was dropped"
+    joined = " ".join(out)
+    assert "real characters" not in joined, "preamble reached the pool"
+    assert "real deal" not in joined, "preamble reached the pool"
+    assert any("1800" in f for f in out)
+
+
+_INDIAN_LAKE_ITEMS = [
+    {"title": "Indian Lake (Ohio)", "extract": (
+        "Indian Lake (formerly Lewistown Reservoir) is a reservoir in Logan "
+        "County, western Ohio, in the United States. The outlet of the lake, at "
+        "the bulkhead built in the 1850s by Irish laborers, is the beginning of "
+        "the Great Miami River. At 5,104 acres (2,066 ha), Indian Lake is the "
+        "second largest inland lake in Ohio.")},
+    # Stand-in for whichever northeast-Ohio article the live search returned
+    # for these two sentences (the 1786 Moravian settlement is Pilgerruh in the
+    # Cuyahoga Valley, near Cleveland — nps.gov). The exact title is not known;
+    # the sentences are verbatim from the 09:19 debug log.
+    {"title": "Cuyahoga Valley, Ohio", "extract": (
+        "The valley is in northeast Ohio. The first European settlement in the "
+        "area was founded in 1786 by Moravian missionaries. Jan &amp; Dean "
+        "included it on their 1985 album Silver Summer.")},
+    {"title": "Avon Lake, Ohio", "extract": (
+        "Avon Lake is a city in Lorain County, Ohio, United States. Avon Lake "
+        "was first settled in the 17th century and was, along with Avon, Bay "
+        "Village, and Westlake, inhabited by the Erie.")},
+    {"title": "Lake County, Ohio", "extract": (
+        "Lake County is a county in the U.S. state of Ohio. Its county seat is "
+        "Painesville, and its largest city is Mentor.")},
+]
+
+
+def test_wrong_place_harvest():
+    """The 09:19 lookup posted 'Its county seat is Painesville' and an Avon Lake
+    sentence for Indian Lake, Ohio. _title_relevance scores any Ohio article
+    containing the word 'lake' at 128 (20 for 'lake' + 100 for 'Ohio' + 8 for
+    the comma), so those titles enter the harvest — and before the fix every
+    sentence from them was treated as a fact about Indian Lake."""
+    assert funfacts._title_relevance("Avon Lake, Ohio", "indian lake", "oh") >= 70
+    assert funfacts._title_relevance("Lake County, Ohio", "indian lake", "oh") >= 70
+
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: [
+        dict(it) for it in _INDIAN_LAKE_ITEMS]
+    try:
+        res = funfacts._wikipedia("indian lake, oh", spice=True, limit=200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+    assert res, "no facts at all"
+    joined = " ".join(res["facts"])
+    for wrong in ("Painesville", "Mentor", "Avon", "Erie", "Moravian",
+                  "Silver Summer", "1786"):
+        assert wrong not in joined, f"another place's fact leaked: {wrong}"
+    assert "5,104 acres" in joined or "Great Miami River" in joined, \
+        "Indian Lake's own facts were lost"
+
+
+def test_html_entities_unescaped():
+    out = funfacts._sentences("Jan &amp; Dean included it on their 1985 album.")
+    assert out and "&amp;" not in out[0], out
+
+
+def test_llm_duplicate_lines_deduped():
+    """The 09:19 reply stated the 1786 settlement twice in different words."""
+    reply = ("- Moravian missionaries were the first Europeans to settle the "
+             "area way back in 1786.\n"
+             "- The first European settlement in the region was founded by "
+             "Moravian missionaries in 1786.")
+    import llm
+    orig = (llm.is_configured, llm.rewrite_fact)
+    llm.is_configured = lambda opts=None: True
+    llm.rewrite_fact = lambda *a, **k: reply
+    try:
+        out = funfacts._llm_facts(
+            "Indian Lake (Ohio)", "Indian Lake, OH",
+            ["The first European settlement in the area was founded in 1786 by "
+             "Moravian missionaries."],
+            {"spice": "spicy", "llm_api_key": "x"})
+    finally:
+        llm.is_configured, llm.rewrite_fact = orig
+    assert len(out) == 1, f"duplicate survived: {out}"
+
+
+def test_curated_indian_lake_facts():
+    res = funfacts._spicy_db("Indian Lake, OH", 200)
+    assert res, "no curated entry for Indian Lake, OH"
+    text = " ".join(res["facts"])
+    for needle in ("Lewistown Reservoir", "Irish laborers", "Miami and Erie Canal",
+                   "5,104 acres", "Sandy Beach", "1924", "Minnewawa", "1931",
+                   "1961", "1975", "Great Miami River"):
+        assert needle in text, f"missing from curated facts: {needle}"
+    assert all(len(f) <= 200 for f in res["facts"])
+
+
+_SONG_ITEMS = [
+    {"title": "Indian Lake (Ohio)", "extract": (
+        "Indian Lake is a reservoir in Logan County, western Ohio. At 5,104 "
+        "acres, Indian Lake is the second largest inland lake in Ohio.")},
+    {"title": "Indian Lake (song)", "extract": (
+        "Indian Lake is a song written by Tony Romeo. It was recorded by the "
+        "pop band The Cowsills, and included on their 1968 album Captain Sad "
+        "and His Ship of Fools. Jan & Dean included it on their 1985 album "
+        "Silver Summer.")},
+]
+
+
+def test_work_titles_not_harvested():
+    """'Indian Lake (song)' is the 1968 Cowsills single. Its cover-versions list
+    says 'Jan & Dean included it on their 1985 album Silver Summer' — where 'it'
+    is the song. That sentence was posted as a fun fact about Indian Lake, Ohio
+    (09:19) and Indian Lake, Missouri (09:29). The title matches the place
+    exactly, so neither the region check nor a name-the-place check catches it."""
+    assert funfacts._is_road_or_meta_title("Indian Lake (song)")
+    assert funfacts._is_road_or_meta_title("Girard (surname)")
+    assert not funfacts._is_road_or_meta_title("Indian Lake (Ohio)")
+    assert not funfacts._is_road_or_meta_title("Indian Lake State Park")
+
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: [
+        dict(it) for it in _SONG_ITEMS]
+    try:
+        res = funfacts._wikipedia("indian lake, oh", spice=True, limit=200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+    assert res, "no facts at all"
+    joined = " ".join(res["facts"])
+    for wrong in ("Jan & Dean", "Silver Summer", "Cowsills", "Tony Romeo", "1985"):
+        assert wrong not in joined, f"song-article fact leaked: {wrong}"
+    assert "5,104 acres" in joined
+
+
+def test_reputation_claims_need_a_source():
+    """The 09:29 reply called Jan & Dean 'surf rock legends' and said the album
+    put 'this sleepy Missouri spot on the musical map' — four claims no seed
+    made, all invisible to _claims() because they are ordinary words."""
+    seed = "Jan & Dean included it on their 1985 album Silver Summer."
+    line = ("Indian Lake got its claim to fame in 1985 when surf rock legends "
+            "Jan & Dean featured it on their album Silver Summer, putting this "
+            "sleepy Missouri spot on the musical map.")
+    assert not funfacts._grounded_filter(
+        [line], "Indian Lake, Missouri", "Indian Lake, Missouri", [seed]), \
+        "invented framing survived"
+    # A reputation claim the seeds actually make must still pass.
+    sourced = ["Sandy Beach Amusement Park was famous as the Midwest's Million "
+               "Dollar Playground."]
+    assert funfacts._grounded_filter(
+        ["Sandy Beach was famous as the Midwest's Million Dollar Playground."],
+        "Indian Lake (Ohio)", "Indian Lake, OH", sourced)
+
+
+def test_curated_entry_region_match():
+    """A curated entry describes ONE place, but its keys are stateless
+    ('girard', 'indian lake'). Without a region check, 'Girard, PA' was served
+    the Girard, Ohio facts and 'Indian Lake, Missouri' the Ohio lake's — the
+    same wrong-place error the harvest fixes exist to stop."""
+    assert funfacts._spicy_db("Girard, OH", 200)["place"] == "Girard, Ohio"
+    assert funfacts._spicy_db("Girard, PA", 200) is None
+    assert funfacts._spicy_db("Indian Lake, OH", 200)["place"] == "Indian Lake, Ohio"
+    assert funfacts._spicy_db("Indian Lake, Missouri", 200) is None
+    # A stateless request still gets the curated entry.
+    assert funfacts._spicy_db("Indian Lake", 200) is not None
+
+
+_MO_ITEMS = [
+    {"title": "Indian Lake, Missouri", "extract": (
+        "Indian Lake is an unincorporated community and census-designated place "
+        "in Crawford County, Missouri, United States. It is in the northwestern "
+        "part of the county, surrounding a lake of the same name. The community "
+        "is 5 miles northwest of Cuba and Interstate 44.")},
+    {"title": "Indian Lake (song)", "extract": (
+        "Indian Lake is a song written by Tony Romeo. Jan & Dean included it on "
+        "their 1985 album Silver Summer.")},
+]
+
+
+def test_full_state_name_region():
+    """Typing the state out must behave like the abbreviation. _US_STATES is
+    keyed by abbreviation, so for 'Indian Lake, Missouri' the 'United States'
+    in the lead counted as a foreign region and the place's own article was
+    discarded — which is what left the 09:29 lookup with nothing but the song
+    article to quote."""
+    extract = ("Indian Lake is an unincorporated community in Crawford County, "
+               "Missouri, United States.")
+    assert not funfacts._text_names_other_region(extract, "mo")
+    assert not funfacts._text_names_other_region(extract, "missouri")
+    assert funfacts._text_names_other_region(extract, "oh")
+    assert funfacts._text_names_other_region(extract, "ohio")
+    # Cross-state rejection must survive both spellings.
+    assert funfacts._text_names_other_region("Indian Lake (Ohio)", "missouri")
+    assert funfacts._text_names_other_region("Girard, Ohio", "pennsylvania")
+    # And the word-boundary guards must not regress.
+    assert not funfacts._text_names_other_region("a town in Virginia", "west virginia")
+    assert funfacts._text_names_other_region("a town in West Virginia", "virginia")
+    assert not funfacts._text_names_other_region("a town in Kansas", "arkansas")
+
+    orig = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = lambda q, exchars=4000, limit=6: [
+        dict(it) for it in _MO_ITEMS]
+    try:
+        res = funfacts._wikipedia("Indian Lake, Missouri", spice=True, limit=200)
+    finally:
+        funfacts._wiki_search_extracts = orig
+    assert res, "the place's own article was discarded again"
+    assert res["place"] == "Indian Lake, Missouri", res["place"]
+    assert "Jan & Dean" not in " ".join(res["facts"])
+
+
+def test_comma_less_region():
+    """Viewers type 'Cuba Missouri', not 'Cuba, Missouri'. Losing the region
+    made the island nation outrank the town (120 vs 118) and switched off every
+    region guard, so Wikipedia returned nothing usable."""
+    assert funfacts._query_region("Cuba Missouri") == "missouri"
+    assert funfacts._query_core("Cuba Missouri") == "cuba"
+    assert funfacts._query_region("Cuba MO") == "mo"
+    assert funfacts._query_core("girard oh") == "girard"
+    assert funfacts._query_region("Raleigh North Carolina") == "north carolina"
+    assert funfacts._query_core("Cuba City Wisconsin") == "cuba city"
+    # Place names that merely end in a state word must not be split.
+    for q in ("Kansas City", "New York", "Los Angeles", "Oklahoma City"):
+        assert funfacts._query_region(q) == "", q
+        assert funfacts._query_core(q) == q.lower(), q
+    # And the region bonus must put the town above the country again.
+    assert funfacts._title_relevance("Cuba, Missouri", "cuba", "missouri") > \
+        funfacts._title_relevance("Cuba", "cuba", "missouri")
+
+
+def test_padding_claims_dropped():
+    """'Holds the crown', 'bustling heart of the region', 'the star' and
+    'proud to be' are significance the sources never claimed."""
+    seeds = ["Cuba is the largest city in Crawford County.",
+             "Interstate 44 now runs through Cuba.",
+             "It was named after the island of Cuba."]
+    padded = [
+        "Cuba, Missouri holds the crown as the largest city in Crawford County, "
+        "making it the bustling heart of the region.",
+        "You'll find Cuba along Interstate 44 these days, but Route 66's the star.",
+        "Crawford County's largest city is proud to be Cuba, Missouri.",
+    ]
+    for ln in padded:
+        assert not funfacts._grounded_filter(
+            [ln], "Cuba, Missouri", "Cuba, Missouri", seeds), ln
+    plain = ["Cuba, Missouri got its name from the island of Cuba.",
+             "You'll find Cuba along Interstate 44 these days."]
+    for ln in plain:
+        assert funfacts._grounded_filter(
+            [ln], "Cuba, Missouri", "Cuba, Missouri", seeds), ln
+
+
+def _cuba_fixture():
+    import json, os
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "fixtures", "wiki_cuba_mo.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_full_article_extract():
+    """MediaWiki clamps exchars to 1200 and says nothing about it, so asking
+    for 4000 or 7000 returned the lead only. Everything Cuba, Missouri is
+    actually known for — the World's Largest Rocking Chair, Bette Davis and
+    Amelia Earhart, the Wagon Wheel Motel — sits below character 1200 of the
+    real article. Recorded from the live API in fixtures/wiki_cuba_mo.json."""
+    full = _cuba_fixture()["extract"]
+    lead = full[:1200]
+
+    def ranked(text):
+        return funfacts._ranked_facts(
+            funfacts._filter_definitions(funfacts._sentences(text)),
+            spice=True, limit=200)
+
+    assert "Rocking Chair" not in " ".join(ranked(lead)), "the lead was not the problem"
+    assert any("Rocking Chair" in f for f in ranked(full)), "full article lost it too"
+    assert any("Wagon Wheel" in f for f in ranked(full))
+
+    # The single-title request must omit exchars entirely.
+    seen = {}
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = lambda url, params, timeout=8.0: (
+        seen.update(params) or {"query": {"pages": [{"extract": full}]}})
+    try:
+        got = funfacts._wiki_extract("Cuba, Missouri", exchars=0)
+    finally:
+        funfacts._http_get_json = orig
+    assert "exchars" not in seen, f"exchars still sent: {seen}"
+    assert "Rocking Chair" in got
+
+
+def test_curated_cuba_missouri():
+    res = funfacts._spicy_db("Cuba, Missouri", 200)
+    assert res, "no curated entry for Cuba, Missouri"
+    text = " ".join(res["facts"])
+    for needle in ("Red Rocker", "42 feet", "Big Red Apple", "Bette Davis",
+                   "Amelia Earhart", "Mural City", "Wagon Wheel", "1857"):
+        assert needle in text, f"missing: {needle}"
+    assert all(len(f) <= 200 for f in res["facts"])
+    # Bare "Cuba" is the island nation — it must not match.
+    assert funfacts._spicy_db("Cuba", 200) is None
+
+
+def test_location_line_never_outranks_history():
+    """Jerome, Missouri's entire article is one 'It is located on the Gasconade
+    River near Interstate 44...' sentence and one history sentence. The location
+    line scored 6 (because 'interstate' is a ranking word) and the history 4, so
+    the dull line was the only seed the model got."""
+    both = ["It is located on the Gasconade River near Interstate 44.",
+            'Jerome was originally called "Fremont Town", and under the latter '
+            "name was platted in 1867 when the railroad was extended."]
+    out = funfacts._ranked_facts(both, spice=True, limit=200)
+    assert out and "Fremont Town" in out[0], out
+    assert not any("It is located" in f for f in out)
+    # A pool of nothing but a location line stays empty, so the caller falls
+    # through to the next source rather than posting "it is near the interstate".
+    assert funfacts._ranked_facts(
+        ["It is located on the Gasconade River near Interstate 44."],
+        spice=True, limit=200) == []
+    # ...and a namesake person stub is never posted either.
+    assert funfacts._ranked_facts(
+        ["Joe Girard, Guinness Book of World Records winning American salesman"],
+        spice=True, limit=200) == []
+
+# Every string below is a line the bot actually posted in #hardclaws. They are
+# kept verbatim because paraphrasing them is how a regression test stops
+# matching the thing it was written for.
+_REAL_BAD_FACTS = (
+    ("But in that same year, the Latter Day Saint movement founder, Joseph "
+     "Smith, was killed in the Carthage Jail, about 30 miles away from "
+     "Nauvoo.", "dangling"),
+    ("Of the fifty U.S. states, Illinois has the fifth-largest gross domestic "
+     "product (GDP), the sixth-largest population, and the 25th-most land "
+     "area.", "boring"),
+    ("In 1840, one hundred of those residents who did not have passports were "
+     "arrested, leading to the Graham Affair, which was resolved in part with "
+     "the intercession of Royal Navy officials.", "dangling"),
+    ("What did Grima do?", "fragment"),
+    ("Previously the Portswood Hotel, it was named after J. R. R. Tolkien's "
+     "book The Hobbit in 1989.", "dangling"),
+    ("The National Register of Historic Places is the official list of the "
+     "Nation's historic places worthy of preservation.", "boring"),
+    ("Historic Landmark plaque.", "fragment"),
+    ("Seeds, such as pumpkin seeds or sunflower seeds", "fragment"),
+)
+
+
+def test_harvested_facts_must_stand_alone():
+    """A fact is posted alone in chat, with no article around it.
+
+    All eight of these reached chat and passed every filter that existed,
+    because those filters were written for small-town census boilerplate. The
+    complaint was 'they arent facts or they are just boring', and these are
+    the two halves of it: fragments and questions are not facts, and a ranking
+    table in prose form or a sentence that opens with 'But in that same year'
+    is not readable on its own.
+    """
+    checks = {"dangling": funfacts._is_dangling,
+              "fragment": funfacts._is_fragment,
+              "boring": funfacts._is_boring}
+    for sentence, why in _REAL_BAD_FACTS:
+        assert checks[why](sentence), (why, sentence)
+        # And through the funnel they actually travel, not just the predicate.
+        assert funfacts._ranked_facts([sentence], limit=200) == [], sentence
+
+
+def test_real_facts_survive_the_stand_alone_gate():
+    """The other half: the gate must not eat the facts worth posting.
+
+    Two of these were dropped by the first draft - 'the latter' was treated as
+    an unresolvable reference when the antecedent is in the same sentence, and
+    a missing present-tense verb pattern made a 122-character sentence look
+    like a fragment. Both are real facts about real places.
+    """
+    good = (
+        "One of the oldest remaining buildings in Girard, the Henry Barnhisel "
+        "House, shares tales of community and family history.",
+        "Jerome was originally called \"Fremont Town\", and under the latter "
+        "name was platted in 1867 when the railroad was extended.",
+        "Leap-The-Dips in Lakemont is the oldest operating roller coaster in "
+        "the world.",
+        "Cuba, Missouri is home to the world's largest rocking chair.",
+        "It was platted in 1867 as Fremont Town.",
+        "The arcade boasts 600 pinball machines, some dating back almost a "
+        "century and others just released.",
+        "Bette Davis and Amelia Earhart both visited the town in 1937.",
+    )
+    for sentence in good:
+        assert not funfacts._is_dangling(sentence), sentence
+        assert not funfacts._is_fragment(sentence), sentence
+        assert not funfacts._is_boring(sentence), sentence
+        assert funfacts._ranked_facts([sentence], limit=200), sentence
+
+
+def test_facts_are_ranked_by_relevance_to_what_was_asked():
+    """'!funfact huorns' and '!funfact trail mix' both answered with
+    sentences that had nothing to do with the query.
+
+    This is a ranking bonus, not a hard drop: a stub article whose only usable
+    sentence does not repeat the name must still produce an answer.
+    """
+    about = "Trail mix is a snack of dried fruit, nuts and sometimes chocolate."
+    unrelated = ("The National Register of Historic Places is a federal list "
+                 "of districts, sites and structures worthy of preservation.")
+    out = funfacts._ranked_facts([unrelated, about], limit=200,
+                                 subject="trail mix")
+    assert out and "Trail mix" in out[0], out
+    # With no subject given, nothing is penalised and nothing is invented.
+    assert funfacts._ranked_facts([unrelated, about], limit=200), "still answers"
+    print("[PASS] the fact that names the subject outranks one that does not")
+
+
+_TOPIC_ARTICLES = {
+    "grima wormtongue": [
+        {"title": "Gr\u00edma", "extract":
+         "Gr\u00edma Wormtongue is a fictional character in J. R. R. Tolkien's "
+         "legendarium. He serves as the chief advisor to King Th\u00e9oden of "
+         "Rohan, and is secretly in the employ of the wizard Saruman."},
+    ],
+    "huorns": [
+        {"title": "Huorn", "extract":
+         "A Huorn is a tree-like being in J. R. R. Tolkien's Middle-earth. The "
+         "Ents are said to have taught the trees to talk, and some trees "
+         "became angry and wild, turning into Huorns."},
+    ],
+    # The pub comes FIRST, exactly as the real search returned it.
+    "hobbit": [
+        {"title": "The Hobbit Inn", "extract":
+         "The Hobbit Inn is a pub in Southampton, Hampshire, England. It "
+         "serves ales and hosts live music at weekends."},
+        {"title": "Hobbit", "extract":
+         "Hobbits are a fictional humanoid race appearing in the works of "
+         "J. R. R. Tolkien. They average between two and four feet tall and "
+         "are fond of farming and simple living."},
+    ],
+    "trail mix": [
+        {"title": "Trail mix", "extract":
+         "Trail mix is a type of snack mix consisting of granola, dried fruit, "
+         "nuts and sometimes chocolate. It was developed as a food to be taken "
+         "along on hikes."},
+    ],
+    # Nothing here is about the thing asked for.
+    "low watts": [
+        {"title": "Watts Towers", "extract":
+         "The Watts Towers are a collection of 17 interconnected sculptural "
+         "towers in the Watts neighbourhood of Los Angeles."},
+    ],
+    "why is stinker slow?": [
+        {"title": "Slow loris", "extract":
+         "The slow loris is a nocturnal primate native to Southeast Asia. It "
+         "is the only primate known to produce a toxic bite."},
+    ],
+}
+
+
+def _stub_topic_search(query, exchars=4000, limit=6):
+    return _TOPIC_ARTICLES.get(query, [])
+
+
+def test_topic_lookup_answers_anything_with_an_article():
+    """Chat does not ask about places.
+
+    In one session the queries were 'lord of the rings', 'grima wormtongue',
+    'hobbit', 'huorns' and 'trail mix'. The place pipeline answered none of
+    them, because _title_relevance scored 'huorns' at 0 against the article
+    'Huorn' (plural against singular) and 'grima wormtongue' at 0 against
+    'Gr\u00edma' (the accent breaks the match), so both fell through to web
+    search and posted noise.
+    """
+    saved = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = _stub_topic_search
+    try:
+        for query, title in (("grima wormtongue", "Gr\u00edma"),
+                             ("huorns", "Huorn"),
+                             ("trail mix", "Trail mix")):
+            got = funfacts._wikipedia_topic(query)
+            assert got, f"no answer for {query}"
+            assert got["place"] == title, (query, got["place"], title)
+            assert got["facts"], query
+            assert all(len(f) <= 200 for f in got["facts"]), got["facts"]
+    finally:
+        funfacts._wiki_search_extracts = saved
+    print("[PASS] a topic lookup answers anything with an article")
+
+
+def test_topic_lookup_prefers_the_article_actually_asked_for():
+    """Searching 'hobbit' returns a pub in Southampton ahead of the article
+    about hobbits. Taking the first hit is what posted the pub."""
+    saved = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = _stub_topic_search
+    try:
+        got = funfacts._wikipedia_topic("hobbit")
+        assert got and got["place"] == "Hobbit", got
+        assert not any("Southampton" in f for f in got["facts"]), got["facts"]
+    finally:
+        funfacts._wiki_search_extracts = saved
+    print("[PASS] the article asked for beats the namesake, whatever the order")
+
+
+def test_topic_lookup_says_nothing_rather_than_guessing():
+    """The honest half. 'low watts' and 'why is stinker slow?' have no
+    article, and the nearest thing Wikipedia has is about something else.
+    Returning None lets the bot say it could not find it."""
+    saved = funfacts._wiki_search_extracts
+    funfacts._wiki_search_extracts = _stub_topic_search
+    try:
+        for query in ("low watts", "why is stinker slow?",
+                      "heating notification"):
+            assert funfacts._wikipedia_topic(query) is None, query
+        assert funfacts._wikipedia_topic("") is None
+        assert funfacts._wikipedia_topic(None) is None
+    finally:
+        funfacts._wiki_search_extracts = saved
+    print("[PASS] no article means no answer, not the nearest shared word")
+
+
+def test_a_search_snippet_must_be_about_the_thing_asked():
+    """The mechanism behind 'FunFact | stinker: Stinker claims to be the
+    world's most famous landmark, according to Explore magazine'.
+
+    DuckDuckGo labels its answer with the QUERY, not with the article it
+    actually found. So a search that resolves to some landmark produced text
+    about that landmark under the heading 'stinker', and nothing anywhere was
+    asking whether the sentence mentioned the thing asked for. The snippet
+    sources have no title gate - unlike the Wikipedia path, which chooses an
+    article by title first - so the check has to be here.
+    """
+    landmark = ("The Eiffel Tower claims to be the world's most famous "
+                "landmark, according to Explore magazine and U.S. News Travel.")
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = (
+        lambda url, params, timeout=8.0:
+        {"Heading": "", "AbstractText": landmark})
+    try:
+        assert funfacts._duckduckgo("stinker") is None, "wrong subject posted"
+        # Prove the guard is what changed it, not some other filter: the same
+        # sentence, ranked without require_subject, comes straight through.
+        assert funfacts._ranked_facts([landmark], subject="stinker"), \
+            "the sentence itself is fine; only the attribution is wrong"
+        # And a snippet that IS about the subject still gets posted.
+        funfacts._http_get_json = (
+            lambda url, params, timeout=8.0:
+            {"Heading": "Trail mix", "AbstractText":
+             "Trail mix is a snack of dried fruit, nuts and sometimes "
+             "chocolate, developed to be taken along on hikes."})
+        got = funfacts._duckduckgo("trail mix")
+        assert got and got["facts"], "real answer was dropped too"
+    finally:
+        funfacts._http_get_json = orig
+    print("[PASS] a snippet about something else is not posted as an answer")
+
+
+def test_the_subject_check_allows_normal_variants():
+    """Requiring an exact name match would be too strict: chat asks in the
+    plural and Wikipedia titles are singular, and accented titles are typed
+    without the accent."""
+    pairs = (("huorns", "A Huorn is a tree-like being in Middle-earth."),
+             ("grima wormtongue", "Grima Wormtongue is a fictional character."),
+             ("trail mix", "Trail mix is a snack of dried fruit and nuts."),
+             ("lord of the rings",
+              "The Lord of the Rings is an epic high-fantasy novel."))
+    for subject, sentence in pairs:
+        assert funfacts._names_subject(sentence, subject), (subject, sentence)
+    for subject, sentence in (("stinker", "The Eiffel Tower is in Paris."),
+                              ("low watts",
+                               "The Watts Towers are in Los Angeles."),
+                              ("trail mix", "Granola is a breakfast food.")):
+        assert not funfacts._names_subject(sentence, subject), (subject,
+                                                               sentence)
+    # No subject at all means no opinion, not a rejection.
+    assert not funfacts._names_subject("Anything at all.", "")
+    print("[PASS] singular/plural and accents still count as naming it")
+
+
+_QUESTION = "what temperature does condensation stop occuring on a windshield?"
+_QUESTION_DDG = {"AbstractText": "", "RelatedTopics": [
+    {"Text": "The dew point is the temperature to which air must be cooled to "
+             "become saturated with water vapour."},
+    {"Text": "When the glass is colder than the dew point, water condenses on "
+             "the windshield."},
+    # A page title. This is what the old version posted as the fact.
+    {"Text": "Why Does My Car Have Condensation Inside?"},
+]}
+
+
+def test_a_question_is_answered_from_what_a_search_returned():
+    """Refusing is better than posting a page title, but it is still not an
+    answer. The search results go to the model with one instruction - use only
+    this - and the reply is then checked against that same text."""
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "Condensation stops once the windshield warms above the dew point, "
+            "the temperature at which air becomes saturated with water vapour.")
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(_QUESTION,
+                                   {"llm_api_key": "k", "max_fact_chars": 200})
+        assert got and got["fact"], got
+        assert "dew point" in got["fact"], got["fact"]
+        assert len(got["fact"]) <= 200, len(got["fact"])
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] a free-form question gets an answer, from the sources")
+
+
+def test_a_one_typo_query_still_finds_the_article():
+    """'!funfact quesobirria' returned "couldn't find any fun facts" while
+    Wikipedia sat on the Quesabirria article - one letter apart. Head-word
+    matching now allows a single typo (six-plus letters only), in both the
+    article match and the sentence filter."""
+    assert funfacts._topic_match("Quesabirria", "quesobirria")
+    assert funfacts._topic_match("Quesabirria", "quesabirria")
+    assert funfacts._topic_match("Huorns", "huorn")           # plural rule
+    assert funfacts._names_subject(
+        "Quesabirria is a Mexican dish.", "quesobirria")      # sentence filter
+    # The namesake guards still hold, and short words never fuzzy-match.
+    assert not funfacts._topic_match("Watts Towers", "low watts")
+    assert not funfacts._topic_match("cat", "car")
+    print("[PASS] one typo finds the article; the guards still hold")
+
+
+def test_the_question_path_also_searches_wikipedia():
+    """'whats the best usa trucking route and why' had an LLM ready and still
+    got nothing, because the only source ladder was Tavily/keyed web search
+    plus DuckDuckGo's Instant Answer - which is empty for almost every
+    free-form question. Wikipedia is now a question source, searched by the
+    question's subject ('usa trucking route')."""
+    import llm
+
+    asked = []
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                asked.append(params.get("srsearch"))
+                return {"query": {"search": [
+                    {"title": "Trucking industry in the United States"}]}}
+            return {"query": {"pages": [{
+                "title": "Trucking industry in the United States",
+                "extract": "Interstate 80 carries trucks coast to coast "
+                           "across the United States. Route 66 was "
+                           "historically the most famous trucking route in "
+                           "the country."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}    # DDG: nothing
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "Route 66 was historically the most famous trucking route in "
+            "the country.")
+        got = funfacts._answer_question(
+            "whats the best usa trucking route and why",
+            {"llm_api_key": "k"}, 200)
+        assert got and "Route 66" in got["facts"][0], got
+        assert any("trucking route" in (a or "") for a in asked), asked
+        assert not any("whats" in (a or "") for a in asked), asked
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the question path searches Wikipedia by its subject")
+
+
+def test_skip_llm_declines_without_touching_the_model():
+    """opts['_skip_llm'] (set by !ask when the chat call just timed out)
+    must decline instantly - no model call, straight to the records."""
+    import llm
+    orig = (llm.is_configured, llm.answer_question,
+            funfacts._question_sources, funfacts._mine_records)
+    llm.is_configured = lambda o: True
+
+    def _must_not_run(q, s, c):
+        raise AssertionError("the model was called despite _skip_llm")
+
+    llm.answer_question = _must_not_run
+    funfacts._question_sources = lambda q, o: ["A source line."]
+    funfacts._mine_records = lambda subject: (
+        ["A driver pulled 113 trailers for 1,235 metres."], "Road train")
+    try:
+        got = funfacts._answer_question(
+            "whats the longest truck in the world",
+            {"llm_api_key": "k", "_skip_llm": True}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+    finally:
+        (llm.is_configured, llm.answer_question,
+         funfacts._question_sources, funfacts._mine_records) = orig
+        funfacts._cache.clear()
+    print("[PASS] _skip_llm declines instantly, records answer")
+
+
+def test_a_dead_model_still_gets_the_records():
+    """The records miner used to run only when NO model was configured.
+    A configured-but-erroring model (a retired OpenRouter slug, a stopped
+    Ollama) turned 'whats the longest truck' into a decline. Now any LLM
+    failure on a specific question falls back to the record lines."""
+    import llm
+    orig = (llm.is_configured, llm.answer_question,
+            funfacts._question_sources, funfacts._mine_records)
+    llm.is_configured = lambda o: True
+    funfacts._question_sources = lambda q, o: [
+        "The road train record was set with 113 trailers behind one truck."]
+    funfacts._mine_records = lambda subject: (
+        ["A driver pulled 113 trailers for 1,235 metres."], "Road train")
+
+    def _boom(q, src_lines, cfg):
+        raise RuntimeError("HTTP 404: no endpoints found")
+
+    try:
+        # The model returns nothing (a 404 upstream, say).
+        llm.answer_question = lambda q, s, c: None
+        got = funfacts._answer_question(
+            "whats the longest truck in the world", {"llm_api_key": "k"}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+        # The call itself blew up.
+        llm.answer_question = _boom
+        got = funfacts._answer_question(
+            "how many trailers did the record truck pull",
+            {"llm_api_key": "k"}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+        # A chatty question is not a records question: no answer, no crash.
+        llm.answer_question = lambda q, s, c: None
+        assert funfacts._answer_question(
+            "how are you today", {"llm_api_key": "k"}, 200) is None
+    finally:
+        (llm.is_configured, llm.answer_question,
+         funfacts._question_sources, funfacts._mine_records) = orig
+        funfacts._cache.clear()
+    print("[PASS] a dead model still gets the records for specific questions")
+
+
+def test_a_misspelled_dish_still_gets_its_facts():
+    """End to end: 'quesobirria' against a Wikipedia that has the Quesabirria
+    article. No LLM, no keys - the topic path should carry it alone."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "Quesabirria"}]}}
+            return {"query": {"pages": [{"title": "Quesabirria",
+                "extract": "Quesabirria is a Mexican dish consisting of a "
+                           "tortilla soaked in consomme, filled with slow-"
+                           "braised meat and melted cheese. It originated in "
+                           "Tijuana in the 2010s. It became a social media "
+                           "sensation in the 2020s."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("quesobirria", {"max_fact_chars": 200})
+        assert got and got["fact"], got
+        assert "quesabirria" in got["fact"].lower(), got["fact"]
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a misspelled dish returns its article's facts")
+
+
+def test_a_namesake_cannot_label_or_speak_for_the_subject():
+    """'!funfact Trucking' answered under the heading "Backhaul (trucking)"
+    with a sentence about Broadway casting gossip - Mislove, Deutsch, Jules
+    Feiffer's Little Murders, and not one truck. A namesake article that
+    merely carries the word can no longer win the label, and an ungated
+    harvest from it cannot contribute lines that never name the subject."""
+    # The head word of the query is "trucking"; "backhaul" is not it.
+    assert not funfacts._topic_match("Backhaul (trucking)", "trucking")
+    # So lines from that article must name the subject to count...
+    assert not funfacts._names_subject(
+        "Mislove also invited Deutsch, who was appearing at The Upstairs at "
+        "the Downstairs Cabaret at the Plaza Hotel.", "trucking")
+    # ...while the article whose head word IS the subject speaks freely.
+    assert funfacts._topic_match("Trucking industry in the United States",
+                                 "trucking")
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "Backhaul (trucking)"},
+                    {"title": "Trucking industry in the United States"}]}}
+            pages = []
+            for t in params.get("titles", "").split("|"):
+                if t == "Backhaul (trucking)":
+                    pages.append({"title": t, "extract":
+                        "A backhaul is a return journey a truck makes after "
+                        "delivering a cargo. Mislove also invited Deutsch, "
+                        "who was appearing at The Upstairs at the Downstairs "
+                        "Cabaret at the Plaza Hotel."})
+                else:
+                    pages.append({"title": t, "extract":
+                        "Trucking moves most of the nation's freight. "
+                        "Trucking companies plan backhauls to avoid running "
+                        "empty."})
+            return {"query": {"pages": pages}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("Trucking", {"max_fact_chars": 200})
+        assert got, "trucking lookup returned nothing"
+        assert got["place"] == "Trucking industry in the United States", got
+        assert "Mislove" not in got["fact"], got["fact"]
+        assert "trucking" in got["fact"].lower(), got["fact"]
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a namesake cannot label the answer or speak for it")
+
+
+def test_a_one_fact_answer_gets_deepened_and_rotates():
+    """'!funfact american truckers' posted the identical ATHS mission
+    statement twice in a row: DuckDuckGo's Instant Answer is one sentence,
+    and a one-fact pool has nothing else to rotate to. A thin pool now gets
+    one topic-path pass to add articles, and repeats must differ."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "American Truck Historical Society"},
+                    {"title": "American Trucking Associations"}]}}
+            pages = []
+            for t in params.get("titles", "").split("|"):
+                if t == "American Truck Historical Society":
+                    pages.append({"title": t, "extract":
+                        "The American Truck Historical Society preserves and "
+                        "shares the story of the trucking industry. The "
+                        "society maintains archives of vintage truck "
+                        "photographs and restoration guides."})
+                else:
+                    pages.append({"title": t, "extract":
+                        "The American Trucking Associations advocate for "
+                        "the trucking industry in Washington. The group "
+                        "founded the National Truck Driving Championships, "
+                        "where drivers compete in precision driving."})
+            return {"query": {"pages": pages}}
+        return {"AbstractText": "The American Truck Historical Society "
+                                "preserves and shares the story of the "
+                                "trucking industry.",
+                "Heading": "American Truck Historical Society",
+                "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        first = funfacts.get_funfact("american truckers",
+                                     {"max_fact_chars": 200})
+        assert first and first["fact"], first
+        second = funfacts.get_funfact("american truckers",
+                                      {"max_fact_chars": 200})
+        assert second and second["fact"], second
+        assert first["fact"] != second["fact"], (first["fact"],
+                                                 second["fact"])
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a one-fact answer gets deepened and repeats differ")
+
+
+def test_engine_debris_never_reaches_chat():
+    """'!funfact Yorkshire united kingdom' posted "Yorkshire is the largest
+    county in the UK \u00b7 2." - the next list item's number, welded on by
+    the search engine. '!funfact North Yorkshire England' posted a bare
+    listicle heading, "North Yorkshire Historic Sites ; 1.". And a source
+    capped mid-sentence ended in "\u2026" inside a parenthesis that never
+    closed."""
+    # List debris is stripped; a real year at the end of a sentence is not.
+    assert funfacts._sentences(
+        "Yorkshire is the largest county in the UK \u00b7 2."
+    ) == ["Yorkshire is the largest county in the UK."]
+    assert funfacts._sentences(
+        "1. Yorkshire has a national park \u00b7 2. Yorkshire has two"
+    ) == ["Yorkshire has a national park.", "Yorkshire has two."]
+    assert funfacts._sentences("The bridge opened in 1927.") == \
+        ["The bridge opened in 1927."]
+    # A listicle heading is not a sentence, whatever its number debris.
+    assert not funfacts._ranked_facts(
+        funfacts._sentences("North Yorkshire Historic Sites ; 1."))
+    assert funfacts._is_fragment("North Yorkshire Historic Sites.")
+    assert not funfacts._is_fragment(
+        "Yorkshire is the largest county in the United Kingdom.")
+    # A truncated parenthetical is repaired to the complete clause, and a
+    # truncation that cannot be repaired is dropped, not posted half-cut.
+    got = funfacts._ranked_facts(funfacts._sentences(
+        "Typically, there is only one Mexican Train per round; rules vary "
+        "on when it can be started (some say it can be started only after "
+        "the opening turns are complete\u2026"), subject="mexican train")
+    assert got and "(" not in got[0] and "\u2026" not in got[0], got
+    assert "per round" in got[0], got
+    print("[PASS] list debris, headings and truncations never reach chat")
+
+
+def test_deep_article_text_must_name_its_subject():
+    """'!funfact Yorkshire' posted "Tostig and Hardrada were both killed and
+    their army was defeated decisively." - a History-section sentence with no
+    Yorkshire in it, true but anchorless. The lead keeps its usual rules
+    (\u201cIt is the largest county...\u201d reads fine under the heading);
+    the deep text may only contribute sentences that name the place."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "Yorkshire"}]}}
+            if "exchars" in params:            # the capped search extract
+                return {"query": {"pages": [{"title": "Yorkshire", "extract":
+                    "Yorkshire is a historic county in Northern England. "
+                    "It is the largest county in the United Kingdom."}]}}
+            return {"query": {"pages": [{"title": "Yorkshire", "extract":
+                "Yorkshire is a historic county in Northern England. "
+                "Tostig and Hardrada were both killed and their army was "
+                "defeated decisively at Stamford Bridge. Yorkshire contains "
+                "the Yorkshire Dales, a national park famed for its "
+                "limestone scenery."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        funfacts._cache.clear()
+        seen = []
+        for _ in range(3):                     # exercise the rotation too
+            got = funfacts.get_funfact("Yorkshire", {"max_fact_chars": 200})
+            assert got and got["fact"], got
+            assert "Tostig" not in got["fact"], got["fact"]
+            assert "yorkshire" in got["fact"].lower(), got["fact"]
+            seen.append(got["fact"])
+        assert len(set(seen)) >= 2, seen        # the pool has depth
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] deep article text must name its subject")
+
+
+def test_an_answer_cannot_open_on_a_bare_pronoun():
+    """'!funfact why do look fatter on camera?' was answered with "It is
+    entirely psychological if you think a photo of you looks far worse than
+    your reflection." It-who? The question is gone from the room by the time
+    the answer posts; an answer names the thing or is not posted."""
+    import llm
+    _DDG = {"AbstractText": "Phone camera lenses sit close to the face, and "
+            "lens distortion stretches the nose. It is entirely "
+            "psychological if you think a photo looks far worse than your "
+            "reflection.", "RelatedTopics": []}
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _DDG
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "It is entirely psychological if you think a photo of you "
+            "looks far worse than your reflection.")
+        assert funfacts._answer_question(
+            "why do look fatter on camera?", {"llm_api_key": "k"}, 200) \
+            is None, "pronoun-first answer posted"
+        llm.answer_question = lambda q, src, cfg: (
+            "Lens distortion stretches the nose because phone camera "
+            "lenses sit close to the face.")
+        got = funfacts._answer_question(
+            "why do look fatter on camera?", {"llm_api_key": "k"}, 200)
+        assert got and "Lens distortion" in got["facts"][0], got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] an answer cannot open on a bare pronoun")
+
+
+def test_countries_strip_and_substrings_do_not_name():
+    """Two holes a walkthrough of the live queries caught. 'Yorkshire united
+    kingdom' kept the whole string as its place core, so the Yorkshire
+    article scored 20 of the 70 the title gate needs and a one-line listicle
+    answered instead of the article. And 'why do look fatter on camera?'
+    matched its source on the substring 'look' inside 'looks', so a
+    pronoun-first abstract posted as a fact that named nothing."""
+    assert funfacts._query_core("Yorkshire united kingdom") == "yorkshire"
+    assert funfacts._query_region("Yorkshire united kingdom") == \
+        "united kingdom"
+    assert funfacts._query_core("Cuba Missouri") == "cuba"      # unchanged
+    assert not funfacts._names_subject(
+        "It is entirely psychological if you think a photo of you looks "
+        "far worse than your reflection.", "why do look fatter on camera?")
+    # Real naming still passes: exact word, hyphenated, plural.
+    assert funfacts._names_subject("Yorkshire is the largest county.", "yorkshire")
+    assert funfacts._names_subject("The Yorkshire-born pilot flew on.", "yorkshire")
+    assert funfacts._names_subject("Huorns are tree-beings.", "huorns")
+    # And an answered question is headed by the question, not "Look:".
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: {
+        "AbstractText": "Phone camera lenses sit close to the face, and "
+                        "lens distortion stretches the nose.",
+        "RelatedTopics": []}
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "The lens sits close to the face, and lens distortion "
+            "stretches the nose.")
+        got = funfacts._answer_question("why do look fatter on camera?",
+                                        {"llm_api_key": "k"}, 200)
+        assert got and got["place"] == "why do look fatter on camera?", got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] countries strip; substrings do not name; a question "
+          "heads itself")
+
+
+def test_stories_outrank_sizes_inventory_and_definitions():
+    """'!funfact Yorkshire' opened with "the largest by area in the United
+    Kingdom" while the Harrying of the North sat under it, because
+    "largest" is a strong word and being a story was worth nothing. Size
+    statements, what-is-it leads and inventories now rank below stories -
+    demoted, not deleted, so a pool with only a size line still answers."""
+    story = ("The Harrying of the North that followed devastated much of "
+             "Yorkshire.")
+    dull = [
+        "Yorkshire is a historic county in Northern England and the largest "
+        "by area in the United Kingdom.",
+        "North Yorkshire is a ceremonial county in Northern England.",
+        "Yorkshire contains two national parks and three areas of "
+        "outstanding natural beauty.",
+        "Within the borders of Yorkshire are unspoiled countryside, "
+        "including the Yorkshire Dales and the North York Moors.",
+    ]
+    for d in dull:
+        assert funfacts._score(d) < funfacts._score(story), d
+    # A dated sentence is a story.
+    assert funfacts._score(
+        "North Yorkshire was formed in 1974 and covers the old county."
+    ) > funfacts._score("North Yorkshire covers the old county.")
+    # Curiosities are NOT size statements.
+    assert funfacts._score(
+        "Cuba, Missouri is home to the world's largest rocking chair."
+    ) >= 6
+    # And a dish's definition is its fact - only administrative nouns are
+    # demoted, so quesobirria is never punished for being food.
+    assert funfacts._score(
+        "Quesabirria is a Mexican dish consisting of a tortilla soaked in "
+        "consomme.") == 0
+    # Demoted, not deleted: a pool with nothing else still answers.
+    assert funfacts._ranked_facts(
+        ["Siberia is the largest region by area in Russia."],
+        subject="siberia"), "size-only pool came back empty"
+    print("[PASS] stories outrank sizes, inventory and definitions")
+
+
+def test_a_compound_entity_is_not_the_subject():
+    """"It comprises most of Yorkshire plus North and North East
+    Lincolnshire" posted under a Yorkshire heading - the county had
+    apparently eaten Lincolnshire. The line came from "Yorkshire and the
+    Humber", a different entity that merely starts with the same word;
+    compound titles are not same-name articles."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": "Yorkshire"},
+                    {"title": "Yorkshire and the Humber"}]}}
+            pages = []
+            for t in params.get("titles", "").split("|"):
+                if t == "Yorkshire":
+                    pages.append({"title": t, "extract":
+                        "Yorkshire is a historic county in Northern "
+                        "England. The Harrying of the North that followed "
+                        "devastated much of Yorkshire. Yorkshire was later "
+                        "the heartland of England's wool trade, which made "
+                        "Leeds and Bradford wealthy mill towns."})
+                else:
+                    pages.append({"title": t, "extract":
+                        "Yorkshire and the Humber is one of the nine "
+                        "official regions of England. It comprises most of "
+                        "Yorkshire plus North and North East Lincolnshire."})
+            return {"query": {"pages": pages}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        r = funfacts._wikipedia("Yorkshire")
+        assert r and r["place"] == "Yorkshire", r
+        assert not any("Lincolnshire" in f for f in r["facts"]), r["facts"]
+        assert any("Harrying" in f or "wool trade" in f for f in r["facts"])
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] a compound entity cannot speak for the subject")
+
+
+def test_uk_constituent_countries_strip_as_regions():
+    """"North Yorkshire England" kept the whole string as its place core, so
+    the article failed the title gate and the answer came from a one-line
+    shallow extract. England, Scotland, Wales and Ireland now strip like
+    states do."""
+    assert funfacts._query_core("North Yorkshire England") == "north yorkshire"
+    assert funfacts._query_region("North Yorkshire England") == "england"
+    assert funfacts._query_core("Edinburgh Scotland") == "edinburgh"
+    assert funfacts._query_core("Snowdonia Wales") == "snowdonia"
+    assert funfacts._query_core("Cuba Missouri") == "cuba"  # unchanged
+    print("[PASS] England/Scotland/Wales strip like state names")
+
+
+def test_the_question_path_digs_past_the_lead():
+    """'!funfact what is the longest semi truck with trailer attached' got
+    "The longest road train in history still holds the world record." - a
+    promise, not an answer. The records sit far below the 1200-character
+    lead cap of the batched extract, so the model never saw a number. The
+    top article's full text is fetched now and its question-relevant
+    sentences are fed to the model first."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "Road train"}]}}
+            if params.get("exchars"):            # capped batched extract
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train or land train is a trucking vehicle used "
+                    "to move freight."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train or land train is a trucking vehicle used to "
+                "move freight. In 2006, a driver in Glynde, South Australia "
+                "pulled 113 trailers with a Volvo FH16 for 1,235 metres, "
+                "which still stands as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        reached = []
+
+        def model(q, src, cfg):
+            reached.extend(s for s in src if "1,235" in s)
+            return ("In 2006, a driver in Glynde, South Australia pulled "
+                    "113 trailers with a Volvo FH16 for 1,235 metres.")
+        llm.answer_question = model
+        got = funfacts._answer_question(
+            "what is the longest semi truck with trailer attached",
+            {"llm_api_key": "k"}, 200)
+        assert got and "1,235 metres" in got["facts"][0], got
+        assert reached, "the deep record sentence never reached the model"
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the question path digs past the lead for the records")
+
+
+def test_a_contentless_answer_is_not_posted():
+    """"The longest road train in history still holds the world record."
+    contains no number, no name, no date. For a specific question that is
+    a refusal wearing an answer's clothes: the model is asked once more
+    with the demand made explicit, and if it still has nothing concrete
+    the bot declines rather than posts it."""
+    import llm
+    _DDG = {"AbstractText": "The record for the longest road train was set "
+            "in Australia.", "RelatedTopics": []}
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _DDG
+    llm.is_configured = lambda o: True
+    try:
+        calls = []
+
+        def stubborn(q, src, cfg):
+            calls.append(q)
+            return ("The longest road train in history still holds the "
+                    "world record.")
+        llm.answer_question = stubborn
+        assert funfacts._answer_question(
+            "what is the longest semi truck with trailer attached",
+            {"llm_api_key": "k"}, 200) is None, "a promise was posted"
+        assert len(calls) == 2, calls        # asked once more, then gave up
+
+        calls.clear()
+
+        def cooperative(q, src, cfg):
+            calls.append(q)
+            if len(calls) == 1:
+                return ("The longest road train in history still holds the "
+                        "world record.")
+            return "The record for the longest road train was set in Australia."
+        llm.answer_question = cooperative
+        got = funfacts._answer_question(
+            "what is the longest semi truck with trailer attached",
+            {"llm_api_key": "k"}, 200)
+        assert got and "Australia" in got["facts"][0], got
+        assert len(calls) == 2, calls        # the retry produced the answer
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] a contentless answer is retried, then refused")
+
+
+def test_the_fact_path_cannot_answer_a_promise():
+    """The promise came back even after the answer gate: a search snippet
+    ("The longest road train in history still holds the world record.")
+    passes every FACT filter, so the fact path served it and the question
+    path - the only place with the contentless gate - never ran. A
+    contentless pool for a specific question is now no pool at all."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": []}}
+            return {"query": {"pages": []}}
+        return {
+            "AbstractText": "The longest road train in history still holds "
+                            "the world record.",
+            "Heading": "", "Answer": "",
+            "RelatedTopics": [{"Text":
+                "meet the world's longest truck \u2026 a 175-foot road "
+                "train powered by over 1,000 horsepower."}],
+        }
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        seen_by_model = []
+
+        def model(q, src, cfg):
+            seen_by_model.extend(src)
+            return ("A 175-foot road train powered by over 1,000 "
+                    "horsepower.")
+        llm.answer_question = model
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k", "max_fact_chars": 200})
+        assert got and got["fact"], got
+        assert "world record" not in got["fact"], got["fact"]
+        assert "175-foot" in got["fact"], got["fact"]
+        assert "\u2026" not in got["fact"] and "meet" not in \
+            got["fact"].lower(), got["fact"]
+        # the ugly teaser still reached the model as a SOURCE - its numbers
+        # are exactly what grounds the answer - but it never posts as-is.
+        assert any("175-foot" in s for s in seen_by_model), seen_by_model
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the fact path cannot answer a specific question with a "
+          "promise")
+
+
+def test_the_dig_finds_records_the_question_does_not_name():
+    """The deep dig only took sentences sharing the question's words - but
+    the sentence that answers "longest truck" says "pulled 113 trailers",
+    not "truck" or "longest", so the model was still answering from web
+    teasers. Dated, record-styled sentences are dug up too now."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "Road train"}]}}
+            if params.get("exchars"):
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train is a trucking vehicle used to move "
+                    "freight."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train is a trucking vehicle used to move freight. "
+                "In 2006 a driver pulled 113 trailers for 1,235 metres, "
+                "which still stands as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    llm.is_configured = lambda o: True
+    try:
+        seen_by_model = []
+
+        def model(q, src, cfg):
+            seen_by_model.extend(src)
+            return ("In 2006 a driver pulled 113 trailers for 1,235 "
+                    "metres, which still stands as the record.")
+        llm.answer_question = model
+        got = funfacts._answer_question(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k"}, 200)
+        assert got and "1,235" in got["facts"][0], got
+        assert any("1,235" in s for s in seen_by_model), seen_by_model
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the dig finds records the question does not name")
+
+
+def test_teasers_and_splices_never_post():
+    """"meet the world's longest truck \u2026 a 175-foot road train powered
+    by over 1,000 horsepower." posted as an answer: lowercase, spliced by an
+    interior ellipsis, and pitched like an advert. Facts and answers start
+    with a capital and read as one sentence; sources may stay ugly, because
+    the model rephrases them and their numbers are what grounds the
+    answer."""
+    teaser = ("meet the world's longest truck \u2026 a 175-foot road train "
+              "powered by over 1,000 horsepower.")
+    assert funfacts._is_fragment(teaser)
+    assert not funfacts._ranked_facts([teaser], subject="longest truck")
+    assert not funfacts._ranked_facts(
+        ["Meet the world's longest truck, a 175-foot road train."],
+        subject="longest truck")            # capitalised pitch, same fate
+    assert funfacts._is_fragment(
+        "He pulled 113 trailers \u2026 for 1,235 metres.")  # spliced
+    assert not funfacts._is_fragment(
+        "eBay is an online marketplace.")    # brands keep a lowercase start
+    print("[PASS] teasers and splices never post")
+
+
+def test_record_claims_and_glued_lists_never_post():
+    """Round three of the longest-truck question. The promise STILL posted:
+    the pool held the promise plus a dated record, so the pool-level gate
+    was satisfied, and the promise outranked the real record 13 points to 6
+    ("longest", "world" and "record" are all strong words). A record claim
+    with no figure and no name in it is junk in its own right now. And the
+    retry produced "World's longest road trains \u00b7 In 1989, ... \u00b7
+    In 1993, ..." - a section heading and list items glued by middots,
+    which also blocked sentence splitting."""
+    promise = ("The longest road train in history still holds the world "
+               "record.")
+    buddo = ("In 1989, a trucker named \"Buddo\" tugged 12 trailers down "
+             "the main street of Winton.")
+    assert funfacts._is_contentless_claim(promise)
+    assert not funfacts._is_contentless_claim(buddo)      # digit + name
+    assert not funfacts._is_contentless_claim(
+        "His record still stands in Winton.")             # named
+    assert not funfacts._ranked_facts([promise], subject="longest truck")
+    # With the promise gone, the real record leads the pool.
+    assert funfacts._ranked_facts([promise, buddo],
+                                  subject="longest truck")[0] == buddo
+    # A middot-joined blob splits into its parts; the heading dies as a
+    # fragment, the records survive, and no line carries the glue.
+    glued = ("World's longest road trains \u00b7 In 1989, a trucker named "
+             "\"Buddo\" tugged 12 trailers down the main street of Winton. "
+             "\u00b7 In 1993, \"Plugger\" Bowden took the record.")
+    sents = funfacts._sentences(glued)
+    assert len(sents) >= 2, sents
+    assert not any("\u00b7" in s for s in sents), sents
+    assert any("Buddo" in s for s in sents), sents
+    assert not funfacts._ranked_facts(sents, subject="longest truck") or \
+        all("World's longest road trains" != f for f in
+            funfacts._ranked_facts(sents, subject="longest truck"))
+    print("[PASS] record claims without figures are junk; middot glue "
+          "splits")
+
+
+def test_headings_in_sentence_case_and_captions_never_post():
+    """Round four. Split free of its glued list, "World's longest road
+    trains." posted alone: title case missed it ("longest" is lowercase)
+    and "trains" passes the verb catch-all. And "this mighty truck is
+    named Lindsay Transport B Double" is an image caption in promotional
+    voice - a name, so the contentless gate passed it, but not a fact."""
+    for heading in ("World's longest road trains.", "Notable people.",
+                    "Historic sites."):
+        assert funfacts._is_fragment(heading), heading
+    for prose in ("eBay is an online marketplace.",
+                  "Yorkshire is the largest county in the UK.",
+                  "Huorns are tree-beings."):
+        assert not funfacts._is_fragment(prose), prose
+    caption = ("One of the longest trucks in the world, this mighty truck "
+               "is named Lindsay Transport B Double.")
+    assert not funfacts._ranked_facts([caption], subject="longest truck")
+    assert not funfacts._ranked_facts(
+        ["This massive rig carries ore across the outback."],
+        subject="longest truck")
+    # End to end: the glued list resolves to its records, never its heading.
+    glued = ("World's longest road trains \u00b7 In 1989, a trucker named "
+             "\"Buddo\" tugged 12 trailers down the main street of Winton. "
+             "\u00b7 In 1993, \"Plugger\" Bowden took the record.")
+    ranked = funfacts._ranked_facts(funfacts._sentences(glued),
+                                    subject="longest truck")
+    assert ranked and any("Buddo" in f for f in ranked), ranked
+    assert not any("World's longest road trains" in f for f in ranked), ranked
+    print("[PASS] sentence-case headings and caption voice never post")
+
+
+def test_a_long_fact_is_cut_at_a_clause_never_a_dangler():
+    """'!funfact Seligman, AZ' posted "...were built to attract tourists to
+    the Cafe and the\u2026" - the fact's only comma cut landed at 98 of 200
+    characters, the 55% threshold rejected it, and the word chop left "and
+    the" dangling. The longest clause cut wins now, and a word cut strips
+    every dangling connector before it posts."""
+    fact = ('The "Seligman Depot" and the "1860 Arizona Territorial Jail" '
+            'are not authentic historical buildings, but owned by the '
+            'Roadkill Cafe owners and were built to attract tourists to the '
+            'Cafe and the gift shop next door.')
+    got = funfacts._fit_fact(fact, 200, {})      # no LLM: the fallback path
+    assert got.endswith("are not authentic historical buildings\u2026"), got
+    assert "and the" not in got.split("buildings")[-1], got
+    assert len(got) <= 200, len(got)
+    # A cut with no clause boundary in range ends on a noun, not "beyond".
+    chop = ("The bridge carried coal trucks eastward toward the furnaces "
+            "and the loading docks beyond the river bend every single "
+            "winter morning without fail.")
+    got = funfacts._trim(chop, 90)
+    assert got.endswith("loading docks\u2026"), got
+    assert not got.endswith(("and the\u2026", "beyond\u2026", "the\u2026")), got
+    # Whole sentences are still packed first when they fit.
+    assert funfacts._trim("One. Two two. Three three three.", 15) == \
+        "One. Two two."
+    print("[PASS] a long fact is cut at a clause, never a dangler")
+
+
+def test_a_generated_half_quote_is_repaired_before_chat():
+    cut = ('He cited concerns about preserving Daft Punk as to why they split, '
+           'saying: "As much as I love this character, the last thing I would '
+           'want to be')
+    fixed = funfacts._finish_line(cut)
+    assert fixed == ("He cited concerns about preserving Daft Punk as to why "
+                     "they split."), fixed
+    assert '"' not in fixed and not fixed.endswith(("saying.", "be.")), fixed
+    assert funfacts._finish_line('"unfinished from the first word') == ""
+    print("[PASS] a generated half-quote is repaired before chat")
+
+
+def test_hype_answers_and_demonyms_do_not_count():
+    """Round five: "Get ready to meet the world's longest truck \u2014 an
+    absolute beast tearing across the wild Australian outback!" The hook
+    word was not at the start (so the teaser filter missed it), and the
+    only capitalised word after the first was "Australian" - a demonym,
+    an adjective of place, which counted as a name. A name is what the
+    question asks for; "Australian outback" is not it."""
+    import llm
+    hype = ("Get ready to meet the world's longest truck \u2014 an "
+            "absolute beast tearing across the wild Australian outback!")
+    assert funfacts._TEASE.match(hype)
+    assert funfacts._PROMO.search(hype)
+    assert not funfacts._has_specific(hype)
+    assert not funfacts._ranked_facts([hype], subject="longest truck")
+    # A place is a name; its adjective is not. Digits always are.
+    assert funfacts._has_specific("The record was set in Australia.")
+    assert not funfacts._has_specific("The Australian record stands.")
+    assert funfacts._has_specific(
+        "In 1989, a trucker named \"Buddo\" tugged 12 trailers.")
+    assert funfacts._is_contentless_claim("The Australian record still "
+                                          "stands.")
+    assert not funfacts._is_contentless_claim(
+        "His record still stands in Winton.")
+    # A model that only produces hype is declined, not indulged.
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: {
+        "AbstractText": "The world's longest truck runs in Australia.",
+        "RelatedTopics": []}
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: hype
+        assert funfacts._answer_question(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k"}, 200) is None, "hype was posted"
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] hype answers are declined; demonyms are not names")
+
+
+def test_the_question_search_tries_simpler_subjects():
+    """The question search used the full subject - "longest truck world
+    transporting goods", six words of question glued together - and
+    Wikipedia finds nothing for it, so the model's only sources were
+    clickbait. The shorter heads of the subject are tried too."""
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                if params.get("srsearch") == "longest truck":
+                    return {"query": {"search": [
+                        {"title": "Road train"}]}}
+                return {"query": {"search": []}}
+            if params.get("exchars"):
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train is a trucking vehicle."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train is a trucking vehicle. In 2006 a driver "
+                "pulled 113 trailers for 1,235 metres, which still stands "
+                "as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = serve
+    try:
+        srcs = funfacts._question_sources(
+            "what is the longest truck in the world transporting goods",
+            {"llm_api_key": "k"})
+        assert any("1,235" in s for s in srcs), srcs
+    finally:
+        funfacts._http_get_json = orig
+        funfacts._cache.clear()
+    print("[PASS] the question search falls back to simpler subjects")
+
+
+def test_the_records_miner_stays_on_topic():
+    """Live-fire: 'whats the most common produce to move from west coat
+    to east coast USA and then whats the most popular east back west'
+    was answered 'In 2023, Ivory Coast had the second-highest GDP per
+    capita in West Africa' - the miner took the first search hit and
+    never checked it was about the subject. An off-topic article is
+    skipped now; a question no article answers gets NO records answer
+    rather than a confident non sequitur."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                # The search really does love Ivory Coast for this.
+                return {"query": {"search": [{"title": "Ivory Coast"}]}}
+            return {"query": {"pages": [{"title": "Ivory Coast", "extract":
+                "Ivory Coast is a country on the southern coast of West "
+                "Africa. In 2023, Ivory Coast had the second-highest GDP "
+                "per capita in West Africa, behind Cape Verde."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    Q = ("whats the most common produce to move from west coat to east "
+         "coast USA and then whats the most popular east back west")
+    try:
+        # The unit gate, both ways.
+        assert not funfacts._records_on_topic(
+            "Ivory Coast",
+            "Ivory Coast is a country on the southern coast of West "
+            "Africa.", funfacts._question_subject(Q))
+        assert funfacts._records_on_topic(
+            "Road train", "A road train is a trucking vehicle.",
+            "longest truck transporting goods")
+        # End to end: no model answer, miner refuses the off-topic hit.
+        llm.is_configured = lambda o: False
+        got = funfacts._answer_question(Q, {}, 200)
+        assert got is None, got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the records miner refuses an off-topic article "
+          "(Ivory Coast is not about freight lanes)")
+
+
+def test_the_records_miner_answers_when_the_model_will_not():
+    """Round six: the question now declined - the model path dead-ends (hype
+    refused, decline) and nothing else could answer. The article's own
+    record sentences need no model, so they are posted directly. With no
+    LLM configured at all, a superlative question still gets its records."""
+    import llm
+
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                if params.get("srsearch") == "longest truck":
+                    return {"query": {"search": [{"title": "Road train"}]}}
+                return {"query": {"search": []}}
+            if params.get("exchars"):
+                return {"query": {"pages": [{"title": "Road train", "extract":
+                    "A road train is a trucking vehicle."}]}}
+            return {"query": {"pages": [{"title": "Road train", "extract":
+                "A road train is a trucking vehicle used to move freight. "
+                "In 2006 a driver pulled 113 trailers for 1,235 metres, "
+                "which still stands as the record."}]}}
+        return {"AbstractText": "", "RelatedTopics": []}
+
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = serve
+    Q = "what is the longest truck in the world transporting goods"
+    try:
+        # "world" is filler now: the subject is the searchable core.
+        assert funfacts._question_subject(Q) == "longest truck transporting goods"
+        # A model that only produces hype: the miner answers instead.
+        llm.is_configured = lambda o: True
+        llm.answer_question = lambda q, src, cfg: (
+            "Get ready to meet the world's longest truck \u2014 an "
+            "absolute beast!")
+        got = funfacts._answer_question(Q, {"llm_api_key": "k"}, 200)
+        assert got and "1,235" in got["facts"][0], got
+        assert got["place"] == Q, got
+        # And with no LLM at all, the records still answer.
+        llm.is_configured = lambda o: False
+        got = funfacts._answer_question(Q, {}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] the records miner answers when the model will not")
+
+
+def test_caption_dates_never_post():
+    """"These fingerling potatoes were planted on Feb of 2018." - a photo
+    caption. Prose writes "in February 2018"; "Month of Year" without a
+    day is a caption's shorthand, and it reached chat as the entire fact
+    about fingerling potatoes."""
+    assert funfacts._is_junk_seed(
+        "These fingerling potatoes were planted on Feb of 2018.")
+    assert not funfacts._ranked_facts(
+        ["These fingerling potatoes were planted on Feb of 2018."],
+        subject="fingerling potatoes")
+    assert not funfacts._is_junk_seed(
+        "The harvest began in February 2018.")
+    assert not funfacts._is_junk_seed("The mill opened in 1892.")
+    print("[PASS] caption dates never post")
+
+
+def test_an_answer_may_not_add_what_the_sources_do_not_say():
+    """The whole point of the search step. A plausible number that appears in
+    no source is the classic failure, and it reads better than the truth."""
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    llm.is_configured = lambda o: True
+    try:
+        llm.answer_question = lambda q, src, cfg: (
+            "Condensation stops at 41 degrees Fahrenheit, which is the dew "
+            "point for most cars.")
+        assert funfacts._answer_question(_QUESTION, {"llm_api_key": "k"},
+                                         200) is None, "invented number posted"
+        # And a model that declines is not turned into an answer.
+        llm.answer_question = lambda q, src, cfg: "NOTHING RELIABLE"
+        assert funfacts._answer_question(_QUESTION, {"llm_api_key": "k"},
+                                         200) is None
+    finally:
+        (funfacts._http_get_json, llm.is_configured,
+         llm.answer_question) = orig
+    print("[PASS] an answer cannot add a number no source contains")
+
+
+def test_a_page_title_is_not_a_source():
+    """The original defect, one level down. The old version posted 'Why Does
+    My Car Have Condensation Inside?' as the fact, because a search-result
+    title was treated as a sentence. It must not even reach the model."""
+    orig = funfacts._http_get_json
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    try:
+        sources = funfacts._question_sources(_QUESTION, {})
+        assert sources, "no sources at all"
+        for src in sources:
+            assert not src.endswith("?"), src
+            assert "Why Does My Car" not in src, src
+    finally:
+        funfacts._http_get_json = orig
+    print("[PASS] a search-result title is never treated as a source")
+
+
+def test_no_model_means_no_answer_rather_than_a_guess():
+    """Without a model there is no way to turn snippets into an answer, so the
+    bot says it could not find one. It does not fall back to freeform_facts,
+    which is the unsourced mode that produced the Stinker line."""
+    import llm
+    orig = (funfacts._http_get_json, llm.is_configured)
+    funfacts._http_get_json = lambda u, p, timeout=8.0: _QUESTION_DDG
+    llm.is_configured = lambda o: False
+    try:
+        assert funfacts._answer_question(_QUESTION, {}, 200) is None
+    finally:
+        (funfacts._http_get_json, llm.is_configured) = orig
+    print("[PASS] no model configured means no answer, not an unsourced guess")
+
+
+def test_a_fact_may_not_just_restate_the_question():
+    """'!funfact twitch degenerates' answered 'twitch degenerates.'
+
+    A search snippet that is the query echoed back, with a full stop added,
+    gets past the fragment check (it has a full stop, and 'degenerates' is a
+    verb) and past the attribution check (it names the subject, because it IS
+    the subject). What it lacks is a single word the asker did not type.
+    """
+    for echo, subject in (("twitch degenerates.", "twitch degenerates"),
+                          ("twitch degenerates", "twitch degenerates"),
+                          ("Trail mix.", "trail mix"),
+                          ("Illinois.", "illinois")):
+        assert funfacts._is_echo(echo, subject), (echo, subject)
+        assert funfacts._ranked_facts([echo], subject=subject,
+                                     require_subject=True) == [], echo
+    # A fact adds something the asker did not already say.
+    for fact, subject in (
+            ("The dew point is the temperature to which air must be cooled.",
+             "temperature condensation"),
+            ("Illinois was admitted as a state in 1818.", "illinois"),
+            ("Trail mix is a snack of dried fruit, nuts and chocolate.",
+             "trail mix")):
+        assert not funfacts._is_echo(fact, subject), (fact, subject)
+        assert funfacts._ranked_facts([fact], subject=subject,
+                                     require_subject=True), fact
+    # No subject means no opinion.
+    assert not funfacts._is_echo("Anything at all.", "")
+    print("[PASS] an echoed question is not accepted as a fact")
+
+
+def test_no_model_says_why_rather_than_failing_silently():
+    """The reason a question went unanswered has to be visible. Without a log
+    line, a missing API key is indistinguishable from a search that found
+    nothing, and it reads as a bug in the lookup."""
+    import contextlib
+    import llm
+
+    buf = io.StringIO()
+    orig = llm.is_configured
+    llm.is_configured = lambda o: False
+    try:
+        funfacts._log_once.discard("no_llm")
+        with contextlib.redirect_stdout(buf):
+            assert funfacts._answer_question("why is the sky blue", {},
+                                             200) is None
+    finally:
+        llm.is_configured = orig
+        funfacts._log_once.discard("no_llm")
+    out = buf.getvalue()
+    assert "no LLM is configured" in out, out
+    assert "llm_api_key" in out, out
+    print("[PASS] an unanswerable question names the reason in the log")
+
+
+def test_tavily_supplies_the_sources_a_question_needs():
+    """DuckDuckGo's Instant Answer returns an empty abstract for most
+    free-form questions, which left the question path with nothing to ground
+    an answer in. Tavily exists for exactly this - retrieve text for a model
+    to read - so it is tried first when a key is present."""
+    import json as _json
+    import urllib.request as _ur
+
+    payload = {"results": [
+        {"title": "Dew point", "content":
+         "The dew point is the temperature to which air must be cooled to "
+         "become saturated with water vapour. Condensation stops once the "
+         "surface warms above it.", "url": "https://example.org/dew"},
+        {"title": "Not a sentence", "content": "car condensation tips"},
+    ]}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps(payload).encode()
+
+    orig = _ur.urlopen
+    _ur.urlopen = lambda req, timeout=10: _Resp()
+    try:
+        got = funfacts._question_sources(
+            "what temperature does condensation stop occuring on a windshield?",
+            {"tavily_api_key": "tvly-KEY"})
+    finally:
+        _ur.urlopen = orig
+    assert got, "Tavily results produced no sources"
+    assert any("dew point" in g.lower() for g in got), got
+    # The title fragment is not a sentence and must not be a source.
+    assert not any(g.strip() == "car condensation tips" for g in got), got
+    print("[PASS] Tavily supplies real source text for a free-form question")
+
+
+def test_spicy_mode_still_answers_questions():
+    """A config value silently disabled the whole question path.
+
+    It was gated on `not spicy`, and "spice": "spicy" is a normal setting - so
+    on the channels most likely to ask odd questions, every question returned
+    "couldn't find any fun facts" and nothing was logged. Two wrong diagnoses
+    were given before the gate was found, which is what a test is for.
+    """
+    import json as _json
+    import urllib.request as _ur
+
+    payload = {"results": [{"title": "Dew point", "content":
+                            "The dew point is the temperature to which air "
+                            "must be cooled to become saturated with water "
+                            "vapour.", "url": "https://example.org/dew"}]}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps(payload).encode()
+
+    import llm
+    orig = (_ur.urlopen, llm.is_configured, llm.answer_question)
+    _ur.urlopen = lambda req, timeout=10: _Resp()
+    llm.is_configured = lambda o: True
+    llm.answer_question = lambda q, src, cfg: (
+        "Condensation stops once the windshield warms above the dew point.")
+    try:
+        for spice in ("spicy", "clean"):
+            funfacts._cache.clear()
+            got = funfacts.get_funfact(
+                "what temperature does condensation stop occuring on a "
+                "windshield?",
+                {"spice": spice, "llm_api_key": "k", "tavily_api_key": "tvly",
+                 "max_fact_chars": 200})
+            assert got and got["fact"], (spice, got)
+            assert "dew point" in got["fact"].lower(), (spice, got["fact"])
+    finally:
+        (_ur.urlopen, llm.is_configured, llm.answer_question) = orig
+        funfacts._cache.clear()
+    print("[PASS] spicy mode answers questions too")
+
+
+def test_the_geocoder_may_not_substitute_a_different_place():
+    """'!funfact stinker' answered 'FunFact | Lermoos: Lermoos is a
+    municipality in the district of Reutte in the Austrian state of Tyrol.'
+
+    The geocoder resolved a word that is not a place to somewhere in the
+    Tyrol, and the bot then answered about that place under its own heading.
+    Nobody asked about Lermoos. Only follow the geocoder when what it found is
+    a variant of the name that was typed.
+    """
+    orig = funfacts._osm_geocode
+    funfacts._osm_geocode = lambda q: {"name": "Lermoos", "state": "Tyrol",
+                                       "country": "Austria", "lat": 47.4,
+                                       "lon": 10.9, "county": "Reutte"}
+    try:
+        got = funfacts._lookup_all("stinker", {}, False, 200)
+        assert not (got and got.get("facts")), got
+        if got:
+            assert not any("Lermoos" in f for f in got["facts"]), got
+    finally:
+        funfacts._osm_geocode = orig
+
+    # A real place whose canonical form differs still works.
+    saved = (funfacts._osm_geocode, funfacts._try_sources)
+    funfacts._osm_geocode = lambda q: {"name": "Lakemont",
+                                       "state": "Pennsylvania",
+                                       "country": "United States",
+                                       "lat": 40.6, "lon": -78.3,
+                                       "county": "Blair"}
+    funfacts._try_sources = lambda q, sp, lim, o=None: (
+        {"place": "Lakemont, Pennsylvania",
+         "facts": ["It was first settled in 1800."]}
+        if "Lakemont" in q else None)
+    try:
+        got = funfacts._lookup_all("lakemont pa", {}, False, 200)
+        assert got and got["facts"], got
+    finally:
+        (funfacts._osm_geocode, funfacts._try_sources) = saved
+    print("[PASS] the geocoder cannot substitute a different place")
+
+
+def test_weather_uses_current_data_not_an_archive_search_snippet():
+    """Exact field report: the bot called an archive-page snippet weather.
+    A weather question must return Open-Meteo's current conditions and never
+    touch the generic lookup ladder, even when the live API has a problem."""
+    saved = (funfacts._osm_geocode, funfacts._http_get_json,
+             funfacts._lookup_all)
+    calls = []
+    funfacts._osm_geocode = lambda place: {
+        "name": "Marshall", "state": "Illinois", "country": "United States",
+        "lat": 39.39, "lon": -87.69}
+
+    def _http(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        assert url == funfacts.OPEN_METEO_API, url
+        assert "temperature_2m" in params.get("current", ""), params
+        assert params.get("temperature_unit") == "fahrenheit", params
+        return {"timezone": "America/Chicago",
+                "current": {"time": "2026-09-15T22:10",
+                            "temperature_2m": 68.2,
+                            "apparent_temperature": 65.8,
+                            "relative_humidity_2m": 59,
+                            "precipitation": 0,
+                            "weather_code": 2,
+                            "wind_speed_10m": 11.6,
+                            "wind_direction_10m": 250,
+                            "wind_gusts_10m": 18.7}}
+
+    funfacts._http_get_json = _http
+    funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a weather question reached generic search"))
+    question = "what is the weather in Marshall, IL"
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        got = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got == {
+            "place": "Marshall, Illinois", "kind": "Weather",
+            "fact": ("Currently 68°F with partly cloudy skies; feels like "
+                     "66°F; humidity 59%; wind WSW at 12 mph, gusting to "
+                     "19 mph.")}, got
+        assert len(calls) == 1, calls
+        # Current conditions use a short cache and retain the Weather label.
+        again = funfacts.get_funfact(question, {"answer_questions": True})
+        assert again == got and len(calls) == 1, (again, calls)
+
+        # API failure is honest; archive/search text still cannot take over.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("weather service unavailable"))
+        failed = funfacts.get_funfact(question, {"answer_questions": True})
+        assert failed["kind"] == "Weather", failed
+        assert "couldn't fetch the current weather" in failed["fact"], failed
+        assert "last weeks" not in failed["fact"], failed
+    finally:
+        (funfacts._osm_geocode, funfacts._http_get_json,
+         funfacts._lookup_all) = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] weather returns current Open-Meteo conditions, never snippets")
+
+
+def test_sunrise_uses_live_clock_data_not_search_debris():
+    """Exact live-fire query: a search snippet said only “all times are local”.
+    Sunrise/sunset must use geocoded Open-Meteo data, include the actual clock
+    time, and retain its non-FunFact label after passing through the cache."""
+    original_geo, original_http = funfacts._osm_geocode, funfacts._http_get_json
+    calls = []
+    funfacts._osm_geocode = lambda place: {
+        "name": "Vandalia", "state": "Illinois", "country": "United States",
+        "lat": 38.96, "lon": -89.09}
+
+    def _http(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        if url == funfacts.OPEN_METEO_GEOCODE_API:
+            return {"results": [
+                {"name": "Vandalia", "admin1": "Ohio",
+                 "country": "United States", "latitude": 39.9,
+                 "longitude": -84.2},
+                {"name": "Vandalia", "admin1": "Illinois",
+                 "admin2": "Fayette", "country": "United States",
+                 "latitude": 38.96, "longitude": -89.09}]}
+        assert url == funfacts.OPEN_METEO_API, url
+        return {"timezone": "America/Chicago",
+                "daily": {"time": ["2026-09-15", "2026-09-16"],
+                          "sunrise": ["2026-09-15T06:38",
+                                      "2026-09-16T06:39"],
+                          "sunset": ["2026-09-15T19:05",
+                                     "2026-09-16T19:03"]}}
+
+    funfacts._http_get_json = _http
+    question = "what time we expecting sunrise today in Vandalia, IL ?"
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        got = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got == {"place": "Vandalia, Illinois",
+                       "fact": "Sunrise is expected around 6:38 AM local time today.",
+                       "kind": "Sunrise"}, got
+        assert len(calls) == 1, calls
+        # Cache output must retain kind; losing it recreated “FunFact | ...”.
+        got2 = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got2["kind"] == "Sunrise" and "6:38 AM" in got2["fact"], got2
+        assert len(calls) == 1, "live lookup ignored its short cache"
+        # If Nominatim is unavailable, Open-Meteo's geocoder is a second
+        # keyless route and must honor the requested state, not the first city
+        # with the same name.
+        funfacts._osm_geocode = lambda place: None
+        tomorrow = funfacts._solar_answer(
+            "what time is sunset tomorrow in Vandalia, IL?")
+        assert tomorrow["kind"] == "Sunset", tomorrow
+        assert tomorrow["place"] == "Vandalia, Illinois", tomorrow
+        assert "7:03 PM" in tomorrow["facts"][0], tomorrow
+        assert [c[0] for c in calls[-2:]] == [
+            funfacts.OPEN_METEO_GEOCODE_API, funfacts.OPEN_METEO_API], calls
+    finally:
+        funfacts._osm_geocode, funfacts._http_get_json = original_geo, original_http
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] sunrise/sunset returns the actual local clock time")
+
+
 def main():
     test_trim()
+    test_trim_keeps_whole_sentences()
+    test_smk_game()
     test_rotation()
     test_busy_unavailable()
     test_spicy_db()
+    test_curated_girard_facts()
+    test_curated_indian_lake_facts()
+    test_curated_entry_region_match()
+    test_curated_cuba_missouri()
     test_ranked_dedupe()
     test_ranked_filter()
     test_parse_geocode()
@@ -514,17 +3196,92 @@ def main():
     test_spicy_dig()
     test_bio_filter()
     test_definition_filter()
+    test_region_word_boundaries()
+    test_full_state_name_region()
+    test_comma_less_region()
+    test_namesake_ranking()
+    test_namesake_person_stubs()
+    test_location_line_never_outranks_history()
+    test_attraction_ranking()
+    test_editorialising_is_not_a_rewrite()
     test_explicit_filter()
+    test_tasteless_filter()
     test_grounded_filter()
+    test_residence_claim_needs_a_seed()
+    test_reputation_claims_need_a_source()
+    test_padding_claims_dropped()
+    test_invented_claim_filter()
+    test_county_hanging_reattribution()
+    test_search_seeds_and_query()
+    test_short_year_grounding()
+    test_llm_only_mode()
     test_weird_fallback()
     test_merge_curated()
     test_region_dig()
     test_fit_fact()
     test_filler_filter()
     test_meta_line_filter()
+    test_llm_preamble_dropped()
+    test_llm_duplicate_lines_deduped()
     test_serper_source()
+    test_search_key_beats_duckduckgo()
+    test_namesake_articles_are_not_harvested()
+    test_namesake_company_is_not_harvested()
+    test_spicy_dig_respects_the_region()
+    test_padded_praise_is_dropped()
     test_wiki_multi_title()
+    test_full_article_extract()
+    test_wrong_place_harvest()
+    test_work_titles_not_harvested()
+    test_html_entities_unescaped()
     test_wiki_cooldown()
+    test_harvested_facts_must_stand_alone()
+    test_real_facts_survive_the_stand_alone_gate()
+    test_facts_are_ranked_by_relevance_to_what_was_asked()
+    test_topic_lookup_answers_anything_with_an_article()
+    test_topic_lookup_prefers_the_article_actually_asked_for()
+    test_topic_lookup_says_nothing_rather_than_guessing()
+    test_a_search_snippet_must_be_about_the_thing_asked()
+    test_the_subject_check_allows_normal_variants()
+    test_a_question_is_answered_from_what_a_search_returned()
+    test_a_one_typo_query_still_finds_the_article()
+    test_the_question_path_also_searches_wikipedia()
+    test_skip_llm_declines_without_touching_the_model()
+    test_a_dead_model_still_gets_the_records()
+    test_a_misspelled_dish_still_gets_its_facts()
+    test_a_namesake_cannot_label_or_speak_for_the_subject()
+    test_a_one_fact_answer_gets_deepened_and_rotates()
+    test_engine_debris_never_reaches_chat()
+    test_deep_article_text_must_name_its_subject()
+    test_an_answer_cannot_open_on_a_bare_pronoun()
+    test_countries_strip_and_substrings_do_not_name()
+    test_stories_outrank_sizes_inventory_and_definitions()
+    test_a_compound_entity_is_not_the_subject()
+    test_uk_constituent_countries_strip_as_regions()
+    test_the_question_path_digs_past_the_lead()
+    test_a_contentless_answer_is_not_posted()
+    test_the_fact_path_cannot_answer_a_promise()
+    test_the_dig_finds_records_the_question_does_not_name()
+    test_teasers_and_splices_never_post()
+    test_record_claims_and_glued_lists_never_post()
+    test_headings_in_sentence_case_and_captions_never_post()
+    test_a_long_fact_is_cut_at_a_clause_never_a_dangler()
+    test_a_generated_half_quote_is_repaired_before_chat()
+    test_hype_answers_and_demonyms_do_not_count()
+    test_the_question_search_tries_simpler_subjects()
+    test_the_records_miner_answers_when_the_model_will_not()
+    test_the_records_miner_stays_on_topic()
+    test_caption_dates_never_post()
+    test_an_answer_may_not_add_what_the_sources_do_not_say()
+    test_a_page_title_is_not_a_source()
+    test_no_model_means_no_answer_rather_than_a_guess()
+    test_a_fact_may_not_just_restate_the_question()
+    test_no_model_says_why_rather_than_failing_silently()
+    test_tavily_supplies_the_sources_a_question_needs()
+    test_spicy_mode_still_answers_questions()
+    test_the_geocoder_may_not_substitute_a_different_place()
+    test_weather_uses_current_data_not_an_archive_search_snippet()
+    test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0
 

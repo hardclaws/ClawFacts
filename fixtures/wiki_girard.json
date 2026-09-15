@@ -1,0 +1,144 @@
+{
+  "note": "Real MediaWiki API responses for `!funfact girard, OH`, recorded 2026-08-27 so the lookup can be replayed end to end without network access. 'extract_pages' is the sequence the API actually returns for one batched explaintext request: ONE page plus a continue token, which is the bug mock_live_test.py covers.",
+  "search": {
+    "girard, oh": {
+      "query": {
+        "searchinfo": {
+          "totalhits": 485
+        },
+        "search": [
+          {
+            "ns": 0,
+            "title": "Girard, Ohio",
+            "pageid": 129869
+          },
+          {
+            "ns": 0,
+            "title": "Girard City School District",
+            "pageid": 82179279
+          },
+          {
+            "ns": 0,
+            "title": "Alabama Crimson Tide women's gymnastics",
+            "pageid": 22085616
+          },
+          {
+            "ns": 0,
+            "title": "Pat Meyer",
+            "pageid": 38350421
+          },
+          {
+            "ns": 0,
+            "title": "SCW Southwest Junior Heavyweight Championship",
+            "pageid": 9767070
+          },
+          {
+            "ns": 0,
+            "title": "Ohio–Pennsylvania League",
+            "pageid": 4743372
+          }
+        ]
+      }
+    },
+    "girard": {
+      "query": {
+        "searchinfo": {
+          "totalhits": 10439
+        },
+        "search": [
+          {
+            "ns": 0,
+            "title": "Girard",
+            "pageid": 390962
+          },
+          {
+            "ns": 0,
+            "title": "René Girard",
+            "pageid": 1345074
+          },
+          {
+            "ns": 0,
+            "title": "Stephen Girard",
+            "pageid": 1102647
+          },
+          {
+            "ns": 0,
+            "title": "Girard (surname)",
+            "pageid": 39888886
+          },
+          {
+            "ns": 0,
+            "title": "Albert Girard",
+            "pageid": 3615216
+          },
+          {
+            "ns": 0,
+            "title": "Joe Girard",
+            "pageid": 3189396
+          }
+        ]
+      }
+    }
+  },
+  "extract_pages": [
+    {
+      "continue": {
+        "excontinue": 1,
+        "continue": "||"
+      },
+      "warnings": {
+        "extracts": {
+          "warnings": "\"exlimit\" was too large for a whole article extracts request, lowered to 1."
+        }
+      },
+      "query": {
+        "pages": [
+          {
+            "pageid": 129869,
+            "ns": 0,
+            "title": "Girard, Ohio",
+            "extract": "Girard is a city in southern Trumbull County, Ohio, United States, along the Mahoning River. The population was 9,603 at the 2020 census. Located directly north of Youngstown, it is a suburb in the Youngstown–Warren metropolitan area.\n\n\n== History ==\nIt is believed that Girard takes its name from Stephen Girard, a French American philanthropist who was the founder of the Girard Bank and Girard College in Philadelphia. It was first settled in 1800 but remained static until the Ohio and Erie Canal was completed.\n\n\n== Geography ==\nAccording to the United States Census Bureau, the city has a total area of 6.37 square miles (16.50 km2), of which 5.88 square miles (15.23 km2) is land and 0.49 square miles (1.27 km2) is water.\n\n\n== Demographics ==\n\n\n=== 2020 census ===\nAs of the 2020 census, Girard had a population of 9,603. The median age was 41.1 years. 20.6% of residents were under the age of 18 and 19.8% of residents were 65 years of age or older. For every 100 females there were 91.4 males, and for every 100 females age 18 and over there were 89.9 males age 18 and over.\n100.0% of residents lived in urban areas, while 0.0% lived in rural areas.\nThere were 4,304 households in Girard, of which 25..."
+          },
+          {
+            "pageid": 1102647,
+            "ns": 0,
+            "title": "Stephen Girard"
+          },
+          {
+            "pageid": 3189396,
+            "ns": 0,
+            "title": "Joe Girard"
+          },
+          {
+            "pageid": 4743372,
+            "ns": 0,
+            "title": "Ohio–Pennsylvania League"
+          },
+          {
+            "pageid": 38350421,
+            "ns": 0,
+            "title": "Pat Meyer"
+          },
+          {
+            "pageid": 82179279,
+            "ns": 0,
+            "title": "Girard City School District"
+          }
+        ]
+      }
+    },
+    {
+      "batchcomplete": true,
+      "query": {
+        "pages": [
+          {
+            "pageid": 1102647,
+            "ns": 0,
+            "title": "Stephen Girard",
+            "extract": "Stephen Girard (born Étienne Girard; May 20, 1750 – December 26, 1831) was a French-born American banker and philanthropist. Born in Bordeaux, Girard subsequently immigrated to the Thirteen Colonies where he established himself in the American banking industry. During the War of 1812, Girard single-handedly saved the federal government of the United States from bankruptcy by personally financing the American war effort. \nEventually accumulating a large estate which included a slave plantation in Louisiana, Girard was, according to a 2007 article in Fortune Magazine the fourth-richest American in history. Having no children, Girard devoted much of his fortune to philanthropy, in particular the education and welfare of orphans, and his estate continues to fund philanthropic endeavors in the present day.\n\n\n== Early life ==\n\nGirard was born in Bordeaux, France, on May 20, 1750, the son of a sea captain. He lost the sight in his right eye at the age of eight and had little education. In 1760, he travelled to the colony of New York as a cabin boy and stayed there, working in the coastal trader system along the east coast and as far south as the Caribbean. He was licensed as a captain in 1773..."
+          }
+        ]
+      }
+    }
+  ]
+}

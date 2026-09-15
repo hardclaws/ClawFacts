@@ -1,0 +1,57 @@
+{
+  "_note": "Verbatim titles/extracts from en.wikipedia.org for the two searches _wikipedia() runs for 'Conway, missouri'. Fetched 2026-08-27. 'Conway Publishing' did not appear in either result set on that date, but the 10:52 log proves the bot reached it, so it is included here to pin the gate that must reject it.",
+  "queries": {
+    "Conway, missouri": [
+      {
+        "title": "Conway, Missouri",
+        "extract": "Conway is a city in Laclede County, Missouri, United States. As of the 2020 census, Conway had a population of 729. Conway is located 15 miles (24 km) southwest of Lebanon.\n\n\n== History ==\nConway was platted in 1869, and named after a local merchant. A post office has been in operation at Conway since 1871.\n\n\n== Geography ==\nAccording to the United States Census Bureau, the city has a total area of 1.83 square miles (4.74 km2)."
+      },
+      {
+        "title": "Conway",
+        "extract": "Conway may refer to: Conway, Arkansas Conway County, Arkansas Lake Conway, Arkansas Conway, Florida Conway, Missouri Conway, New Hampshire"
+      },
+      {
+        "title": "Conway High School",
+        "extract": "Conway High School may refer to: Conway High School (Arkansas) - Conway, Arkansas Conway High School (Missouri) - Conway, Missouri"
+      },
+      {
+        "title": "Stanley Ketchel",
+        "extract": "Stanisław Kiecal (September 14, 1886 – October 15, 1910), better known in the boxing world as Stanley Ketchel, was an American professional boxer who became one of the greatest World Middleweight Champions in history. He was nicknamed \"The Michigan Assassin.\" He was murdered at a ranch in Conway, Missouri, at the age of 24."
+      },
+      {
+        "title": "Conway Twitty",
+        "extract": "Harold Lloyd Jenkins (September 1, 1933 – June 5, 1993), better known by his stage name Conway Twitty, was an American singer and songwriter."
+      },
+      {
+        "title": "Leroy Blunt",
+        "extract": "Leroy Blunt attended schools in Conway, Missouri, and the University of Missouri. In 1942, he married Neva Letterman."
+      }
+    ],
+    "conway": [
+      {
+        "title": "Conway",
+        "extract": "Conway may refer to: Conway, Arkansas Conway County, Arkansas"
+      },
+      {
+        "title": "Conway Publishing",
+        "extract": "Conway Publishing, formerly Conway Maritime Press, is an imprint of Bloomsbury Publishing. It is best known for its publications dealing with nautical subjects.\n\n\n== History ==\nConway Maritime Press was founded in 1972 as an independent publisher. Its origins lay in catering for a specialised readership, publishing quarterly journals such as Model Shipwright and Warship. Over its history, it has built an extensive catalogue of books specialising in maritime heritage, ship design and construction, and naval military history, from authoritative figures such as Brian Lavery, 'one of the best naval historians in Britain, if not the world,' according to BBC History Magazine."
+      },
+      {
+        "title": "George Conway",
+        "extract": "George Thomas Conway III (born September 2, 1963) is an American lawyer and activist."
+      },
+      {
+        "title": "Kellyanne Conway",
+        "extract": "Kellyanne Elizabeth Conway (née Fitzpatrick; born January 20, 1967) is an American political consultant and pollster."
+      },
+      {
+        "title": "Tim Conway",
+        "extract": "Thomas Daniel \"Tim\" Conway (December 15, 1933 – May 14, 2019) was an American comedian, actor, writer, and director."
+      },
+      {
+        "title": "Lynn Conway",
+        "extract": "Lynn Ann Conway (January 2, 1938 – June 9, 2024) was an American computer scientist, electrical engineer, and transgender rights activist."
+      }
+    ]
+  }
+}

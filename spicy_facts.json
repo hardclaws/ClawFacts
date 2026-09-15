@@ -3,7 +3,12 @@
   "entries": [
     {
       "name": "Las Vegas, Nevada",
-      "keys": ["las vegas", "las vegas nv", "las vegas nevada", "vegas"],
+      "keys": [
+        "las vegas",
+        "las vegas nv",
+        "las vegas nevada",
+        "vegas"
+      ],
       "facts": [
         "The Strip isn't actually in Las Vegas — it sits in unincorporated Paradise, Nevada. The name was not a coincidence.",
         "Prostitution is illegal in Clark County, which is exactly why Nevada's legal brothels huddle just outside city limits. Supply and demand is a beautiful thing.",
@@ -13,7 +18,11 @@
     },
     {
       "name": "Reno, Nevada",
-      "keys": ["reno", "reno nv", "reno nevada"],
+      "keys": [
+        "reno",
+        "reno nv",
+        "reno nevada"
+      ],
       "facts": [
         "Reno was America's quickie-divorce capital — in the 1900s you could end a marriage with a six-week stay. The original easy-out.",
         "Reno calls itself the Biggest Little City in the World, which sounds like a personal problem.",
@@ -22,7 +31,11 @@
     },
     {
       "name": "Pahrump, Nevada",
-      "keys": ["pahrump", "pahrump nv", "pahrump nevada"],
+      "keys": [
+        "pahrump",
+        "pahrump nv",
+        "pahrump nevada"
+      ],
       "facts": [
         "The Chicken Ranch, a legal brothel opened in 1976, sits just outside Pahrump — the closest legal 'hospitality' to Las Vegas.",
         "In 1978 the Chicken Ranch burned down in a suspected arson — and reopened from trailers five days later. Motivated."
@@ -30,7 +43,12 @@
     },
     {
       "name": "New Orleans, Louisiana",
-      "keys": ["new orleans", "new orleans la", "new orleans louisiana", "nola"],
+      "keys": [
+        "new orleans",
+        "new orleans la",
+        "new orleans louisiana",
+        "nola"
+      ],
       "facts": [
         "Storyville was America's only legal red-light district, running 1897–1917 until the Navy shut it down in WWI. Sailors: ruining fun since forever.",
         "Storyville even printed 'blue books' — guidebooks to the brothels with prices, services, and 'stock.' Yelp, 1905 edition."
@@ -38,7 +56,11 @@
     },
     {
       "name": "Butte, Montana",
-      "keys": ["butte", "butte mt", "butte montana"],
+      "keys": [
+        "butte",
+        "butte mt",
+        "butte montana"
+      ],
       "facts": [
         "Butte's Dumas Brothel ran from 1890 to 1982 — the longest in U.S. history. Customer loyalty, achieved.",
         "The Dumas' last madam shot her husband in a bar in 1959, served nine months, then went right back to running the place."
@@ -46,7 +68,11 @@
     },
     {
       "name": "Wallace, Idaho",
-      "keys": ["wallace", "wallace id", "wallace idaho"],
+      "keys": [
+        "wallace",
+        "wallace id",
+        "wallace idaho"
+      ],
       "facts": [
         "Wallace, Idaho ran brothels openly until 1991 — one is now a museum, and you can rent a former brothel on Airbnb.",
         "Wallace hid its brothels in plain sight for over a century. Subtlety was not their strong suit."
@@ -54,14 +80,22 @@
     },
     {
       "name": "Tombstone, Arizona",
-      "keys": ["tombstone", "tombstone az", "tombstone arizona"],
+      "keys": [
+        "tombstone",
+        "tombstone az",
+        "tombstone arizona"
+      ],
       "facts": [
         "The O.K. Corral gunfight lasted about 30 seconds. Tombstone has been milking it for 140 years."
       ]
     },
     {
       "name": "Deadwood, South Dakota",
-      "keys": ["deadwood", "deadwood sd", "deadwood south dakota"],
+      "keys": [
+        "deadwood",
+        "deadwood sd",
+        "deadwood south dakota"
+      ],
       "facts": [
         "Wild Bill Hickok was shot dead in Deadwood holding aces and eights — the 'dead man's hand.' Literally a losing hand.",
         "Deadwood's saloons, gambling, and brothels made it the wildest boomtown of the Black Hills gold rush."
@@ -69,7 +103,11 @@
     },
     {
       "name": "Fort Worth, Texas",
-      "keys": ["fort worth", "fort worth tx", "fort worth texas"],
+      "keys": [
+        "fort worth",
+        "fort worth tx",
+        "fort worth texas"
+      ],
       "facts": [
         "Hell's Half Acre was Fort Worth's official red-light district from the 1870s — saloons, gambling dens and brothels built for trail-weary cowboys.",
         "By 1907 the Acre had dozens of 'crib' shacks selling sex for pocket change, plus a gunfight between gambler Luke Short and marshal Jim Courtright.",
@@ -78,7 +116,11 @@
     },
     {
       "name": "Dodge City, Kansas",
-      "keys": ["dodge city", "dodge city ks", "dodge city kansas"],
+      "keys": [
+        "dodge city",
+        "dodge city ks",
+        "dodge city kansas"
+      ],
       "facts": [
         "Dodge City's Front Street packed saloons, gambling halls and brothels to serve cowboys fresh off the cattle trail — the 'Queen of the Cowtowns.'",
         "Between 1877 and 1886 Dodge City was one of the most dangerous towns in America, where gunfights were just the evening entertainment."
@@ -86,7 +128,11 @@
     },
     {
       "name": "Fresno, California",
-      "keys": ["fresno", "fresno ca", "fresno california"],
+      "keys": [
+        "fresno",
+        "fresno ca",
+        "fresno california"
+      ],
       "facts": [
         "Fresno's Chinatown was once a red-light district — its underground tunnels and basements hid gambling and prostitution for decades.",
         "Chinese immigrants who built the railroad were pushed west of the tracks into Chinatown, where the vice trade thrived."
@@ -94,7 +140,11 @@
     },
     {
       "name": "Milford, Pennsylvania",
-      "keys": ["milford pa", "milford pennsylvania", "milford pike county"],
+      "keys": [
+        "milford pa",
+        "milford pennsylvania",
+        "milford pike county"
+      ],
       "facts": [
         "Gambino crime boss John Gotti kept a hilltop estate in Milford — the Pennsylvania Crime Commission said he entertained mob associates there.",
         "Gotti's $300,000 Milford Heights estate was bought in 1988 through his son and son-in-law, per Pike County deed records.",
@@ -103,7 +153,11 @@
     },
     {
       "name": "Lords Valley, Pennsylvania",
-      "keys": ["lords valley", "lords valley pa", "lords valley pennsylvania"],
+      "keys": [
+        "lords valley",
+        "lords valley pa",
+        "lords valley pennsylvania"
+      ],
       "facts": [
         "Lords Valley sits in the Pocono honeymoon belt: Cove Haven's Morris Wilkins invented the heart-shaped bathtub in 1963, making the Poconos the 'Honeymoon Capital of the World.'",
         "The Poconos' seven-foot 'champagne glass' whirlpool for two debuted at Cove Haven in 1983 — couples climbed a staircase to soak in a giant acrylic flute."
@@ -111,11 +165,138 @@
     },
     {
       "name": "Lakeville, Pennsylvania",
-      "keys": ["lakeville", "lakeville pa", "lakeville pennsylvania", "cove haven"],
+      "keys": [
+        "lakeville",
+        "lakeville pa",
+        "lakeville pennsylvania",
+        "cove haven"
+      ],
       "facts": [
         "Cove Haven's Morris Wilkins invented the heart-shaped bathtub in 1963, turning Lakeville and the Poconos into the 'Honeymoon Capital of the World.'",
         "Cove Haven topped the tub with a seven-foot champagne-glass whirlpool for two in 1983 — couples climbed a staircase to get in."
       ]
+    },
+    {
+      "name": "Girard, Ohio",
+      "keys": [
+        "girard",
+        "girard oh",
+        "girard ohio",
+        "girard, oh",
+        "girard, ohio",
+        "girard oh ohio"
+      ],
+      "facts": [
+        "Girard's Past Times Arcade runs 600-plus pinball machines and video games, nearly all playable for $20 a day in a former grocery store.",
+        "Owner Rob Berk holds the Guinness World Record for the largest pinball collection on Earth: 1,041 machines, documented in 2024.",
+        "The Henry Barnhisel House, a Greek Revival built about 1840, is on the National Register and may have sheltered Underground Railroad travellers.",
+        "Girard's 1993 boys' basketball state title is still the only one ever won by a Trumbull County school.",
+        "Four men bought Solomon Kline's land in 1836 to found Girard; the Black Horse Tavern became the town's first post office.",
+        "Suffragist Elizabeth Hauser was born in Girard in 1873 and edited the Girard Grit before working for the national suffrage campaign."
+      ],
+      "_sources": "wkbn.com (Guinness plaque, June 2024); guinnessworldrecords.com (1,041 machines, Rob Berk of Girard); cleveland.com Feb 2025 (600+ machines, $20/day, former grocery store); tribtoday.com 'Our Heritage: Girard home to historic landmarks' (Barnhisel House, 1993 state title); girardfreelibrary.org history (1836 founding, Black Horse Tavern); neohiosuffrage.org (Elizabeth Hauser)"
+    },
+    {
+      "name": "Indian Lake, Ohio",
+      "keys": [
+        "indian lake",
+        "indian lake oh",
+        "indian lake ohio",
+        "indian lake, oh",
+        "indian lake, ohio",
+        "indian lake state park",
+        "russells point"
+      ],
+      "facts": [
+        "Indian Lake was built in the 1850s as the Lewistown Reservoir, dug by Irish laborers to feed the Miami and Erie Canal.",
+        "The canal went obsolete within years, but the lake stayed — and at 5,104 acres it's the second largest inland lake in Ohio.",
+        "Sandy Beach Amusement Park opened in 1924 billed as the 'Midwest's Million Dollar Playground' and the 'Atlantic City of the West'.",
+        "Its 2,000-foot wooden roller coaster went by four names over the years: Coaster, Thriller, Big Dipper and Silver Streak.",
+        "The Minnewawa Dance Hall hosted Paul Whiteman and Rudy Vallee, and its 1931 endurance dance marathon ran 80 days and 2 hours.",
+        "A July 4, 1961 brawl involving nearly 500 youths kicked off almost a decade of Independence Day riots at Russells Point.",
+        "Cedar Point and Kings Island finished it: the park closed in 1975 and was razed in 1982, leaving one re-lit 1920s bridge.",
+        "Local lore claims an abandoned lead mine sits under the lake, and that Chicago mobsters once used the old dancehall.",
+        "The lake's spillway is where the Great Miami River begins, and its saugeye fishing is known nationally.",
+        "Over 100,000 people turned up at Indian Lake for the 1953 Ohio Sesquicentennial celebration."
+      ],
+      "_sources": "en.wikipedia.org/wiki/Indian_Lake_(Ohio), lead + History + Sandy Beach Park + Traditions sections: Lewistown Reservoir / Irish laborers 1850s / Miami and Erie Canal / 5,104 acres second largest inland lake / opened May 29 1924 / Atlantic City of the West / 2,000-ft coaster names / Minnewawa Dance Hall, Paul Whiteman, Rudy Vallee, 1931 marathon 80 days 2 hours / July 4 1961 riot ~500 youths and repeat riots / closed 1975, razed 1982 / 1920s bridge re-lit 2010, reopened 2014 / 1953 Sesquicentennial 100,000 / Great Miami River outlet / saugeye / lead-mine and Chicago-mob lore (flagged 'citation needed' on Wikipedia, so stated as lore)"
+    },
+    {
+      "name": "Cuba, Missouri",
+      "keys": [
+        "cuba mo",
+        "cuba missouri",
+        "cuba, mo",
+        "cuba, missouri"
+      ],
+      "facts": [
+        "Four miles west of Cuba on Route 66 stands the Red Rocker, 42 feet high and for a time the world's largest rocking chair.",
+        "Cuba was Missouri's biggest apple town from 1895 to 1920 — 'The Land of the Big Red Apple' — and the barrels kept it rolling.",
+        "Bette Davis and Amelia Earhart both passed through Cuba, and both are painted into the town's Viva Cuba murals.",
+        "Cuba is the official Route 66 Mural City, named so by the Missouri legislature for its twelve outdoor murals.",
+        "The Wagon Wheel Motel, with its original guest cottages, has been taking Route 66 travellers since the 1930s.",
+        "Cuba was platted in 1857 once it was certain the railroad was coming, and named after the island of Cuba.",
+        "President Harry S. Truman stopped in Cuba on a Route 66 tour and surveyed the land that became Indian Hills Lake.",
+        "Cuba was the site of Missouri's first Adopt a Highway program."
+      ],
+      "_sources": "en.wikipedia.org/wiki/Cuba,_Missouri full article (Red Rocker 42 ft, previously the World's Largest Rocking Chair; Bette Davis and Amelia Earhart visits commemorated in the Viva Cuba Mural Project; Route 66 Mural City and twelve murals; Wagon Wheel Motel since the 1930s; platted 1857, named after the island; Truman's Route 66 tour and Indian Hills Lake; first Adopt a Highway in Missouri) + hmdb.org marker 58894 'Apples and Barrels' (1895-1920, by 1900 the largest producer/processor/distributor of apples in Missouri, barrel industry). The naming story and the Class of 1952 Havana trip were NOT included: could not verify them against a primary source."
+    },
+    {
+      "name": "Jerome, Missouri",
+      "keys": [
+        "jerome mo",
+        "jerome missouri",
+        "jerome, mo",
+        "jerome, missouri"
+      ],
+      "facts": [
+        "Jerome was platted in 1867 under the name Fremont Town, once the railroad came through the Ozarks.",
+        "Stony Dell Resort opened in 1932: a spring-fed pool, stone cabins and a restaurant built in Ozark 'giraffe stone'.",
+        "Mason Vernon Prewett built Stony Dell's bathhouse, cabins and restaurant on land his father George owned.",
+        "Interstate 44 ended it — the highway bought the land in 1965 and the pool came down a year later.",
+        "Stony Dell's stone arches and cabins still stand off Highway D, a few feet from the interstate.",
+        "Larry Baggett's folk-art Trail of Tears memorial climbs the hillside in stone walls and concrete figures.",
+        "Tie-rafters floated Ozark timber down the Gasconade to Jerome's railroad until the trade died in the 1920s."
+      ],
+      "_sources": "en.wikipedia.org/wiki/Jerome,_Missouri (whole article is 116 words: unincorporated community in western Phelps County on the Gasconade River; originally 'Fremont Town', platted 1867 when the railroad came). shsmo.org 'Stony Dell Swimming Pool and Resort' (Vernon Prewett began stonework 1927, opened five years later; land owned by George Prewett; giraffe stone architecture; spring-fed pool, bathhouse, restaurant, cabins; highway department bought the land in 1965 for I-44, demolished a year later; ruins off State Highway D). al.com Route 66 roadside attractions (Larry Baggett's Trail of Tears memorial, concrete and rock figures; Baggett died 2003). Old Settlers Gazette 2020 'The One and Only Stony Dell on Route 66' (tie-rafting on the Gasconade ended in the 1920s). The 'Fremont named by W. Greeley for John C. Fremont' detail and the 1901 Jerome Hunting and Fishing Club were NOT included: only social-media sources found."
+    },
+    {
+      "name": "Conway, Missouri",
+      "keys": [
+        "conway mo",
+        "conway missouri",
+        "conway, mo",
+        "conway, missouri"
+      ],
+      "facts": [
+        "Stanley Ketchel, world middleweight champion known as 'The Michigan Assassin', was shot in the back at a ranch near Conway on October 15, 1910. He was 24.",
+        "The ranch cook, Goldie Smith, sat Ketchel down to breakfast with his back to the door. Ranch hand Walter Dipley shot him with a rifle.",
+        "Dipley and Smith got life for the Ketchel murder. She was freed on appeal; he was paroled in 1934 after 23 years.",
+        "Ketchel's manager Wilson Mizner reportedly said: 'Tell 'em to count to ten over him and he'll get up.'",
+        "Ketchel had fallen for the Ozarks and planned to settle there and start a business before he was killed.",
+        "Conway was platted in 1869 and named after a local merchant; a post office has run there since 1871.",
+        "Conway sits in Laclede County about 15 miles southwest of Lebanon - population 729 at the 2020 census."
+      ],
+      "_sources": "Stanley Ketchel: State Historical Society of Missouri, Historic Missourians (historicmissourians.shsmo.org/stanley-ketchel, text by Erin Smither) and Wikipedia 'Stanley Ketchel'. Oct 15 1910 at Rollin P. Dickerson's ranch near Conway; cook Goldie Smith, ranch hand Walter Dipley, rifle shot in the back under the right shoulder blade; died that evening at Springfield hospital; trial Jan 1911 in Marshfield, both convicted of first-degree murder and sentenced to life; Smith freed on appeal, Dipley paroled 1934 after 23 years; Wilson Mizner's 'count to ten' line. Town history and 2020 population: Wikipedia 'Conway, Missouri'. LEFT OUT as unverifiable beyond Facebook/MapQuest: the Conway Memorial Library's founding in honour of 16-year-old Bridget Cunningham."
+    },
+    {
+      "name": "Mount Vernon, Missouri",
+      "keys": [
+        "mount vernon mo",
+        "mount vernon missouri",
+        "mount vernon, mo",
+        "mount vernon, missouri",
+        "mt vernon mo",
+        "mt vernon, mo"
+      ],
+      "facts": [
+        "Julia 'Butterfly' Hill, born in Mount Vernon, lived 738 days in a 1,000-year-old California redwood to stop it being logged. It worked.",
+        "Her tree-sit in the redwood Luna ran from December 1997 to December 1999 - the longest activist tree-sit on record.",
+        "Mount Vernon was platted in 1845 and named after George Washington's estate; a post office has run there since 1846.",
+        "It's the county seat of Lawrence County, halfway between Springfield and Joplin on I-44 - population 4,526 at the 2020 census.",
+        "The Lawrence County Courthouse and the Old Spanish Fort Archeological Site are on the National Register of Historic Places."
+      ],
+      "_sources": "Tree-sit: Wikipedia 'Julia Butterfly Hill' (born Mount Vernon, Missouri, 18 Feb 1974) and the Encyclopedia of Arkansas - 738 days in the redwood Luna, 10 Dec 1997 to 18 Dec 1999, Pacific Lumber Company, longest activist tree-sit on record. Town history, county seat, I-44, 2020 population and both NRHP listings: Wikipedia 'Mount Vernon, Missouri'. The Mount Vernon Place Historic District the bot posted is in BALTIMORE, Maryland (NRHP 71001037, listed 11 Nov 1971) and has nothing to do with this town."
     }
   ]
 }
