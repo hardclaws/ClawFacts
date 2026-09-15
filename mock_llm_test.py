@@ -260,6 +260,43 @@ def main():
     print("[PASS] a timed-out model is flagged; the question path is "
           "smaller locally")
 
+    # qwen3 wraps answers in an empty <think></think> block even with
+    # /no_think, and the token cap counts the stripped block: the
+    # warm-up's tight cap cut the answer out entirely (live-fire: 'warm-up
+    # got an empty reply from qwen3:4b'). Think blocks are stripped from
+    # every reply, and the warm-up retries generously.
+    import copy
+    orig_body = copy.deepcopy(FAKE_BODY)
+    llm.urllib.request.urlopen = _fake_urlopen
+    try:
+        FAKE_BODY["choices"][0]["message"]["content"] = \
+            "<think>\n\n</think>\nOK"
+        got = llm.chat_reply("s", "u", {"llm_api_key": "k"})
+        assert got == "OK", got
+        FAKE_BODY["choices"][0]["message"]["content"] = \
+            "<think>\nthe user wants OK. I will say it."
+        got = llm.chat_reply("s", "u", {"llm_api_key": "k"})
+        assert got == "", got            # cut inside the think: no answer
+    finally:
+        FAKE_BODY.clear()
+        FAKE_BODY.update(orig_body)
+    orig_call = llm._call
+    try:
+        caps = []
+
+        def _two(base, model, key, user, system=None, timeout=60.0,
+                 max_tokens=None):
+            caps.append(max_tokens)
+            return "OK" if len(caps) > 1 else ""
+
+        llm._call = _two
+        assert llm.warm_up({"llm_api_key": "k"}) is True
+        assert caps == [24, 200], caps
+    finally:
+        llm._call = orig_call
+    print("[PASS] think blocks are stripped; the warm-up retries with a "
+          "generous cap")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

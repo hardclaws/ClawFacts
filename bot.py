@@ -2526,6 +2526,11 @@ def run_doctor(cfg: dict) -> int:
     return 1
 
 
+#: A line that already carries its own [HH:MM:SS] stamp - the bot's own
+#: log lines do, and double-stamping them made the file noisy.
+_STAMPED = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] ")
+
+
 class _Tee:
     """Writes to the console AND a log file, so the log survives the
     window scrolling away. Enabled by setting "log_file" in config.json
@@ -2548,7 +2553,9 @@ class _Tee:
         parts = data.split("\n")
         for i, line in enumerate(parts):
             last = i == len(parts) - 1
-            if self._at_line_start and (line or not last):
+            # Never double-stamp: many lines already carry [HH:MM:SS].
+            if (self._at_line_start and (line or not last)
+                    and not _STAMPED.match(line)):
                 self._fh.write(time.strftime(self._TS))
             self._fh.write(line)
             if not last:

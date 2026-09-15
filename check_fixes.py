@@ -1321,6 +1321,13 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("qwen3's empty think block cannot eat the answer",
+         'rsplit("</think>"' in pathlib.Path("llm.py").read_text(
+             encoding="utf-8")
+         and "max_tokens=200" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "_STAMPED" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("the log survives the window: log_file tees console to a file",
          "class _Tee" in pathlib.Path("bot.py").read_text(encoding="utf-8")
          and _bot.DEFAULTS.get("log_file") == ""

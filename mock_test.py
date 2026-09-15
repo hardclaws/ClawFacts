@@ -522,10 +522,14 @@ def main():
     assert buf.getvalue() == ("[llm] hello log\n"
                               "still the same line, continued\n"), \
         buf.getvalue()
+    # A line that already carries its own stamp is never double-stamped.
+    tee.write("[13:06:00] access control: ok\n")
+    tee.flush()
     logged = open(_lp, encoding="utf-8").read()
     lines = logged.splitlines()
-    assert len(lines) == 2 and "hello log" in lines[0] \
+    assert len(lines) == 3 and "hello log" in lines[0] \
         and "continued" in lines[1], logged
+    assert lines[2] == "[13:06:00] access control: ok", logged
     assert all(_re.match(r"^\[\d{2}:\d{2}:\d{2}\] ", ln)
                for ln in lines), logged
     print("[PASS] the log tee: console untouched, file timestamped")

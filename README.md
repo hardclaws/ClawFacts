@@ -341,6 +341,12 @@ Three box-specific notes:
   full timeout before the records answered anyway. It skips straight to
   the keyless paths, and the question path itself reads fewer sources
   (5 instead of 8) with a 30s budget when local.
+- **The empty think block.** Qwen3 opens its reply with an empty
+  `<think></think>` even with `/no_think`, and a generation cap counts
+  the stripped block's tokens — a tight cap can cut the answer out
+  entirely (that's the `warm-up got an empty reply` line). Think blocks
+  are stripped from every reply on every provider, and the warm-up
+  retries with a generous cap before reporting failure.
 - **Prompt size.** On CPU the model reads every token of the prompt
   before writing a word — that read, not the generation, is what blows
   past a 20s timeout on a *warm* model. For local models the bot sends

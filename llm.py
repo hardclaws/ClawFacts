@@ -238,7 +238,18 @@ def _request(base: str, key: str, body: bytes,
     req = urllib.request.Request(base + "/chat/completions", data=body, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8", "replace"))
-    return (data["choices"][0]["message"]["content"] or "").strip()
+    text = (data["choices"][0]["message"]["content"] or "").strip()
+    # Qwen3 and other thinking models wrap the answer in a <think> block
+    # even with the /no_think soft switch. Ollama usually strips it, but
+    # not every stack does - and a generation cut mid-think leaves the
+    # block unclosed, which means the answer never started. Keep only
+    # what follows the last close tag.
+    if "<think>" in text:
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[1].strip()
+        else:
+            text = ""
+    return text
 
 
 def _call(base: str, model: str, key: str, user_prompt: str,
@@ -325,12 +336,24 @@ def warm_up(cfg: dict) -> bool:
         text = _call(base, model, key,
                      _maybe_nothink("Reply with exactly: OK", cfg),
                      "You are a warm-up probe. Reply with exactly: OK.",
-                     timeout=90.0, max_tokens=8)
+                     timeout=90.0, max_tokens=24)
     except urllib.error.HTTPError:
         return False        # already logged (404 hint, key, credits)
     except Exception as exc:
         print(f"[llm] warm-up failed: {exc!r}", flush=True)
         return False
+    if not text:
+        # qwen3 opens with an EMPTY <think></think> block even with
+        # /no_think, and the token cap counts the stripped block too - a
+        # tight cap can cut the answer right out of the budget. One
+        # generous retry, still in the background where nobody waits.
+        try:
+            text = _call(base, model, key,
+                         _maybe_nothink("Reply with exactly: OK", cfg),
+                         "You are a warm-up probe. Reply with exactly: OK.",
+                         timeout=90.0, max_tokens=200)
+        except Exception as exc:
+            print(f"[llm] warm-up retry failed: {exc!r}", flush=True)
     if text:
         print(f"[llm] warm-up OK - {model} is loaded and answering "
               f"({time.time() - started:.1f}s)", flush=True)
