@@ -1322,6 +1322,18 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("the bot cannot repeat itself or redirect to commands",
+         _ch2.too_similar("Midnight snacks and that endless horizon",
+                          ["Midnight coffee, fresh donuts, and the road",
+                           "Midnight brew, fresh donuts, and a diesel"])
+         and not _ch2.too_similar("Weighed the rig at the scale", [])
+         and _ch2.clean_line("check !funfact for the lowdown") is None
+         and "_chat_ai_own" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "Your own last lines" in pathlib.Path(
+             "chatai.py").read_text(encoding="utf-8")
+         and "point them at the !funfact command" not in pathlib.Path(
+             "chatai.py").read_text(encoding="utf-8")),
         ("emoji walls never chime; chime cadence is retuned down",
          callable(getattr(_ch2, "chime_worthy", None))
          and not _ch2.chime_worthy("\U0001f3dc\ufe0f\U0001f3dc\ufe0f")

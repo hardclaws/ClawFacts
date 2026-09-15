@@ -296,6 +296,61 @@ def test_emoji_walls_never_chime():
     print("[PASS] emoji walls never chime; real lines and mentions do")
 
 
+def test_the_bot_cannot_repeat_itself():
+    """Live-fire: the model found 'midnight coffee and donuts' and used
+    some form of it in eight straight lines ('does this bot just repeat
+    midnight over and over' - kvack). The prompt now names the bot's own
+    recent lines, a signature word reused across them declines the
+    reply, and !ask gets one redemption re-ask. The persona also never
+    redirects to commands - our own old rule told it to ('check
+    !funfact for the lowdown'), and 'docbot won't give us straight
+    answers' was the model obeying."""
+    own = ["Midnight coffee, fresh donuts, and the road that never ends",
+           "Midnight brew, fresh donuts, and the hum of a diesel"]
+    assert chatai.too_similar("Midnight snacks and that endless horizon", own)
+    assert not chatai.too_similar("Weighed the rig at the stateline scale", own)
+    assert chatai.clean_line("check !funfact for the lowdown") is None
+    assert chatai.clean_line("check the funfact command for more pal") is None
+    assert chatai.clean_line("one emoji is fine \U0001f69b") is not None
+    assert chatai.clean_line("two emoji not \U0001f69b\U0001f3dc") is None
+    assert "Your own last lines" in chatai.user_prompt(
+        [("a", "hi")], "a", "hello", own=own[:1])
+
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    b._chat_ai_own = list(own)
+    calls = []
+
+    def _model(system, user, cfg):
+        calls.append(system)
+        if len(calls) == 1:
+            return "Midnight donuts and coffee on the endless highway"
+        return "The scale house closed early. Nobody weighed anything."
+
+    orig = llm.chat_reply
+    llm.chat_reply = _model
+    try:
+        # A mention whose reply echoes the loop: declined, nothing posts.
+        b._on_message("kvack", "#t", "doc what keeps you awake at night",
+                      "kvack", "")
+        _drain(b)
+        assert b.said == [], b.said
+        assert any("too similar" in l for l in logs), logs
+        # !ask gets the redemption: the echo is re-asked, the different
+        # line posts.
+        calls.clear()
+        b._reply_ask("Hardclaws", "what is your favorite midnight snack")
+        assert len(calls) == 2, calls
+        assert "COMPLETELY different" in calls[1]
+        assert b.said and "scale house" in b.said[0], b.said
+        assert b._chat_ai_own[-1] == ("The scale house closed early. "
+                                      "Nobody weighed anything.")
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] the bot cannot repeat itself; !ask gets one redemption")
+
+
 def test_factual_questions_get_the_engine_first():
     """Field report: !ask 'what is a bongo twist?' was answered with a
     persona GUESS ('sounds like a spin on a roadside snack') while the
@@ -620,9 +675,16 @@ def test_the_quiet_room_gets_a_conversation_opener():
     b = _bot(llm_api_key="k")
     seen = []
     orig = llm.chat_reply
-    llm.chat_reply = lambda s, u, c: (seen.append(u) or
-                                      "Anyone else ever lose a whole day "
-                                      "to a weigh station line?")
+
+    def _model(s, u, c):
+        seen.append(u)
+        # Two distinct lines: the anti-echo gate would correctly decline
+        # an identical repeat of the opener.
+        return ("Anyone else ever lose a whole day to a weigh station "
+                "line?" if len(seen) == 1 else
+                "Heard a guy on the CB claim his cat navigates for him.")
+
+    llm.chat_reply = _model
     try:
         now = time.time()
         # Chat alive: no opener.
@@ -749,6 +811,7 @@ def main():
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
+    test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
     test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()

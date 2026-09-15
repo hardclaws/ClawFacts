@@ -15,11 +15,14 @@ Three layers, deliberately boring:
 
 Everything it says passes one cleaning gate: one short line, no @mentions
 (they are prepended by the caller), no links, no explicit content, at most
-two emoji. The rules a regex cannot enforce live in the system prompt:
-tease topics, never people; no threats, no creepiness, no medical or grief
-jokes; never state a fact it is not certain of (that is !funfact's job);
-never guess anything personal about anyone. A model with nothing worth
-saying replies NOTHING TO SAY and the bot stays quiet.
+one emoji, and no command syntax (the persona never sends viewers to
+!funfact - it answers itself or says nothing). The rules a regex cannot
+enforce live in the system prompt: tease topics, never people; no threats,
+no creepiness, no medical or grief jokes; never state a fact it is not
+certain of (factual questions are routed to the fact engine elsewhere);
+never guess anything personal about anyone; never repeat your own recent
+lines. A model with nothing worth saying replies NOTHING TO SAY and the
+bot stays quiet.
 
 Off by default: ``chat_ai_enabled`` in config.json.
 """
@@ -46,8 +49,14 @@ _RULES = (
     "- At most one emoji. No hashtags, no links, no @mentions.\n"
     "- Tease topics, never people. No insults, no threats, nothing "
     "creepy, no politics, no medical or grief jokes.\n"
-    "- Never state a fact you are not certain of. If chat wants a fact, "
-    "point them at the !funfact command instead.\n"
+    "- Never state a fact you are not certain of - factual questions are "
+    "answered elsewhere; you hold opinions and stories.\n"
+    "- NEVER mention or point viewers at commands like !funfact or !ask. "
+    "YOU are the one answering: answer yourself, or reply NOTHING TO "
+    "SAY.\n"
+    "- Vary every line. Never reuse a word or image from your own recent "
+    "lines (no same drink, snack or time of day), and not every line "
+    "ends with a question.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
     "- If nothing is worth saying, reply with exactly: NOTHING TO SAY\n"
 )
@@ -68,7 +77,8 @@ def system_prompt(persona: str = "") -> str:
 
 def user_prompt(lines: list, nick: str, text: str,
                 memories: list = None, quiet: bool = False,
-                max_lines: int = 15, max_memories: int = 8) -> str:
+                max_lines: int = 15, max_memories: int = 8,
+                own: list = None) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
@@ -80,6 +90,17 @@ def user_prompt(lines: list, nick: str, text: str,
     the generation - was the cost blowing past a 20s timeout on a warm
     model. Callers point these at smaller values for local models."""
     out = []
+    if own:
+        # The bot's own lines are in the room buffer too, and a small
+        # model left alone with them mimics itself - the 'midnight
+        # coffee and donuts' loop. Naming them makes the instruction
+        # impossible to miss.
+        out.append("Your own last lines - the room just saw these:")
+        out.extend(f"- {l}" for l in own[-3:])
+        out.append("Your next line must NOT reuse their words, imagery "
+                   "or openers, and must not end with a question if they "
+                   "did.")
+        out.append("")
     if memories:
         out.append("What you remember about people here (from past chat,"
                    " may be stale):")
@@ -126,8 +147,13 @@ def clean_line(line: str) -> str | None:
         return None
     if _DOMAIN.search(line):
         return None
-    if len(_EMOJI.findall(line)) > 2:
-        return None
+    if len(_EMOJI.findall(line)) > 1:
+        return None          # the rules always said at most one
+    if re.search(r"![a-zA-Z]", line):
+        return None          # command syntax belongs to viewers, not the bot
+    if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
+                 line, re.IGNORECASE):
+        return None          # "check !funfact" died with the redirect rule
     if funfacts._EXPLICIT.search(line) or funfacts._TASTELESS.search(line):
         return None
     return line
@@ -232,6 +258,41 @@ def chime_worthy(text: str) -> bool:
     answer, however it is phrased."""
     t = (text or "").strip()
     return len(t) >= 4 and len(_ALPHA.findall(t)) >= 3
+
+
+#: Common words that carry no identity - excluded from similarity.
+_STOPWORDS = frozenset((
+    "with", "that", "this", "your", "yours", "what", "whats", "when",
+    "where", "which", "does", "have", "just", "like", "them", "they",
+    "been", "over", "will", "would", "could", "from", "were", "about",
+    "while", "theres", "here", "keep", "keeps", "rolling", "road",
+))
+
+
+def _content_words(line: str) -> set:
+    return {w for w in re.findall(r"[a-z]{4,}", (line or "").lower())
+            if w not in _STOPWORDS}
+
+
+def too_similar(line: str, own_lines, jaccard: float = 0.3) -> bool:
+    """True when a candidate line repeats the bot's own recent lines.
+
+    Two signals. A SIGNATURE WORD: any content word already used in two
+    or more of the last lines - the night the model found 'midnight
+    coffee and donuts' it used some form of it in eight straight lines,
+    and chat noticed ('does this bot just repeat midnight over and
+    over'). And plain high overlap with any single recent line."""
+    words = _content_words(line)
+    recent = [_content_words(l) for l in (own_lines or [])[-3:]]
+    if not words or not recent:
+        return False
+    for w in words:
+        if sum(1 for s in recent if w in s) >= 2:
+            return True
+    for s in recent:
+        if s and len(words & s) / len(words | s) >= jaccard:
+            return True
+    return False
 
 
 #: Factual questions about a third-party thing. These have a real answer

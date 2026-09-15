@@ -293,9 +293,16 @@ everything else works without a key.
 
 What it will never do, by prompt *and* by output filter: tease people
 (only topics), post insults, threats or anything creepy, joke about
-illness or grief, state facts it is not sure of (it points at `!funfact`
-instead), guess anything personal about a viewer, or post links,
-@mentions or more than two emoji. A model with nothing worth saying
+illness or grief, state facts it is not sure of (factual questions are
+routed to the fact engine first), guess anything personal about a viewer, or post links,
+@mentions or more than one emoji, no command syntax (the persona never
+tells viewers to go use `!funfact` — it answers itself or says nothing).
+It also cannot repeat itself: its own recent lines are named in the
+prompt, and a reply reusing a signature word from them is declined
+(`!ask` gets one "say something completely different" re-ask first) —
+a small model that finds a phrase it likes will otherwise drill it into
+the ground ("midnight coffee and donuts" was a real stream). A model
+with nothing worth saying
 replies `NOTHING TO SAY` and the bot stays quiet — a decline still
 starts the cooldown, so it never hammers the API. The streamer's own
 messages never trigger it: he already has the floor.

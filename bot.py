@@ -406,6 +406,7 @@ class TwitchBot:
         self._chat_ai_last = 0.0                   # last unprompted line
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
+        self._chat_ai_own = []                  # its last lines: anti-echo
         self._chat_ai_names = set(
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
@@ -1973,9 +1974,10 @@ class TwitchBot:
             return list(self._chat_buf)
 
     def _chat_ai_line(self, lines: list, nick: str, text: str,
-                      quiet: bool = False):
+                      quiet: bool = False, vary: bool = False):
         """Compose one cleaned line, or None. Shared by chime, !ask and
-        the quiet-room opener."""
+        the quiet-room opener. `vary` re-asks after a too-similar reply
+        (explicit commands get one redemption; ambient lines do not)."""
         import llm as llm_mod
         persona = self.cfg.get("bot_personality", "") or \
             chatai.DEFAULT_PERSONA
@@ -1988,13 +1990,19 @@ class TwitchBot:
         # nothing.
         local = llm_mod._is_local(
             (self._opts.get("llm_base_url") or "").strip())
+        system = chatai.system_prompt(persona)
+        if vary:
+            system += ("\nYour previous attempt repeated your own recent "
+                       "lines. Write something COMPLETELY different: "
+                       "different words, different angle, different mood.")
         try:
             raw = llm_mod.chat_reply(
-                chatai.system_prompt(persona),
+                system,
                 chatai.user_prompt(lines, nick, text, memories,
                                    quiet=quiet,
                                    max_lines=8 if local else 15,
-                                   max_memories=4 if local else 8),
+                                   max_memories=4 if local else 8,
+                                   own=list(self._chat_ai_own)),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2094,8 +2102,16 @@ class TwitchBot:
             if quip and not quiet:
                 self._say(self._fit(f"@{nick} ", quip))
             return
+        if chatai.too_similar(line, self._chat_ai_own):
+            # A small model that found a phrase it likes will drill it
+            # into the ground; chat notices ('does this bot just repeat
+            # midnight over and over'). Decline and back off.
+            self._log(f"chat line declined - too similar to its own "
+                      f"recent lines: {line[:80]!r}")
+            return
         self._chat_ai_times = [t for t in self._chat_ai_times
                                if now - t < 3600] + [now]
+        self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
         if quiet:
             self._say(self._fit("", line))
             self._log("chat ai opened the quiet room")
@@ -2175,8 +2191,13 @@ class TwitchBot:
         if llm_mod.is_configured(self._opts):
             snapshot = self._chat_ai_snapshot()
             line = self._chat_ai_line(snapshot, nick, q)
-            if line:
+            if line and chatai.too_similar(line, self._chat_ai_own):
+                # An explicit command gets one redemption: ask again with
+                # the repetition named, then take whatever comes.
+                line = self._chat_ai_line(snapshot, nick, q, vary=True)
+            if line and not chatai.too_similar(line, self._chat_ai_own):
                 self._say(self._fit(f"@{nick} ", line))
+                self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
                 self._log(f"chat ai answered {nick}")
                 self._distill(nick, snapshot)
                 return
