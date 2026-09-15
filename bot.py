@@ -2529,15 +2529,31 @@ def run_doctor(cfg: dict) -> int:
 class _Tee:
     """Writes to the console AND a log file, so the log survives the
     window scrolling away. Enabled by setting "log_file" in config.json
-    (e.g. "bot.log"); empty means console only, the default."""
+    (e.g. "bot.log"); empty means console only, the default.
+
+    The console output is untouched; the FILE gets a [HH:MM:SS] stamp on
+    every line. Half the log lines already carry timestamps and half do
+    not ([llm], [access]), which made 'what happened at 12:47' a chore
+    to answer from a file."""
+    _TS = "[%H:%M:%S] "
 
     def __init__(self, stream, path: str):
         self._stream = stream
         self._fh = open(path, "a", encoding="utf-8", errors="replace")
+        self._at_line_start = True
 
     def write(self, data) -> int:
         self._stream.write(data)
-        self._fh.write(data)
+        data = data if isinstance(data, str) else str(data)
+        parts = data.split("\n")
+        for i, line in enumerate(parts):
+            last = i == len(parts) - 1
+            if self._at_line_start and (line or not last):
+                self._fh.write(time.strftime(self._TS))
+            self._fh.write(line)
+            if not last:
+                self._fh.write("\n")
+        self._at_line_start = parts[-1] == ""
         return len(data)
 
     def flush(self) -> None:
