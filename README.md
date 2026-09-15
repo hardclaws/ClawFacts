@@ -318,6 +318,11 @@ Three box-specific notes:
   "think" before answering, and on CPU that turns a one-line reply into
   a half-minute stall — every timeout goes off and the bot goes quiet.
   The switch makes them answer directly. No effect on other models.
+- **Warm-up.** The bot sends one tiny request at startup (in the
+  background) purely to load the model: a cold 8B load takes 10–25s,
+  longer than any chat timeout, and without this the first line of chat
+  after every restart dies with a timeout. Watch for
+  `[llm] warm-up OK - qwen3:8b …` in the log after the join.
 - **Keep-alive.** Ollama unloads an idle model after a few minutes, and
   the bot asks maybe six times an hour — so it would often arrive to a
   cold 10–20s load. Raise the service default so the model stays

@@ -154,6 +154,21 @@ def main():
         llm.urllib.request.urlopen = orig
     print("[PASS] llm_no_think appends Qwen3's switch to every prompt")
 
+    # The warm-up: one tiny request at startup so the first line of chat
+    # does not pay the model's cold start (10-25s for a local 8B model).
+    llm.reset_disable_state()
+    llm.urllib.request.urlopen = _fake_urlopen
+    try:
+        captured.clear()
+        assert llm.warm_up({"llm_api_key": "k"}) is True
+        body = json.loads(captured[-1]["body"])
+        assert body["messages"][-1]["content"].endswith("OK"), body
+        assert llm.warm_up({}) is False      # unconfigured: no request
+        assert len(captured) == 1, captured
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] warm-up loads the model at startup; unconfigured skips")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

@@ -263,6 +263,42 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
         return None
 
 
+def warm_up(cfg: dict) -> bool:
+    """Load the model at startup so the first real line of chat does not
+    pay the cold start.
+
+    A local Ollama takes 10-25s to load an 8B model into RAM - longer
+    than any chat timeout is allowed to be (chat_reply clamps at 30s) -
+    but only the first request pays it. This pays it in the background,
+    where nobody is waiting, with a timeout no chat line would ever get.
+    Hosted APIs pay nothing but one tiny request - and as a side effect
+    a dead model slug (a retired OpenRouter ID) surfaces at startup,
+    not at the first mention.
+    """
+    if not is_configured(cfg) or _unavailable():
+        return False
+    key = (cfg.get("llm_api_key") or "").strip()
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    model = cfg.get("llm_model") or (
+        OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    started = time.time()
+    try:
+        text = _call(base, model, key,
+                     _maybe_nothink("Reply with exactly: OK", cfg),
+                     "You are a warm-up probe. Reply with exactly: OK.",
+                     timeout=90.0)
+    except urllib.error.HTTPError:
+        return False        # already logged (404 hint, key, credits)
+    except Exception as exc:
+        print(f"[llm] warm-up failed: {exc!r}", flush=True)
+        return False
+    if text:
+        print(f"[llm] warm-up OK - {model} is loaded and answering "
+              f"({time.time() - started:.1f}s)", flush=True)
+        return True
+    return False
+
+
 def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
     """Shorten `fact` to <= max_chars, keeping its details. None on failure."""
     if not is_configured(cfg) or _unavailable():

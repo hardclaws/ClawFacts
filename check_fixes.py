@@ -1321,6 +1321,12 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("the model is warmed at startup, not on the first chat line",
+         callable(getattr(_llm2, "warm_up", None))
+         and "chat-ai-warmup" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "_chat_ai_warmup" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

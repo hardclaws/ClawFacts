@@ -634,6 +634,14 @@ class TwitchBot:
                 target=self._chat_ai_keeper, name="chat-ai", daemon=True
             )
             talker.start()
+            # Pay the model's cold start NOW, in the background: a local
+            # 8B model takes 10-25s to load into RAM, longer than any
+            # chat timeout - the first line of chat must not pay it.
+            warmer = threading.Thread(
+                target=self._chat_ai_warmup, name="chat-ai-warmup",
+                daemon=True
+            )
+            warmer.start()
         librarian = threading.Thread(
             target=self._names_keeper, name="names-topup", daemon=True
         )
@@ -1686,6 +1694,16 @@ class TwitchBot:
                 if not self.running:
                     return
                 time.sleep(1.0)
+
+    def _chat_ai_warmup(self) -> None:
+        """Load the chat model at startup (see llm.warm_up). Own thread,
+        because a cold local model can take half a minute - time the
+        keeper and the read loop must not spend."""
+        import llm as llm_mod
+        try:
+            llm_mod.warm_up(self._opts)
+        except Exception as exc:
+            self._log(f"chat ai warm-up error: {exc!r}")
 
     def _chat_ai_keeper(self) -> None:
         """The chat AI's heartbeat: 15s ticks that watch for a quiet room.
