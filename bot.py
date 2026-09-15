@@ -169,22 +169,26 @@ DEFAULTS = {
     # chat_ai_cooldown, and nothing exceeds chat_ai_max_hour lines an hour.
     # !cb off silences it for the session, like the other chatter.
     "chat_ai_enabled": False,
-    # Chime-in cadence, retuned after field feedback ("seems to jump on
-    # a lot when people are just chatting"): the conversation is carried
-    # by mention replies, !ask and the quiet-room openers; chime-ins are
-    # accents, not a second voice in the room. 0.25 roll + a 4-minute
-    # cooldown + a 12/hour cap.
+    # The bot speaks when spoken to. Chime-ins - unprompted lines in a
+    # flowing conversation - are OFF by default: the field verdict,
+    # after weeks of declines and persona poems, was 'when chat is
+    # really flowing the bot should not speak at all unless someone
+    # asks it a question'. chat_ai_chance > 0 re-enables them (the odds
+    # per eligible moment), still bounded by chat_ai_cooldown and
+    # chat_ai_max_hour. Mention replies, !ask and the quiet-room
+    # openers are not affected by the chance.
     "chat_ai_cooldown": 240,
     "chat_ai_mention_cooldown": 60,
-    "chat_ai_chance": 0.25,
+    "chat_ai_chance": 0.0,
     "chat_ai_max_hour": 12,
     "chat_ai_min_chat": 5,
-    # The quiet-room half: when nobody has spoken for chat_ai_quiet_seconds,
-    # the bot opens the conversation itself (a question, a hook) rather than
-    # waiting for a message to react to - at most once per
-    # chat_ai_quiet_cooldown, inside the same hourly cap.
-    "chat_ai_quiet_seconds": 90,
-    "chat_ai_quiet_cooldown": 150,
+    # The quiet-room half: after a real lull (five minutes, not ninety
+    # seconds) the bot may open the conversation itself - at most once
+    # per twenty minutes, inside the same hourly cap. The old 90/150
+    # pairing was a timer bot: five openers in sixteen minutes in a
+    # quiet room, half of them declined for repeating themselves.
+    "chat_ai_quiet_seconds": 300,
+    "chat_ai_quiet_cooldown": 1200,
     # Qwen3-family models "think" before answering, which on CPU turns a
     # one-line reply into a half-minute stall. true appends Qwen3's
     # documented /no_think soft switch to every prompt. No effect on
@@ -2384,10 +2388,28 @@ class TwitchBot:
         if chatai.too_similar(line, self._chat_ai_own):
             # A small model that found a phrase it likes will drill it
             # into the ground; chat notices ('does this bot just repeat
-            # midnight over and over'). Decline and back off.
-            self._log(f"chat line declined - too similar to its own "
-                      f"recent lines: {line[:80]!r}")
-            return
+            # midnight over and over'). Decline and back off - except on
+            # a DIRECT ask, where silence reads as broken: one
+            # redemption re-ask told to write something completely
+            # different (live-fire: the held follow-up's retry came
+            # back repeating 'negative-split' imagery and the streamer
+            # got nothing).
+            if not quiet and addressed:
+                self._log(f"chat line too similar on a direct ask - "
+                          f"one re-ask: {line[:80]!r}")
+                retry = self._chat_ai_line(self._chat_ai_snapshot(),
+                                           nick, text, vary=True)
+                if retry and not chatai.too_similar(
+                        retry, self._chat_ai_own):
+                    line = retry
+                else:
+                    self._log("chat line declined - still too similar "
+                              "after the re-ask")
+                    return
+            else:
+                self._log(f"chat line declined - too similar to its own "
+                          f"recent lines: {line[:80]!r}")
+                return
         if not quiet and not addressed:
             # A chime must be ABOUT the message it jumps on. Live-fire:
             # a supplement comment got 'The freezer rattles like wind

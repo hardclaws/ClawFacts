@@ -27,9 +27,12 @@ class _FixedRoll:
 
 
 def _bot(**over):
+    # chat_ai_chance is pinned here, not left to the default: the
+    # default is 0.0 now (the bot speaks when spoken to), but these
+    # tests exercise the chime machinery itself, which still exists.
     cfg = {**bot_mod.DEFAULTS,
            "nick": "TruckingWithDocBot", "channel": "#t",
-           "chat_ai_enabled": True,
+           "chat_ai_enabled": True, "chat_ai_chance": 0.25,
            "beef_state_path": os.path.join(tempfile.mkdtemp(), "bs.json"),
            "memory_db_path": os.path.join(tempfile.mkdtemp(), "mem.db"),
            "persona_state_path": os.path.join(tempfile.mkdtemp(), "p.json"),
@@ -437,33 +440,42 @@ def test_the_bot_cannot_repeat_itself():
     b._chat_ai_own = list(own)
     calls = []
 
+    # Call order: 1 the mention's echo, 2 its redemption, 3 the
+    # post-reply distill (nothing durable), 4 the !ask echo, 5 its
+    # redemption. Global count - the phases share one model.
     def _model(system, user, cfg):
         calls.append(system)
-        if len(calls) == 1:
+        if len(calls) in (1, 4):
             return "Midnight donuts and coffee on the endless highway"
-        return "The scale house closed early. Nobody weighed anything."
+        if len(calls) == 2:
+            return "The scale house closed early. Nobody weighed anything."
+        if len(calls) == 3:
+            return "NOTHING WORTH KEEPING"
+        return "The county fair gave out ribbons for the biggest pumpkin."
 
     orig = llm.chat_reply
     llm.chat_reply = _model
     try:
-        # A mention whose reply echoes the loop: declined, nothing posts.
+        # A mention whose reply echoes the loop: re-asked once (a
+        # direct ask never goes mute), the different line posts.
         b._on_message("kvack", "#t", "doc what keeps you awake at night",
                       "kvack", "")
         _drain(b)
-        assert b.said == [], b.said
-        assert any("too similar" in l for l in logs), logs
-        # !ask gets the redemption: the echo is re-asked, the different
-        # line posts.
-        calls.clear()
-        b._reply_ask("Hardclaws", "what is your favorite midnight snack")
-        assert len(calls) == 2, calls
-        assert "COMPLETELY different" in calls[1]
+        assert len(calls) == 3, calls
+        assert any("too similar on a direct ask" in l for l in logs), logs
         assert b.said and "scale house" in b.said[0], b.said
-        assert b._chat_ai_own[-1] == ("The scale house closed early. "
-                                      "Nobody weighed anything.")
+        # !ask gets the same redemption: the echo is re-asked, a third
+        # fresh line posts.
+        b._reply_ask("Hardclaws", "what is your favorite midnight snack")
+        assert len(calls) == 5, calls
+        assert "COMPLETELY different" in calls[4], calls
+        assert b.said and "pumpkin" in b.said[-1], b.said
+        assert b._chat_ai_own[-1] == ("The county fair gave out ribbons "
+                                      "for the biggest pumpkin.")
     finally:
         llm.chat_reply = orig
-    print("[PASS] the bot cannot repeat itself; !ask gets one redemption")
+    print("[PASS] the bot cannot repeat itself; a direct ask gets one "
+          "redemption")
 
 
 def test_factual_questions_get_the_engine_first():
@@ -747,6 +759,56 @@ def test_a_direct_ask_gets_one_redemption():
         llm.chat_reply = orig
         bot_mod.get_funfact = orig_fact
     print("[PASS] a direct ask gets one redemption; a chime does not")
+
+
+def test_a_direct_ask_gets_a_redemption_when_it_repeats_itself():
+    """Live-fire: the held follow-up's retry came back repeating the
+    persona's 'negative-split' imagery and was declined - silence on a
+    direct ask, again. A too-similar reply to a direct ask now gets one
+    re-ask, told to write something completely different."""
+    b = _bot(llm_api_key="k")
+    b._chat_ai_own = ["Nap fuels fresh legs and the heart fires"]
+    systems = []
+    orig, _random_orig = llm.chat_reply, bot_mod.random
+    llm.chat_reply = lambda s, u, c: (systems.append(s) or
+                                      ("Nap fuels the engine and fresh "
+                                       "legs" if len(systems) == 1
+                                       else "Honest answer: I run on "
+                                       "diesel fumes and spite"))
+    try:
+        b._chat_ai_mention_last = 0.0
+        b._on_message("Hardclaws", "#t", "docbot was the nap any good",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        # Three model calls: the too-similar reply, the re-ask, and the
+        # post-reply memory distill. Two would mean no re-ask.
+        assert len(systems) == 3, systems
+        assert "COMPLETELY different" in systems[1], \
+            "the re-ask must say what was wrong"
+        assert b.said and "diesel fumes" in b.said[-1], b.said
+        # A chime (overheard) still declines without a re-ask: one
+        # call, no post.
+        c = _bot(llm_api_key="k")
+        c._chat_ai_own = ["Nap fuels fresh legs and the heart fires"]
+        calls2 = []
+        llm.chat_reply = lambda s, u, cfg: (calls2.append(u) or
+                                            "Nap fuels the engine and "
+                                            "legs")
+        bot_mod.random = _FixedRoll(1.0)     # fillers never chime
+        for i in range(6):
+            c._on_message("v%d" % i, "#t", "chatter line %d" % i,
+                          "v%d" % i, "")
+        bot_mod.random = _FixedRoll(0.0)     # the chime moment wins
+        c._on_message("kvack", "#t", "anyone else running I-80 tonight",
+                      "kvack", "")
+        _drain(c)
+        assert len(calls2) == 1, calls2
+        assert c.said == [], c.said
+    finally:
+        llm.chat_reply = orig
+        bot_mod.random = _random_orig
+    print("[PASS] a direct ask gets one redemption when the reply "
+          "repeats itself")
 
 
 def test_mention_notes_are_remembered_and_recalled():
@@ -1223,6 +1285,7 @@ def main():
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()
+    test_a_direct_ask_gets_a_redemption_when_it_repeats_itself()
     test_a_direct_ask_gets_one_redemption()
     test_the_follower_count_is_one_question_away()
     test_the_bot_cannot_repeat_itself()

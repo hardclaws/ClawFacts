@@ -1659,13 +1659,20 @@ def main() -> int:
              "chatai.py").read_text(encoding="utf-8")
          and "point them at the !funfact command" not in pathlib.Path(
              "chatai.py").read_text(encoding="utf-8")),
-        ("emoji walls never chime; chime cadence is retuned down",
+        ("emoji walls never chime; the bot speaks when spoken to",
          callable(getattr(_ch2, "chime_worthy", None))
          and not _ch2.chime_worthy("\U0001f3dc\ufe0f\U0001f3dc\ufe0f")
          and _ch2.chime_worthy("crushed a few tootsie rolls today")
-         and _bot.DEFAULTS.get("chat_ai_chance") == 0.25
+         and _bot.DEFAULTS.get("chat_ai_chance") == 0.0
+         and _bot.DEFAULTS.get("chat_ai_quiet_seconds") >= 300
+         and _bot.DEFAULTS.get("chat_ai_quiet_cooldown") >= 1200
          and _bot.DEFAULTS.get("chat_ai_cooldown") == 240
          and _bot.DEFAULTS.get("chat_ai_max_hour") == 12),
+        ("a too-similar reply on a direct ask gets one re-ask",
+         "too similar on a direct ask" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "COMPLETELY different" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("factual questions get the grounded answer before the persona",
          callable(getattr(_ch2, "factual_question", None))
          and _ch2.factual_question("what is a bongo twist")
