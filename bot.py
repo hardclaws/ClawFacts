@@ -3183,11 +3183,7 @@ def _log_llm_provider(cfg: dict) -> None:
         fprovider = fbase
     fmasked = ("(no key)" if llm_mod._is_local(fbase) else
                (f"{fkey[:4]}…{fkey[-4:]}" if len(fkey) > 10 else "(set)"))
-    chain = llm_mod.fallback_model_chain(fbase, fmodel)
-    route = (f" -> {chain[-1]} (zero-cost model route)"
-             if len(chain) > 1 else "")
-    print(f"[llm] fallback READY — {fprovider}, model {fmodel}{route}, "
-          f"key {fmasked}")
+    print(f"[llm] fallback READY — {fprovider}, model {fmodel}, key {fmasked}")
 
 
 def run_selftest(cfg: dict) -> int:

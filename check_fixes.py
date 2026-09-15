@@ -1700,15 +1700,14 @@ def main() -> int:
              "llm.py").read_text(encoding="utf-8")
          and "MISSING FIX" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
-        ("a busy free fallback routes only to other free models",
-         _llm2.fallback_model_chain(
-             "https://openrouter.ai/api/v1",
-             "nvidia/nemotron-3-super-120b-a12b:free") == [
-                 "nvidia/nemotron-3-super-120b-a12b:free",
-                 "openrouter/free"]
-         and _llm2.fallback_model_chain(
-             "https://openrouter.ai/api/v1", "paid/model") == [
-                 "paid/model"]),
+        ("a selected free reasoning model is never randomly replaced",
+         (lambda body: body.get("model") ==
+             "nvidia/nemotron-3-ultra-550b-a55b:free"
+             and "models" not in body)(
+                 __import__("json").loads(_llm2._build_body(
+                     "nvidia/nemotron-3-ultra-550b-a55b:free", "u")))
+         and "fallback_model_chain" not in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")),
         ("the live bot forwards fallback/no-think options to the chat client",
          _bot_forwards_chat_options()),
         ("rough direct asks answer; an old ask cannot hijack the next reply",

@@ -437,37 +437,25 @@ def main():
         llm.urllib.request.urlopen = orig
     print("[PASS] a rate-limited provider hands chat to the fallback")
 
-    # A chosen :free model is still one model and all its hosts can be busy.
-    # OpenRouter's model-level fallback array keeps this route zero-cost while
-    # allowing its free router to choose another live free model.
+    # A specific free reasoning model stays specific. ``openrouter/free`` can
+    # randomly choose a non-reasoning model with different response behaviour;
+    # the bot must never substitute it (or any paid model) behind the config.
     freecfg = dict(
         fbcfg,
-        llm_fallback_model="nvidia/nemotron-3-super-120b-a12b:free")
+        llm_fallback_model="nvidia/nemotron-3-ultra-550b-a55b:free")
     llm.urllib.request.urlopen = _groq_429_openrouter_ok
     try:
         llm.reset_disable_state()
         captured.clear()
         assert llm.chat_reply("s", "u" * 20, freecfg) == "Fallback line."
         body = json.loads(captured[-1]["body"])
-        expected = ["nvidia/nemotron-3-super-120b-a12b:free",
-                    "openrouter/free"]
-        assert body.get("models") == expected, body
-        assert "model" not in body, body
-
-        # The primary breaker is open, so exercise the shared fact path too.
-        captured.clear()
-        assert llm.answer_question("q?", ["source"], freecfg) == \
-            "Fallback line."
-        assert json.loads(captured[-1]["body"]).get("models") == expected
-
-        # Warm-up uses the same free-only route.
-        captured.clear()
-        assert llm.warm_up(freecfg) is True
-        assert json.loads(captured[-1]["body"]).get("models") == expected
+        assert body.get("model") == freecfg["llm_fallback_model"], body
+        assert "models" not in body, body
+        assert "openrouter/free" not in captured[-1]["body"], body
         llm.reset_disable_state()
     finally:
         llm.urllib.request.urlopen = orig
-    print("[PASS] a busy free fallback routes only to other free models")
+    print("[PASS] a configured free reasoning model is never replaced")
 
     # Factual answers used a different helper and ignored the configured
     # provider fallback completely. The same 429 failover must cover every LLM

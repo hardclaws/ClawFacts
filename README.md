@@ -261,16 +261,14 @@ the provider's actual code and message. The common
 `llm_fallback_key`.
 
 For zero-cost OpenRouter fallback, use a key from openrouter.ai/keys and a
-current model slug ending in `:free`. Free slugs rotate and their shared hosts
-can all be busy at once, so the bot sends a free-only model chain: your chosen
-model first, then `openrouter/free`, which lets OpenRouter select another live
-free model. **That route contains no paid model and cannot incur model usage
-charges.** Startup prints the route so this is visible. Recheck
-openrouter.ai/models when choosing the preferred free model rather than
-copying a stale recommendation. Account-wide free-tier limits still apply;
-no model chain can bypass an exhausted per-minute or daily allowance. A local
-Ollama fallback is another zero-cost option with no hosted quota. An empty
-chat reply — or one
+specific current model slug ending in `:free`. The bot uses exactly that model:
+it does **not** substitute `openrouter/free`, whose random selection can mix
+reasoning and non-reasoning models with incompatible response behaviour, and
+it never adds a paid model to the configured second-provider path. Free slugs
+rotate and shared capacity can fill, so recheck openrouter.ai/models when the
+warm-up reports `fallback NOT READY`. Account-wide free-tier limits still
+apply. A local Ollama fallback is another zero-cost option with no hosted
+quota. An empty chat reply — or one
 cut off mid-sentence ("If they try to slash wages, I'll") — is retried
 once at a doubled thinking budget before the second provider takes the
 line.
