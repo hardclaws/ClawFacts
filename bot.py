@@ -193,10 +193,10 @@ DEFAULTS = {
     # documented /no_think soft switch to every prompt. No effect on
     # models that do not know the switch.
     "llm_no_think": False,
-    # The chat voice's second provider: when the llm_* provider is
-    # rate-limited (Groq's free tier 429s mid-stream), chat replies
-    # switch to this one until the window clears - the streamer never
-    # sees the gap. Empty model = no fallback (the default). A local
+    # The second LLM provider: when the llm_* provider is rate-limited
+    # (Groq's free tier 429s mid-stream), chat, sourced answers and fact
+    # writing switch to this one until the window clears. Empty model = no
+    # fallback (the default). A local
     # Ollama works here too: no key needed, and it is warmed at startup
     # like the primary.
     "llm_fallback_key": "",
@@ -365,6 +365,34 @@ def load_config(path: str, require: bool = True) -> dict:
                     cfg["llm_model"] = os.environ.get(model_env, "").strip() or model_default
                     break
 
+    # Normalize fallback aliases and optional environment variables. The first
+    # fallback implementation accepted only ``llm_fallback_key``; a natural
+    # ``llm_fallback_api_key`` spelling was silently ignored and looked exactly
+    # like failover never ran. Provider-specific environment keys are also a
+    # valid source when the configured fallback URL names that provider.
+    cfg["llm_fallback_model"] = str(
+        cfg.get("llm_fallback_model")
+        or cfg.get("llm_fallback_model_name")
+        or os.environ.get("LLM_FALLBACK_MODEL", "")).strip()
+    cfg["llm_fallback_base_url"] = str(
+        cfg.get("llm_fallback_base_url")
+        or cfg.get("llm_fallback_url")
+        or os.environ.get("LLM_FALLBACK_BASE_URL", "")).strip()
+    cfg["llm_fallback_key"] = str(
+        cfg.get("llm_fallback_key")
+        or cfg.get("llm_fallback_api_key")
+        or os.environ.get("LLM_FALLBACK_API_KEY", "")
+        or os.environ.get("LLM_FALLBACK_KEY", "")).strip()
+    fbbase = (cfg.get("llm_fallback_base_url") or
+              "https://openrouter.ai/api/v1").lower()
+    if cfg.get("llm_fallback_model") and not cfg.get("llm_fallback_key"):
+        if "openrouter" in fbbase:
+            cfg["llm_fallback_key"] = os.environ.get(
+                "OPENROUTER_API_KEY", "").strip()
+        elif "groq" in fbbase:
+            cfg["llm_fallback_key"] = os.environ.get(
+                "GROQ_API_KEY", "").strip()
+
     # The OAuth token is optional here — it can come from the auto-login flow.
     # `require` is False for --doctor: a half-finished config is exactly what
     # you are diagnosing, so refusing to load it would hide the answer.
@@ -474,10 +502,12 @@ class TwitchBot:
             # These used to stop at config.json: llm.chat_reply() received
             # _opts, not cfg, so a fully configured fallback was invisible.
             # The tell in a live log was that startup warmed only the primary.
-            "llm_fallback_key": cfg.get("llm_fallback_key", ""),
-            "llm_fallback_base_url": cfg.get(
-                "llm_fallback_base_url", ""),
-            "llm_fallback_model": cfg.get("llm_fallback_model", ""),
+            "llm_fallback_key": (cfg.get("llm_fallback_key")
+                                 or cfg.get("llm_fallback_api_key", "")),
+            "llm_fallback_base_url": (cfg.get("llm_fallback_base_url")
+                                      or cfg.get("llm_fallback_url", "")),
+            "llm_fallback_model": (cfg.get("llm_fallback_model")
+                                   or cfg.get("llm_fallback_model_name", "")),
             "llm_no_think": bool(cfg.get("llm_no_think", False)),
             # Deliberately absent from DEFAULTS (llm.py chooses hosted/local
             # defaults); preserving a user override here does not create one.
@@ -2570,7 +2600,7 @@ class TwitchBot:
         import llm as llm_mod
         if not self.cfg.get("chat_ai_enabled", False):
             return              # !ask works with the AI off; memory does not
-        if not self._memory.ok or not llm_mod.is_configured(self._opts):
+        if not self._memory.ok or not llm_mod.any_configured(self._opts):
             return
         theirs = [(n, t) for n, t in lines if (n or "").lower()
                   == (nick or "").lower()]
@@ -2806,7 +2836,7 @@ class TwitchBot:
         if chatai.factual_question(q, self._chat_ai_names) \
                 and self._answer_factual(nick, q):
             return
-        if llm_mod.is_configured(self._opts):
+        if llm_mod.any_configured(self._opts):
             snapshot = self._chat_ai_snapshot()
             line = self._chat_ai_line(snapshot, nick, q)
             if line and chatai.too_similar(
@@ -3031,7 +3061,7 @@ def _doctor_questions(cfg: dict) -> None:
     except Exception as exc:
         print(f"  llm module       : import failed - {exc!r}")
         return
-    if not llm_mod.is_configured(cfg):
+    if not llm_mod.any_configured(cfg):
         print("  llm              : NOT configured - questions cannot be "
               "answered. Set llm_api_key (or GROQ_API_KEY / "
               "OPENROUTER_API_KEY), or point llm_base_url at a local Ollama.")
@@ -3065,7 +3095,7 @@ def warn_config(cfg: dict) -> None:
     spicy = spice in ("spicy", "adult", "r", "on", "true", "1", "yes")
     try:
         import llm as llm_mod
-        llm_ok = llm_mod.is_configured(cfg)
+        llm_ok = llm_mod.any_configured(cfg)
     except Exception:
         llm_ok = bool((cfg.get("llm_api_key") or "").strip())
     if spicy and not llm_ok:
@@ -3119,7 +3149,41 @@ def _log_llm_provider(cfg: dict) -> None:
         masked = f"{key[:4]}…{key[-4:]}" if len(key) > 10 else "(set)"
     else:
         masked = "(no key)"
-    print(f"[llm] using {provider} — model {model}, key {masked}")
+    if not key and provider != "local Ollama":
+        print(f"[llm] primary NOT configured — {provider}, model {model}, "
+              "no key")
+    else:
+        print(f"[llm] using {provider} — model {model}, key {masked}")
+
+    # Failover used to be silent when one field was misspelled or missing. The
+    # resulting live log showed endless primary 429s but gave no clue that the
+    # supposed fallback had never become an endpoint.
+    try:
+        import llm as llm_mod
+        fb = llm_mod.fallback_endpoint(cfg)
+        problem = llm_mod.fallback_problem(cfg)
+    except Exception as exc:
+        print(f"[llm] fallback status unavailable: {exc!r}")
+        return
+    if not fb:
+        level = "MISCONFIGURED" if any((cfg.get(k) or "").strip() for k in (
+            "llm_fallback_key", "llm_fallback_api_key",
+            "llm_fallback_base_url", "llm_fallback_url",
+            "llm_fallback_model", "llm_fallback_model_name")) else "OFF"
+        print(f"[llm] fallback {level} — {problem}")
+        return
+    fbase, fkey, fmodel = fb
+    if "openrouter" in fbase.lower():
+        fprovider = "OpenRouter"
+    elif "groq" in fbase.lower():
+        fprovider = "Groq"
+    elif llm_mod._is_local(fbase):
+        fprovider = "local Ollama"
+    else:
+        fprovider = fbase
+    fmasked = ("(no key)" if llm_mod._is_local(fbase) else
+               (f"{fkey[:4]}…{fkey[-4:]}" if len(fkey) > 10 else "(set)"))
+    print(f"[llm] fallback READY — {fprovider}, model {fmodel}, key {fmasked}")
 
 
 def run_selftest(cfg: dict) -> int:
@@ -3148,6 +3212,9 @@ def run_selftest(cfg: dict) -> int:
         "llm_api_key": cfg.get("llm_api_key", ""),
         "llm_base_url": cfg.get("llm_base_url", ""),
         "llm_model": cfg.get("llm_model", ""),
+        "llm_fallback_key": cfg.get("llm_fallback_key", ""),
+        "llm_fallback_base_url": cfg.get("llm_fallback_base_url", ""),
+        "llm_fallback_model": cfg.get("llm_fallback_model", ""),
         "google_api_key": cfg.get("google_api_key", ""),
         "google_cx": cfg.get("google_cx", ""),
         "serper_api_key": cfg.get("serper_api_key", ""),
@@ -3183,7 +3250,7 @@ def run_selftest(cfg: dict) -> int:
     # 3. LLM writer check — this is what makes spicy mode adult.
     try:
         import llm as llm_mod
-        llm_ok = llm_mod.is_configured(cfg)
+        llm_ok = llm_mod.any_configured(cfg)
     except Exception as exc:
         llm_ok = False
         print(f"\n  [FAIL] could not import llm.py: {exc!r}")

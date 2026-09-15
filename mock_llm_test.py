@@ -388,6 +388,18 @@ def main():
     assert llm.fallback_endpoint(
         {"llm_fallback_model": "llama3.1:8b",
          "llm_fallback_base_url": "http://localhost:11434/v1"}) is not None
+    # The natural api_key spelling used in hand-edited configs must not be
+    # silently ignored.
+    assert llm.fallback_endpoint(
+        {"llm_fallback_api_key": "alias-key",
+         "llm_fallback_model": "fallback/model"}) == (
+            "https://openrouter.ai/api/v1", "alias-key", "fallback/model")
+    assert llm.is_configured(
+        {"llm_fallback_api_key": "alias-key",
+         "llm_fallback_model": "fallback/model"}) is False
+    assert llm.any_configured(
+        {"llm_fallback_api_key": "alias-key",
+         "llm_fallback_model": "fallback/model"}) is True
     assert llm.fallback_endpoint(
         {"llm_api_key": "k", "llm_model": "m",
          "llm_base_url": "https://api.groq.com/openai/v1",
@@ -424,6 +436,33 @@ def main():
     finally:
         llm.urllib.request.urlopen = orig
     print("[PASS] a rate-limited provider hands chat to the fallback")
+
+    # Factual answers used a different helper and ignored the configured
+    # provider fallback completely. The same 429 failover must cover every LLM
+    # path, not just persona chat.
+    llm.urllib.request.urlopen = _groq_429_openrouter_ok
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.answer_question(
+            "What time is sunrise?", ["Sunrise is at 6:38 AM."], fbcfg)
+        assert got == "Fallback line.", got
+        assert [c["url"] for c in captured] == [
+            "https://api.groq.com/openai/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        # The primary breaker is now open; a fact rewrite goes straight to the
+        # second provider instead of returning None before _complete can run.
+        captured.clear()
+        got = llm.rewrite_fact("Vandalia", "Vandalia, IL",
+                               ["Vandalia was once the Illinois capital."],
+                               fbcfg)
+        assert got == "Fallback line.", got
+        assert [c["url"] for c in captured] == [
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] sourced answers and fact writing use provider failover too")
 
     # When BOTH providers are rate-limited, the bot goes quiet politely:
     # each breaker opens once, and a call with both windows open makes

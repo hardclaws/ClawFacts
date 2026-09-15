@@ -20,7 +20,8 @@ FunFact | Milford, Pennsylvania: Milford was founded in 1796 by Judge John Biddi
    - **Wikipedia** — full-text search → article lead + History, then the most "interesting" sentences are ranked. Wikipedia covers an enormous number of tiny places (hamlets, unincorporated communities, roadhouses).
    - **DuckDuckGo Instant Answers** — fallback if Wikipedia fails or rate-limits.
    - **Geocoder + coordinate search** — if text search finds nothing (very remote spots), the bot geocodes the name with OpenStreetMap's Nominatim (free, no key, covers even tiny villages), retries with the canonical "Name, State", then uses Wikipedia's coordinate search for the nearest notable place.
-   - **`spicy_facts.json`** — a built-in database of verified adult-rated facts (used only in spicy mode).
+   - **Open-Meteo live clock data** — sunrise and sunset questions use the requested place's coordinates and timezone, not search-result snippets or an LLM.
+   - **`spicy_facts.json`** — a built-in database of verified adult-rated facts (used only when spice="spicy").
    - **Google (optional)** — with your own API key + search-engine ID, searches
      the web with `safe=off` for adult-rated local stories.
    - **Optional LLM** — a local Ollama model or your own API key, to rewrite the real facts into punchy adult-humor one-liners.
@@ -243,14 +244,18 @@ chime-ins, quiet-room openers, the memory — is off by default; flip
 fields (any provider, including local Ollama) supply the personality;
 everything else works without a key.
 
-**A second provider for the voice.** Groq's free tier rate-limits
-mid-stream (HTTP 429), and the chat voice used to go quiet for the
-two-minute breaker window. Fill the `llm_fallback_*` fields in
-`config.json` and a second provider carries the voice until the window
-clears — the console announces the switch once per outage, both
-providers are warmed at startup (a failed warm-up says so on the
-console), and each has its own breaker so a dead fallback key never
-takes the primary down. The free OpenRouter setup:
+**A second provider for chat and the fact engine.** Groq's free tier rate-limits
+mid-stream (HTTP 429), and both the chat voice and sourced question
+answers used to go quiet for the two-minute breaker window. Fill the
+`llm_fallback_*` fields in `config.json` and a second provider carries
+chat replies, sourced answers, fact rewrites and summaries until the
+window clears. The console announces the switch once per outage, both
+providers are warmed at startup, and each has its own breaker so a dead
+fallback key never takes the primary down. Startup also prints
+`fallback READY`, `OFF`, or `MISCONFIGURED`; a misspelled or missing
+fallback field can no longer fail invisibly. The common
+`llm_fallback_api_key` spelling is accepted as an alias for
+`llm_fallback_key`. The free OpenRouter setup:
 any key from openrouter.ai/keys (no card) plus any model whose slug
 ends in `:free` — verified live and healthy as of September 2026:
 `nvidia/nemotron-3-super-120b-a12b:free` (912ms, 62 t/s, months
@@ -263,21 +268,22 @@ older `:free` listings have
 gone dark), so take whatever is currently free on openrouter.ai/models;
 the free tier allows 20 requests/minute and 50/day — 1,000/day after
 any one-time $10 credit top-up — which is plenty for a fallback that
-only carries chat while Groq's window clears. A local Ollama works as
-the fallback too, with no limits at all. An empty reply — or one cut
-off mid-sentence ("If they try to slash wages, I'll") — a reasoning
-model that thought past its completion budget, the silent miss of a
-held mention, is retried once at a doubled thinking budget before the
-fallback takes the line. Fun facts and `!ask`'s trivia
-pass keep their own model-level fallbacks; this one is for the chat
-voice.
+carries requests only while Groq's window clears. A local Ollama works
+as the fallback too, with no limits at all. An empty chat reply — or one
+cut off mid-sentence ("If they try to slash wages, I'll") — is retried
+once at a doubled thinking budget before the second provider takes the
+line.
 
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
-  grounded answer beats a charming guess. Weather questions get their
-  own header — `Weather | Saint Clair, Mo: Clear, 76.7°F…` — because
-  live data is not trivia; and when the records miner backs a
+  grounded answer beats a charming guess. Live data gets its own header
+  because it is not trivia. Sunrise/sunset questions are geocoded and
+  answered directly from Open-Meteo — for example,
+  `Sunrise | Vandalia, Illinois: Sunrise is expected around 6:38 AM local time today.`
+  — instead of accepting a search snippet that merely says times are
+  local. Weather answers likewise use `Weather | Saint Clair, Mo: …`;
+  and when the records miner backs a
   superlative question, the article it digs through must actually be
   about the subject (a US freight-lane question once came back with
   Ivory Coast's GDP — the search loved "coat"~"Côte" and "west

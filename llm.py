@@ -149,12 +149,18 @@ def fallback_endpoint(cfg: dict):
     just the primary again (same base and model) is rejected - it would
     fail identically.
     """
-    model = (cfg.get("llm_fallback_model") or "").strip()
+    model = (cfg.get("llm_fallback_model")
+             or cfg.get("llm_fallback_model_name") or "").strip()
     if not model:
         return None
-    base = ((cfg.get("llm_fallback_base_url") or "").strip()
+    base = ((cfg.get("llm_fallback_base_url")
+             or cfg.get("llm_fallback_url") or "").strip()
             or FALLBACK_BASE_URL).rstrip("/")
-    key = (cfg.get("llm_fallback_key") or "").strip()
+    # Accept the explicit example name and the common ``*_api_key`` spelling.
+    # A silently ignored but present key is worse than accepting a harmless
+    # alias: it looks exactly like failover is broken in the live log.
+    key = (cfg.get("llm_fallback_key")
+           or cfg.get("llm_fallback_api_key") or "").strip()
     if not key and not _is_local(base):
         return None
     pbase = ((cfg.get("llm_base_url") or "").strip()
@@ -164,19 +170,54 @@ def fallback_endpoint(cfg: dict):
     return base, key, model
 
 
+def fallback_problem(cfg: dict) -> str:
+    """Why no second endpoint can be used, or an empty string when usable."""
+    model = (cfg.get("llm_fallback_model")
+             or cfg.get("llm_fallback_model_name") or "").strip()
+    if not model:
+        return "llm_fallback_model is empty"
+    base = ((cfg.get("llm_fallback_base_url")
+             or cfg.get("llm_fallback_url") or "").strip()
+            or FALLBACK_BASE_URL).rstrip("/")
+    key = (cfg.get("llm_fallback_key")
+           or cfg.get("llm_fallback_api_key") or "").strip()
+    if not key and not _is_local(base):
+        return "fallback model is set but its API key is empty"
+    pbase = ((cfg.get("llm_base_url") or "").strip()
+             or DEFAULT_BASE_URL).rstrip("/")
+    if base == pbase and model == (cfg.get("llm_model") or "").strip():
+        return "fallback is the same provider and model as the primary"
+    return ""
+
+
 def _note_fallback_line(model: str, fallback_model: str) -> None:
     """Announce the switch once per outage, not once per line - the
     breaker already said why."""
     global _ON_FALLBACK
     if not _ON_FALLBACK:
         _ON_FALLBACK = True
-        print(f"[llm] {model} is unavailable - chat answers come from "
+        print(f"[llm] {model} is unavailable - LLM answers come from "
               f"{fallback_model} until it clears", flush=True)
 
 
 def _note_primary_line() -> None:
     global _ON_FALLBACK
     _ON_FALLBACK = False
+
+
+_NO_FALLBACK_WARNED_UNTIL = 0.0
+
+
+def _note_no_fallback(cfg: dict) -> None:
+    """Explain missing failover once per breaker window, not once per line."""
+    global _NO_FALLBACK_WARNED_UNTIL
+    now = time.time()
+    if now < _NO_FALLBACK_WARNED_UNTIL:
+        return
+    _NO_FALLBACK_WARNED_UNTIL = now + 120
+    print(f"[llm] NO USABLE FALLBACK: {fallback_problem(cfg)}. "
+          "Set llm_fallback_model and llm_fallback_key in config.json "
+          "(base URL defaults to OpenRouter), then restart.", flush=True)
 
 
 _warned_404 = False
@@ -222,9 +263,11 @@ def _model_404_hint() -> None:
 def reset_disable_state() -> None:
     """Testing hook: clear the transient 'LLM disabled' state."""
     global _DISABLED_UNTIL, _FALLBACK_DISABLED_UNTIL, _ON_FALLBACK
+    global _NO_FALLBACK_WARNED_UNTIL
     _DISABLED_UNTIL = 0.0
     _FALLBACK_DISABLED_UNTIL = 0.0
     _ON_FALLBACK = False
+    _NO_FALLBACK_WARNED_UNTIL = 0.0
 
 SYSTEM_PROMPT = (
     "You write fun facts about places for a trucker's Twitch stream watched by "
@@ -307,7 +350,8 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 
 def _build_body(model: str, user_prompt: str, system: str = None,
                 max_tokens: int = None, hard_nothink: bool = False,
-                reasoning_budget: int = None) -> str:
+                reasoning_budget: int = None,
+                temperature: float = None) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -324,7 +368,7 @@ def _build_body(model: str, user_prompt: str, system: str = None,
         body["reasoning_effort"] = "low"
     else:
         body["max_tokens"] = max_tokens or 300
-        body["temperature"] = 0.9
+        body["temperature"] = 0.9 if temperature is None else temperature
     return json.dumps(body).encode("utf-8")
 
 
@@ -362,12 +406,14 @@ def _request(base: str, key: str, body: bytes,
 def _call(base: str, model: str, key: str, user_prompt: str,
           system: str = None, timeout: float = 60.0,
           max_tokens: int = None, hard_nothink: bool = False,
-          reasoning_budget: int = None) -> str:
+          reasoning_budget: int = None,
+          temperature: float = None) -> str:
     return _request(base, key,
                     _build_body(model, user_prompt, system,
                                 max_tokens=max_tokens,
                                 hard_nothink=hard_nothink,
-                                reasoning_budget=reasoning_budget),
+                                reasoning_budget=reasoning_budget,
+                                temperature=temperature),
                     timeout=timeout)
 
 
@@ -386,8 +432,11 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     model = cfg.get("llm_model") or (
         OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
     fb = fallback_endpoint(cfg)
-    primary_up = is_configured(cfg) and not _unavailable()
+    primary_configured = bool(key) or _is_local(base)
+    primary_up = primary_configured and not _unavailable()
     if not primary_up and not (fb and not _fallback_unavailable()):
+        if primary_configured and _unavailable() and not fb:
+            _note_no_fallback(cfg)
         return None
     _set_chat_timeout(False)
     # A local model on CPU needs a budget a hosted API does not: the chat
@@ -511,6 +560,8 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
         except Exception as exc:
             print(f"[llm] fallback chat error: {exc!r}", flush=True)
             return None
+    if not fb and _unavailable():
+        _note_no_fallback(cfg)
     return None
 
 
@@ -585,12 +636,12 @@ def warm_up(cfg: dict) -> bool:
     time to discover a cold local model or a dead slug.
     """
     ok = False
-    if is_configured(cfg) and not _unavailable():
-        base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    key = (cfg.get("llm_api_key") or "").strip()
+    if (key or _is_local(base)) and not _unavailable():
         model = cfg.get("llm_model") or (
             OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
-        ok = bool(_warm_probe(base, model,
-                              (cfg.get("llm_api_key") or "").strip(), cfg))
+        ok = bool(_warm_probe(base, model, key, cfg))
     fb = fallback_endpoint(cfg)
     if fb and not _fallback_unavailable():
         fbase, fkey, fmodel = fb
@@ -603,44 +654,22 @@ def warm_up(cfg: dict) -> bool:
 
 
 def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
-    """Shorten `fact` to <= max_chars, keeping its details. None on failure."""
-    if not is_configured(cfg) or _unavailable():
+    """Shorten ``fact`` through either provider, keeping its details."""
+    if not any_configured(cfg):
         return None
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
-    model = cfg.get("llm_model") or (OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
-    user = _maybe_nothink(
-        f"Max characters: {max_chars}\nFact: {fact}\n\nShortened fact:",
-        cfg)
-    messages = [
-        {"role": "system", "content": _SUMMARIZE_SYSTEM},
-        {"role": "user", "content": user},
-    ]
-    body = {"model": model, "messages": messages}
-    if _REASONING.search(model):
-        body["max_completion_tokens"] = 120
-    else:
-        body["max_tokens"] = 120
-        body["temperature"] = 0.3
-    if _hard_nothink(cfg, base):
-        body["think"] = False
+    model = cfg.get("llm_model") or (
+        OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    user = f"Max characters: {max_chars}\nFact: {fact}\n\nShortened fact:"
     if cfg.get("debug"):
-        print(f"[llm] POST {base}/chat/completions  model={model} (summarize)", flush=True)
+        print(f"[llm] POST {base}/chat/completions  model={model} "
+              f"(summarize)", flush=True)
         print("[llm] ---- user prompt ----\n" + user, flush=True)
-    try:
-        text = _request(base, key, json.dumps(body).encode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        _disable(exc.code)
-        if exc.code == 404:
-            _model_404_hint()
-        return None
-    except Exception as exc:
-        print(f"[llm] summarize error: {exc!r}", flush=True)
-        return None
-    text = (text or "").strip().strip('"“”')
-    if cfg.get("debug"):
-        print("[llm] ---- response ----\n" + text, flush=True)
-    return text or None
+    text = _complete(base, model, key, user, cfg, tag="summarize",
+                     system=_SUMMARIZE_SYSTEM, max_tokens=120,
+                     reasoning_budget=120, temperature=0.3)
+    return (text or "").strip().strip('"“”') or None
 
 
 def _is_local(base: str) -> bool:
@@ -649,10 +678,15 @@ def _is_local(base: str) -> bool:
 
 
 def is_configured(options: dict) -> bool:
-    """True if a usable LLM is configured: an API key, or a local Ollama URL."""
+    """True if the primary is an API key or a local Ollama endpoint."""
     if (options.get("llm_api_key") or "").strip():
         return True
     return _is_local(options.get("llm_base_url") or "")
+
+
+def any_configured(options: dict) -> bool:
+    """True when the primary or configured second provider is usable."""
+    return is_configured(options) or fallback_endpoint(options) is not None
 
 
 def _fallback_model(base: str, model: str) -> str | None:
@@ -670,7 +704,7 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
     The supplied `seed_facts` are the ground truth the model must rewrite; it is
     never asked to invent history on its own.
     """
-    if not is_configured(cfg) or _unavailable():
+    if not any_configured(cfg):
         return None
     key = (cfg.get("llm_api_key") or "").strip()
 
@@ -714,51 +748,115 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
     return _complete(base, model, key, user, cfg, tag="")
 
 
-def _complete(base: str, model: str, key: str, user: str, cfg: dict,
-              tag: str, system: str = None, timeout: float = None) -> str | None:
-    """One chat completion with the provider fallbacks. `tag` labels debug logs."""
+def _complete_provider(base: str, model: str, key: str, user: str,
+                       cfg: dict, tag: str, system: str = None,
+                       timeout: float = None, fallback: bool = False,
+                       max_tokens: int = None,
+                       reasoning_budget: int = None,
+                       temperature: float = None) -> str | None:
+    """Try one provider, including its compatible spare-model slug.
+
+    ``fallback`` selects the provider's independent circuit breaker. A broken
+    fallback must never disable the primary, and a primary 429 must never stop
+    the configured second provider from taking the same request.
+    """
     candidates = [model]
-    spare = _fallback_model(base, model)
+    # The explicitly configured second-provider model is the last resort; do
+    # not silently spend money on that provider's generic spare slug.
+    spare = None if fallback else _fallback_model(base, model)
     if spare:
         candidates.append(spare)
 
     last_detail = ""
     for m in candidates:
         try:
+            call_options = {
+                "timeout": timeout if timeout is not None else 60.0,
+                "hard_nothink": _hard_nothink(cfg, base),
+            }
+            if max_tokens is not None:
+                call_options["max_tokens"] = max_tokens
+            if reasoning_budget is not None:
+                call_options["reasoning_budget"] = reasoning_budget
+            if temperature is not None:
+                call_options["temperature"] = temperature
             text = _call(base, m, key, _maybe_nothink(user, cfg), system,
-                         timeout=timeout if timeout is not None else 60.0,
-                         hard_nothink=_hard_nothink(cfg, base))
+                         **call_options)
             if cfg.get("debug"):
                 print(f"[llm] ---- response ----\n" + text, flush=True)
-            return text
+            return text or None
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace").strip()[:300]
+            try:
+                detail = exc.read().decode("utf-8", "replace").strip()[:300]
+            except Exception:
+                detail = ""
             last_detail = detail
             if exc.code in (401, 403, 402, 429):
-                # Auth / billing / rate-limit: no model swap will help.
-                _disable(exc.code)
+                # Auth / billing / rate-limit: another model on THIS provider
+                # fails the same way. Open only this provider's breaker; the
+                # outer wrapper can immediately try the other provider.
+                (_disable_fallback if fallback else _disable)(exc.code)
                 return None
             if exc.code in (400, 404, 422) and m != candidates[-1]:
-                # Model not found / param error -> try the spare.
-                print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying fallback\u2026",
-                      flush=True)
+                print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying "
+                      f"same-provider spare...", flush=True)
                 continue
-            if exc.code == 404:
+            if exc.code == 404 and not fallback:
                 _model_404_hint()
-            print(f"[llm] HTTP {exc.code}: {detail}", flush=True)
+            label = "fallback " if fallback else ""
+            print(f"[llm] {label}HTTP {exc.code}: {detail}", flush=True)
             return None
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             last_detail = repr(exc)
             if m != candidates[-1]:
-                print(f"[llm] bad response from '{m}': {exc!r}; trying fallback\u2026",
-                      flush=True)
+                print(f"[llm] bad response from '{m}': {exc!r}; trying "
+                      f"same-provider spare...", flush=True)
                 continue
-            print(f"[llm] bad response from '{m}': {exc!r}", flush=True)
+            label = "fallback " if fallback else ""
+            print(f"[llm] {label}bad response from '{m}': {exc!r}",
+                  flush=True)
             return None
         except Exception as exc:
-            print(f"[llm] error: {exc!r}", flush=True)
+            label = "fallback " if fallback else ""
+            print(f"[llm] {label}error: {exc!r}", flush=True)
             return None
     print(f"[llm] all models failed: {last_detail}", flush=True)
+    return None
+
+
+def _complete(base: str, model: str, key: str, user: str, cfg: dict,
+              tag: str, system: str = None, timeout: float = None,
+              max_tokens: int = None, reasoning_budget: int = None,
+              temperature: float = None) -> str | None:
+    """Complete through the primary and then the configured second provider.
+
+    This is the shared path for sourced answers, fact rewriting, freeform facts
+    and summarisation. Previously only ``chat_reply`` knew about the second
+    provider, so a Groq 429 during a factual question ignored a perfectly good
+    fallback.
+    """
+    primary_configured = bool(key) or _is_local(base)
+    if primary_configured and not _unavailable():
+        text = _complete_provider(
+            base, model, key, user, cfg, tag, system=system, timeout=timeout,
+            max_tokens=max_tokens, reasoning_budget=reasoning_budget,
+            temperature=temperature)
+        if text:
+            _note_primary_line()
+            return text
+
+    fb = fallback_endpoint(cfg)
+    if fb and not _fallback_unavailable():
+        fbase, fkey, fmodel = fb
+        text = _complete_provider(
+            fbase, fmodel, fkey, user, cfg, tag, system=system,
+            timeout=timeout, fallback=True, max_tokens=max_tokens,
+            reasoning_budget=reasoning_budget, temperature=temperature)
+        if text:
+            _note_fallback_line(model, fmodel)
+            return text
+    if not fb and _unavailable():
+        _note_no_fallback(cfg)
     return None
 
 
@@ -785,7 +883,7 @@ def answer_question(question: str, sources: list, cfg: dict) -> str | None:
     magazine. This one gives it text and asks it to use nothing else, and the
     caller then checks the answer against that same text.
     """
-    if not is_configured(cfg) or _unavailable() or not sources:
+    if not any_configured(cfg) or not sources:
         return None
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
@@ -847,7 +945,7 @@ def freeform_facts(place: str, location: str, cfg: dict) -> str | None:
     Opt-in only (`"fact_source": "llm"`). There is nothing to ground the output
     against, so the caller must not promise the viewer these are sourced.
     """
-    if not is_configured(cfg) or _unavailable():
+    if not any_configured(cfg):
         return None
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")

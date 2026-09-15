@@ -582,6 +582,19 @@ def test_factual_questions_get_the_engine_first():
         _drain(b)
         assert len(b.said) == 2 and "Vince Castro" in b.said[1], b.said
         assert not persona, persona
+        # Exact live-fire clock question: preserve the data source's label and
+        # concrete time; never post it as a FunFact or ask the persona to guess.
+        bot_mod.get_funfact = lambda q, o: {
+            "place": "Vandalia, Illinois", "kind": "Sunrise",
+            "fact": "Sunrise is expected around 6:38 AM local time today."}
+        b._chat_ai_mention_last = 0.0
+        b._on_message("Hardclaws", "#t",
+                      "Docbot what time we expecting sunrise today in "
+                      "Vandalia, IL ?", "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert b.said[-1] == ("Sunrise | Vandalia, Illinois: Sunrise is "
+                              "expected around 6:38 AM local time today."), b.said
+        assert not persona, persona
         # The engine has nothing: the persona still gets its chance
         bot_mod.get_funfact = lambda q, o: None
         b._reply_ask("kvack", "what is a flux capacitor")
@@ -848,6 +861,11 @@ def test_rough_direct_ask_is_answered_and_cannot_go_stale():
     assert b._opts["llm_fallback_model"] == "fallback/test", b._opts
     assert llm.fallback_endpoint(b._opts) == (
         "https://openrouter.ai/api/v1", "or-test", "fallback/test")
+    alias_b = _bot(llm_api_key="groq-test",
+                   llm_fallback_api_key="alias-key",
+                   llm_fallback_model="fallback/alias")
+    assert llm.fallback_endpoint(alias_b._opts) == (
+        "https://openrouter.ai/api/v1", "alias-key", "fallback/alias")
 
     rough = ("Docbot what do we think of people who ride zwift with 0% "
              "trainer difficulty? Pussy or its ok?")

@@ -876,8 +876,8 @@ def main() -> int:
         return "12/50" in said[-1] and "38 to go" in said[-1]
 
     def _chat_falls_back():
-        """Groq's free tier 429s mid-stream: a configured second
-        provider carries the chat line, and while the primary's breaker
+        """Groq's free tier 429s mid-stream: a configured second provider
+        carries chat and sourced answers, and while the primary's breaker
         window is open it is not even asked."""
         import io as _io
         import json as _json
@@ -912,7 +912,13 @@ def main() -> int:
             got = _llm2.chat_reply("s", "u" * 20, cfg)
             ok2 = got == "Line." and hits == [
                 "https://openrouter.ai/api/v1/chat/completions"]
-            return ok1 and ok2
+            # Sourced answers used to return before reaching the provider
+            # fallback. With the primary breaker open this goes straight to it.
+            hits.clear()
+            got = _llm2.answer_question("q?", ["source"], cfg)
+            ok3 = got == "Line." and hits == [
+                "https://openrouter.ai/api/v1/chat/completions"]
+            return ok1 and ok2 and ok3
         finally:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
@@ -1066,6 +1072,11 @@ def main() -> int:
             return False
         if funfacts._weather_header("whats the capital of Australia") != \
                 (None, None):
+            return False
+        if funfacts._clock_12h("2026-09-15T06:38") != "6:38 AM":
+            return False
+        if "OPEN_METEO_API" not in pathlib.Path(
+                "funfacts.py").read_text(encoding="utf-8"):
             return False
         if funfacts._records_on_topic(
                 "Ivory Coast",
@@ -1611,11 +1622,14 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "build unknown" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
-        ("chat survives a rate-limited provider: the fallback answers",
+        ("chat and facts survive a rate-limited provider: fallback answers",
          callable(_llm2.fallback_endpoint)
+         and callable(_llm2.fallback_problem)
          and _llm2.fallback_endpoint({}) is None
          and _llm2.fallback_endpoint({"llm_fallback_key": "k",
                                       "llm_fallback_model": "m"}) is not None
+         and "fallback READY" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
@@ -1665,7 +1679,7 @@ def main() -> int:
          and "follow_total" in pathlib.Path(
              "access.py").read_text(encoding="utf-8")
          and _follows_question_works()),
-        ("weather is not a FunFact; the records miner stays on topic",
+        ("live weather/sunrise are data; the records miner stays on topic",
          callable(getattr(funfacts, "_weather_header", None))
          and callable(getattr(funfacts, "_records_on_topic", None))
          and "kind" in pathlib.Path(

@@ -47,6 +47,8 @@ USER_AGENT = ("ClawFacts/1.0 "
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
+OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # sunrise/sunset
+OPEN_METEO_GEOCODE_API = "https://geocoding-api.open-meteo.com/v1/search"
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
 TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
@@ -874,7 +876,7 @@ def _fit_fact(fact: str, limit: int, opts: dict) -> str:
         import llm
     except Exception:
         llm = None
-    if llm and llm.is_configured(opts):
+    if llm and llm.any_configured(opts):
         try:
             s = llm.summarize(fact, limit, opts)
             if s:
@@ -1955,6 +1957,50 @@ def _osm_geocode(query: str):
     return _parse_geocode(data[0])
 
 
+def _open_meteo_geocode(query: str):
+    """Second keyless geocoder for live clock data when Nominatim is down."""
+    parts = [p.strip() for p in (query or "").split(",") if p.strip()]
+    city = parts[0] if parts else (query or "").strip()
+    region = parts[1].lower() if len(parts) > 1 else ""
+    if not region:
+        suffix = re.match(r"^(.*?)\s+([A-Za-z]{2})$", city)
+        if suffix and suffix.group(2).lower() in (
+                set(_US_STATES) | set(_CA_PROVINCES)):
+            city, region = suffix.group(1).strip(), suffix.group(2).lower()
+    region = (_US_STATES.get(region) or _CA_PROVINCES.get(region)
+              or region).lower()
+    if not city:
+        return None
+    try:
+        data = _http_get_json(
+            OPEN_METEO_GEOCODE_API,
+            {"name": city, "count": 10, "language": "en", "format": "json"},
+            timeout=10)
+    except Exception as exc:
+        print(f"[funfacts] open-meteo geocoder error: {exc!r}", flush=True)
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return None
+    for item in results:
+        admin = str(item.get("admin1") or "").strip()
+        if region and admin.lower() != region:
+            continue
+        try:
+            lat, lon = float(item["latitude"]), float(item["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        return {"name": str(item.get("name") or city).strip(),
+                "state": admin,
+                "county": str(item.get("admin2") or "").strip(),
+                "country": str(item.get("country") or "").strip(),
+                "lat": lat, "lon": lon,
+                "display_name": ", ".join(
+                    x for x in (str(item.get("name") or city).strip(), admin,
+                                str(item.get("country") or "").strip()) if x)}
+    return None
+
+
 # ---- optional LLM writer (OpenRouter / OpenAI-compatible) -------------------
 
 # Hard backstop against sexually explicit chat output. The LLM prompt forbids
@@ -2389,7 +2435,7 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
     except Exception as exc:
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return []
-    if not llm.is_configured(options):
+    if not llm.any_configured(options):
         if "llm_missing" not in _log_once:
             _log_once.add("llm_missing")
             print("[funfacts] spicy mode: no LLM configured — facts will be plain "
@@ -2939,7 +2985,7 @@ def _llm_only_facts(location: str, limit: int, opts: dict) -> list:
     except Exception as exc:
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return []
-    if not llm.is_configured(opts):
+    if not llm.any_configured(opts):
         print("[funfacts] fact_source='llm' but no LLM is configured — set "
               "llm_api_key / GROQ_API_KEY / OPENROUTER_API_KEY, or a local "
               "Ollama (llm_base_url http://localhost:11434/v1).", flush=True)
@@ -3051,6 +3097,83 @@ def _question_wiki_hits(subject: str):
 _WEATHER_Q = re.compile(r"\bweather\b", re.IGNORECASE)
 _IN_PLACE = re.compile(
     r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
+_SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
+_SOLAR_PLACE = re.compile(
+    r"\b(?:in|for|at)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
+
+
+def _clock_12h(value: str) -> str | None:
+    """``2026-09-15T06:37`` -> ``6:37 AM``, without timezone guessing."""
+    try:
+        clock = (value or "").rsplit("T", 1)[1][:5]
+        hour, minute = (int(x) for x in clock.split(":"))
+    except (IndexError, TypeError, ValueError):
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{(hour % 12) or 12}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+
+
+def _solar_answer(question: str):
+    """A live sunrise/sunset answer, ``False`` when this is not that query.
+
+    Search snippets are disastrous for clock questions: the exact live-fire
+    request for Vandalia returned “All times are local time” with no time in it.
+    Geocode the requested place, then ask Open-Meteo for the calculated local
+    sunrise/sunset directly. No model is involved and no snippet can masquerade
+    as the answer.
+    """
+    event_match = _SOLAR_Q.search(question or "")
+    if not event_match:
+        return False
+    event = event_match.group(1).lower()
+    place_match = _SOLAR_PLACE.search((question or "").strip())
+    # “Sunset, Louisiana” is a place lookup, not an astronomy question.
+    if not place_match and not re.search(
+            r"\b(?:what time|when|today|tomorrow|expect(?:ing|ed)|rise|set)\b|\?",
+            question or "", re.IGNORECASE):
+        return False
+    place = place_match.group(1).strip(" ,.?!)") if place_match else ""
+    # Accept both “sunrise tomorrow in X” and “sunrise in X tomorrow”.
+    day = "tomorrow" if re.search(r"\btomorrow\b", question or "",
+                                   re.IGNORECASE) else "today"
+    place = re.sub(r"\b(?:today|tomorrow|tonight)\b", "", place,
+                   flags=re.IGNORECASE).strip(" ,")
+    kind = event.title()
+    if not place:
+        return {"place": "requested place", "kind": kind,
+                "facts": [f"I need a city or town to look up {event}."]}
+
+    geo = _osm_geocode(place) or _open_meteo_geocode(place)
+    label = place
+    if geo:
+        label = ", ".join(x for x in (geo.get("name"), geo.get("state")) if x)
+    if not geo:
+        print(f"[funfacts] could not geocode {event} place: {place}", flush=True)
+        return {"place": label, "kind": kind, "_ttl": _BUSY_TTL,
+                "facts": [f"I couldn't fetch the {event} time right now; "
+                          "try me again in a minute."]}
+    try:
+        data = _http_get_json(
+            OPEN_METEO_API,
+            {"latitude": geo["lat"], "longitude": geo["lon"],
+             "daily": "sunrise,sunset", "timezone": "auto",
+             "forecast_days": 2}, timeout=10)
+        values = (data.get("daily") or {}).get(event) or []
+        index = 1 if day == "tomorrow" else 0
+        value = values[index]
+        clock = _clock_12h(value)
+        if not clock:
+            raise ValueError(f"bad {event} value: {value!r}")
+    except Exception as exc:
+        print(f"[funfacts] {event} lookup failed: {exc!r}", flush=True)
+        return {"place": label, "kind": kind, "_ttl": _BUSY_TTL,
+                "facts": [f"I couldn't fetch the {event} time right now; "
+                          "try me again in a minute."]}
+    print(f"[funfacts] {event} for {label}: {clock} local time {day}",
+          flush=True)
+    return {"place": label, "kind": kind, "_ttl": 900,
+            "facts": [f"{kind} is expected around {clock} local time {day}."]}
 
 
 def _weather_header(question: str):
@@ -3063,7 +3186,7 @@ def _weather_header(question: str):
     label instead of the whole question."""
     if not _WEATHER_Q.search(question or ""):
         return None, None
-    m = _IN_PLACE.search((question or "").strip())
+    m = _IN_PLACE.search((question or "").strip().rstrip(" ?!."))
     place = " ".join(m.group(1).split()) if m else None
     return place, "Weather"
 
@@ -3320,7 +3443,7 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
     except Exception as exc:
         print(f"[funfacts] llm import error: {exc!r}", flush=True)
         return None
-    if not llm.is_configured(opts):
+    if not llm.any_configured(opts):
         if "no_llm" not in _log_once:
             _log_once.add("no_llm")
             print("[funfacts] cannot answer free-form questions: no LLM is "
@@ -3440,8 +3563,12 @@ def get_funfact(location: str, options=None):
             _cache.pop(key, None)
 
     if entry is None:
-        result = None
-        if llm_only:
+        # Live clock data is not a place fun fact and must never go through a
+        # search snippet or an LLM. ``False`` means this is not a solar query;
+        # a dict (including a transparent fetch failure) is the whole answer.
+        solar = _solar_answer(location.strip())
+        result = None if solar is False else solar
+        if result is None and llm_only:
             facts = _llm_only_facts(location.strip(), limit, opts)
             if facts:
                 result = {"place": location.strip(), "facts": facts}
@@ -3487,7 +3614,8 @@ def get_funfact(location: str, options=None):
                 # facts arrive ranked best-first; show facts[0] on the first
                 # call so the reply matches the place's most famous story.
                 entry = {"place": result["place"], "facts": list(result["facts"]),
-                         "shown": 0, "t": now, "ttl": _HIT_TTL}
+                         "kind": result.get("kind"), "shown": 0, "t": now,
+                         "ttl": result.get("_ttl", _HIT_TTL)}
             else:
                 entry = {"place": None, "facts": [], "shown": 0,
                          "t": now, "ttl": _MISS_TTL}
@@ -3518,7 +3646,10 @@ def get_funfact(location: str, options=None):
         entry["shown"] = shown + 1
         entry["last"] = fact
 
-    return {"place": place, "fact": _fit_fact(fact, limit, opts)}
+    out = {"place": place, "fact": _fit_fact(fact, limit, opts)}
+    if entry.get("kind"):
+        out["kind"] = entry["kind"]
+    return out
 
 
 if __name__ == "__main__":

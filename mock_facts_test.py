@@ -3043,6 +3043,66 @@ def test_the_geocoder_may_not_substitute_a_different_place():
     print("[PASS] the geocoder cannot substitute a different place")
 
 
+def test_sunrise_uses_live_clock_data_not_search_debris():
+    """Exact live-fire query: a search snippet said only “all times are local”.
+    Sunrise/sunset must use geocoded Open-Meteo data, include the actual clock
+    time, and retain its non-FunFact label after passing through the cache."""
+    original_geo, original_http = funfacts._osm_geocode, funfacts._http_get_json
+    calls = []
+    funfacts._osm_geocode = lambda place: {
+        "name": "Vandalia", "state": "Illinois", "country": "United States",
+        "lat": 38.96, "lon": -89.09}
+
+    def _http(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        if url == funfacts.OPEN_METEO_GEOCODE_API:
+            return {"results": [
+                {"name": "Vandalia", "admin1": "Ohio",
+                 "country": "United States", "latitude": 39.9,
+                 "longitude": -84.2},
+                {"name": "Vandalia", "admin1": "Illinois",
+                 "admin2": "Fayette", "country": "United States",
+                 "latitude": 38.96, "longitude": -89.09}]}
+        assert url == funfacts.OPEN_METEO_API, url
+        return {"timezone": "America/Chicago",
+                "daily": {"time": ["2026-09-15", "2026-09-16"],
+                          "sunrise": ["2026-09-15T06:38",
+                                      "2026-09-16T06:39"],
+                          "sunset": ["2026-09-15T19:05",
+                                     "2026-09-16T19:03"]}}
+
+    funfacts._http_get_json = _http
+    question = "what time we expecting sunrise today in Vandalia, IL ?"
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        got = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got == {"place": "Vandalia, Illinois",
+                       "fact": "Sunrise is expected around 6:38 AM local time today.",
+                       "kind": "Sunrise"}, got
+        assert len(calls) == 1, calls
+        # Cache output must retain kind; losing it recreated “FunFact | ...”.
+        got2 = funfacts.get_funfact(question, {"answer_questions": True})
+        assert got2["kind"] == "Sunrise" and "6:38 AM" in got2["fact"], got2
+        assert len(calls) == 1, "live lookup ignored its short cache"
+        # If Nominatim is unavailable, Open-Meteo's geocoder is a second
+        # keyless route and must honor the requested state, not the first city
+        # with the same name.
+        funfacts._osm_geocode = lambda place: None
+        tomorrow = funfacts._solar_answer(
+            "what time is sunset tomorrow in Vandalia, IL?")
+        assert tomorrow["kind"] == "Sunset", tomorrow
+        assert tomorrow["place"] == "Vandalia, Illinois", tomorrow
+        assert "7:03 PM" in tomorrow["facts"][0], tomorrow
+        assert [c[0] for c in calls[-2:]] == [
+            funfacts.OPEN_METEO_GEOCODE_API, funfacts.OPEN_METEO_API], calls
+    finally:
+        funfacts._osm_geocode, funfacts._http_get_json = original_geo, original_http
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] sunrise/sunset returns the actual local clock time")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -3145,6 +3205,7 @@ def main():
     test_tavily_supplies_the_sources_a_question_needs()
     test_spicy_mode_still_answers_questions()
     test_the_geocoder_may_not_substitute_a_different_place()
+    test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0
 
