@@ -1707,6 +1707,8 @@ def main() -> int:
                  __import__("json").loads(_llm2._build_body(
                      "nvidia/nemotron-3-ultra-550b-a55b:free", "u")))
          and "fallback_model_chain" not in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "fallback model not found" in pathlib.Path(
              "llm.py").read_text(encoding="utf-8")),
         ("the live bot forwards fallback/no-think options to the chat client",
          _bot_forwards_chat_options()),
@@ -1763,13 +1765,19 @@ def main() -> int:
          and "kind" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
          and _weather_and_miner_behave()),
-        ("a reply cut off mid-sentence is retried like an empty one",
+        ("cut-off replies retry; generated half-quotes are repaired",
          "_DANGLING_TAIL" in pathlib.Path(
              "llm.py").read_text(encoding="utf-8")
          and bool(_llm2._DANGLING_TAIL.search(
              "If they try to slash wages, I\u2019ll"))
+         and bool(_llm2._DANGLING_TAIL.search(
+             "The last thing I would want to be"))
          and not _llm2._DANGLING_TAIL.search(
-             "Running I-80 tonight, keep the hammer down")),
+             "Running I-80 tonight, keep the hammer down")
+         and callable(getattr(funfacts, "_finish_line", None))
+         and funfacts._finish_line(
+             'Daft Punk split, saying: "the last thing I want') ==
+             "Daft Punk split."),
         ("a direct ask never goes mute on an unusable reply",
          "one retry" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

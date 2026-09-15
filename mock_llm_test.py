@@ -457,6 +457,28 @@ def main():
         llm.urllib.request.urlopen = orig
     print("[PASS] a configured free reasoning model is never replaced")
 
+    # A rotated-away free slug says so once and opens only the fallback breaker.
+    def _free_slug_404(req, timeout=60):
+        if "groq" in req.full_url:
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(b"{}"))
+        raise _ue.HTTPError(req.full_url, 404, "not found", {},
+                            io.BytesIO(b'{"error":"no endpoints"}'))
+
+    llm.urllib.request.urlopen = _free_slug_404
+    out = io.StringIO()
+    try:
+        llm.reset_disable_state()
+        with contextlib.redirect_stdout(out):
+            assert llm.rewrite_fact("X", "X", ["seed"], freecfg) is None
+        assert "fallback model not found (HTTP 404)" in out.getvalue(), \
+            out.getvalue()
+        assert llm._fallback_unavailable(), "dead slug did not open its breaker"
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] a retired free fallback slug is named and disabled")
+
     # Factual answers used a different helper and ignored the configured
     # provider fallback completely. The same 429 failover must cover every LLM
     # path, not just persona chat.
@@ -588,6 +610,22 @@ def main():
         captured.clear()
         got = llm.chat_reply("s", "u" * 20, fbcfg)
         assert got == "If they slash wages, I park the rig.", got
+        budgets = [json.loads(c["body"]).get("max_completion_tokens")
+                   for c in captured]
+        assert budgets == [300, 600], budgets
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    # Auxiliaries are dangling too: the live cut-off ended on “want to be”.
+    _fake, _ = _empty_chain(
+        ["The last thing I would want to be",
+         "The last thing I would want is a quiet truck stop."], "FB.")
+    llm.urllib.request.urlopen = _fake
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "The last thing I would want is a quiet truck stop.", got
         budgets = [json.loads(c["body"]).get("max_completion_tokens")
                    for c in captured]
         assert budgets == [300, 600], budgets

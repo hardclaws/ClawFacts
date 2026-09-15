@@ -2621,6 +2621,18 @@ def test_a_long_fact_is_cut_at_a_clause_never_a_dangler():
     print("[PASS] a long fact is cut at a clause, never a dangler")
 
 
+def test_a_generated_half_quote_is_repaired_before_chat():
+    cut = ('He cited concerns about preserving Daft Punk as to why they split, '
+           'saying: "As much as I love this character, the last thing I would '
+           'want to be')
+    fixed = funfacts._finish_line(cut)
+    assert fixed == ("He cited concerns about preserving Daft Punk as to why "
+                     "they split."), fixed
+    assert '"' not in fixed and not fixed.endswith(("saying.", "be.")), fixed
+    assert funfacts._finish_line('"unfinished from the first word') == ""
+    print("[PASS] a generated half-quote is repaired before chat")
+
+
 def test_hype_answers_and_demonyms_do_not_count():
     """Round five: "Get ready to meet the world's longest truck \u2014 an
     absolute beast tearing across the wild Australian outback!" The hook
@@ -3254,6 +3266,7 @@ def main():
     test_record_claims_and_glued_lists_never_post()
     test_headings_in_sentence_case_and_captions_never_post()
     test_a_long_fact_is_cut_at_a_clause_never_a_dangler()
+    test_a_generated_half_quote_is_repaired_before_chat()
     test_hype_answers_and_demonyms_do_not_count()
     test_the_question_search_tries_simpler_subjects()
     test_the_records_miner_answers_when_the_model_will_not()

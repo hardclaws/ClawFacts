@@ -64,6 +64,8 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 #: one, so it pays the same doubled-budget retry as an empty reply.
 _DANGLING_TAIL = re.compile(
     r"\b(?:and|or|but|because|the|a|an|to|of|in|on|at|for|with|from|"
+    r"be|been|being|do|does|did|have|has|had|will|would|can|could|"
+    r"shall|should|may|might|must|"
     r"i['\u2019]ll|you['\u2019]ll|we['\u2019]ll|they['\u2019]ll)"
     r"[^A-Za-z0-9]*$", re.IGNORECASE)
 
@@ -133,6 +135,11 @@ def _disable_fallback(code: int) -> None:
         _FALLBACK_DISABLED_UNTIL = time.time() + 3600
         print("[llm] fallback account has no credits (HTTP 402). "
               "Fallback disabled for an hour.", flush=True)
+    elif code == 404:
+        _FALLBACK_DISABLED_UNTIL = time.time() + 21600
+        print("[llm] fallback model not found (HTTP 404) - free slugs rotate; "
+              "pick a live reasoning model from openrouter.ai/models. "
+              "Fallback disabled for this session.", flush=True)
     elif code == 429:
         _FALLBACK_DISABLED_UNTIL = time.time() + 120
         print("[llm] fallback rate-limited (HTTP 429); backing off for "
@@ -639,7 +646,7 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
             detail = exc.read().decode("utf-8", "replace").strip()[:300]
         except Exception:
             pass
-        if exc.code in (401, 402, 403, 429):
+        if exc.code in (401, 402, 403, 429) or (fallback and exc.code == 404):
             (_disable_fallback if fallback else _disable)(exc.code)
         readiness = " - fallback NOT READY" if fallback else ""
         print(f"[llm] warm-up of {model} failed (HTTP {exc.code})"
@@ -668,7 +675,8 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
                     "utf-8", "replace").strip()[:300]
             except Exception:
                 pass
-            if exc.code in (401, 402, 403, 429):
+            if exc.code in (401, 402, 403, 429) or \
+                    (fallback and exc.code == 404):
                 (_disable_fallback if fallback else _disable)(exc.code)
             readiness = " - fallback NOT READY" if fallback else ""
             print(f"[llm] warm-up retry of {model} failed (HTTP {exc.code})"
@@ -868,6 +876,9 @@ def _complete_provider(base: str, model: str, key: str, user: str,
                 # fails the same way. Open only this provider's breaker; the
                 # outer wrapper can immediately try the other provider.
                 (_disable_fallback if fallback else _disable)(exc.code)
+                return None
+            if fallback and exc.code == 404:
+                _disable_fallback(404)
                 return None
             if exc.code in (400, 404, 422) and m != candidates[-1]:
                 print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying "

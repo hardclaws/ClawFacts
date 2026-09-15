@@ -632,8 +632,47 @@ _DANGLING_TAIL = re.compile(
     r"is|are|was|were|that|which|who|whose|their|its|his|her|they|it|he|"
     r"she|than|so|such|while|when|where|after|before|during|toward|towards|"
     r"into|onto|over|under|near|across|along|around|between|through|"
-    r"without|within|beyond|up|down|out|off)\s*$",
+    r"without|within|beyond|up|down|out|off|"
+    r"be|been|being|do|does|did|have|has|had|will|would|can|could|"
+    r"shall|should|may|might|must)\s*$",
     re.IGNORECASE)
+
+#: Speech verbs dangle off a cut quote: '...split, saying:' is a lead-in whose
+#: quote disappeared with the truncated tail.
+_DANGLING_SAY = re.compile(
+    r"\s*\b(?:saying|said|says|telling|told|asking|asked|according)\W*$",
+    re.IGNORECASE)
+_DANGLING_PRONOUN = re.compile(
+    r"\s*\b(?:i|we|you|they|he|she|it|this|that|there)\W*$",
+    re.IGNORECASE)
+
+
+def _finish_line(s: str) -> str:
+    """Repair a generated line to its last complete clause, or reject it.
+
+    A model can fit under the character limit while still stopping mid-quote
+    or on an auxiliary (the field report ended “the last thing I would want to
+    be”). Remove the incomplete quote and dangling lead-ins before any such
+    line reaches grounding, caching, or chat.
+    """
+    s = _ELLIPSIS_END.sub("", (s or "").strip())
+    if s.count("\u201c") > s.count("\u201d"):
+        s = s[:s.rfind("\u201c")]
+    if s.count('"') % 2 == 1:
+        s = s[:s.rfind('"')]
+    s = s.rstrip(" ,;:-\u2014\u2026")
+    while True:
+        new = _DANGLING_TAIL.sub(
+            "", _DANGLING_PRONOUN.sub("", _DANGLING_SAY.sub("", s))).rstrip(
+                " ,;:-\u2014")
+        if new == s:
+            break
+        s = new
+    if not s or len(s) < 12 or s.endswith(":"):
+        return ""
+    if s[-1] not in ".!?\u201d'\")]":
+        s += "."
+    return s
 
 
 def _tidy_sentence(s: str) -> str:
@@ -882,6 +921,7 @@ def _fit_fact(fact: str, limit: int, opts: dict) -> str:
             s = llm.summarize(fact, limit, opts)
             if s:
                 s = " ".join(s.split()).strip('"“”')
+                s = _finish_line(s)
                 # stay grounded: the summary may not introduce names/dates
                 # that the source fact didn't contain.
                 s2 = _grounded_filter([s], "", "", [fact])
@@ -2475,6 +2515,9 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         # Drop chain-of-thought / meta chatter before it can reach chat.
         if _META_LINE.match(ln):
             continue
+        ln = _finish_line(ln)
+        if not ln:
+            continue
         lines.append(ln)
     kept = [ln for ln in lines if not _EXPLICIT.search(ln)
             and not _TASTELESS.search(ln)]
@@ -3613,6 +3656,9 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
             ln = re.sub(r"^\s*(?:\d{1,2}[.)]\s*|[-\u2022*]\s*)", "", ln)
             ln = ln.replace("**", "").replace("`", "").strip()
             if not ln or _META_LINE.match(ln):
+                continue
+            ln = _finish_line(ln)
+            if not ln:
                 continue
             if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
                 continue

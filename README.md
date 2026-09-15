@@ -627,7 +627,9 @@ fun facts. Three layers, in order:
    any rowdy stories the supplied facts actually contain, each ≤ 200 chars."*
    The model rewrites **only the supplied facts** (never invents its own),
    returns up to 10 one-liners, and the bot serves the top one first, then a
-   random one on repeat calls. **This is what makes spicy mode actually spicy**
+   random one on repeat calls. A line cut off mid-quote is repaired to its last
+   complete clause or dropped before it can reach chat. **This is what makes
+   spicy mode actually spicy**
    — but see the note below: for real adult output you want a **local Ollama
    model**, because hosted models are filtered.
 
