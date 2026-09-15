@@ -850,6 +850,24 @@ def main() -> int:
             return False          # def + the three failure paths
         return True
 
+    def _subgoal_command_works():
+        """!subgoal: anyone reads the progress, mods maintain it, and
+        the arithmetic on the way to the goal is right."""
+        b = _bot.TwitchBot(
+            dict(_bot.DEFAULTS, nick="n", channel="#c",
+                 oauth_token="oauth:x",
+                 subgoal_state_path=os.path.join(
+                     tempfile.mkdtemp(), "sg.json")))
+        said = []
+        b._say = said.append
+        if not b._subgoal_mutation("amod", "moderator/1",
+                                   "set 50 wear a clown costume"):
+            return False
+        if not b._subgoal_mutation("amod", "moderator/1", "add 12"):
+            return False
+        b._say_subgoal("kvack")
+        return "12/50" in said[-1] and "38 to go" in said[-1]
+
     def _chat_ai_remembers_and_forgets():
         """The chat AI's memory: a log pruned to 90 days, distilled
         per-viewer facts injected into its prompts, a 25-fact cap, and
@@ -1322,6 +1340,16 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("mods can switch the bot's voice at runtime (presets + custom)",
+         len(_ch2.PERSONAS) >= 5
+         and _ch2.PERSONAS["doc"] == _ch2.DEFAULT_PERSONA
+         and callable(_ch2.persona) and _ch2.persona("sarge")
+         and "_persona_command" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "_persona_text" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
+        ("!subgoal tracks the sub goal: set/count/add/sub/clear",
+         _subgoal_command_works()),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

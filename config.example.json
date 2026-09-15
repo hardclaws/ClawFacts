@@ -68,5 +68,9 @@
   "chat_ai_quiet_seconds": 90,
   "chat_ai_quiet_cooldown": 150,
   "log_file": "",
-  "_log_file": "Set to a filename (e.g. \"bot.log\") and everything the console shows is also appended to that file - including crash tracebacks - so the log survives the window scrolling away. Watch it live with PowerShell: Get-Content .\\bot.log -Wait. Empty = console only."
+  "_log_file": "Set to a filename (e.g. \"bot.log\") and everything the console shows is also appended to that file - including crash tracebacks - so the log survives the window scrolling away. Watch it live with PowerShell: Get-Content .\\bot.log -Wait. Empty = console only.",
+  "persona_state_path": "persona.json",
+  "_persona_state_path": "Where the mod-chosen voice (!persona set) is saved so it survives restarts. The bot's available voices: doc, sarge, rookie, rusty, nightshift - or !persona custom <description>.",
+  "subgoal_state_path": "subgoal.json",
+  "_subgoal_state_path": "Where the sub goal (!subgoal set <goal> <what happens when we hit it>) is saved. Twitch only lets the broadcaster's own token read live sub counts, so mods keep the number moving with !subgoal add/sub/count - anyone can check it with a bare !subgoal."
 }

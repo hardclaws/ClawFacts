@@ -32,6 +32,8 @@ def _bot(**over):
            "chat_ai_enabled": True,
            "beef_state_path": os.path.join(tempfile.mkdtemp(), "bs.json"),
            "memory_db_path": os.path.join(tempfile.mkdtemp(), "mem.db"),
+           "persona_state_path": os.path.join(tempfile.mkdtemp(), "p.json"),
+           "subgoal_state_path": os.path.join(tempfile.mkdtemp(), "sg.json"),
            **over}
     b = bot_mod.TwitchBot(cfg)
     b.said = []
@@ -471,6 +473,60 @@ def test_factual_questions_get_the_engine_first():
           "persona keeps opinions")
 
 
+def test_mods_can_switch_the_bots_voice():
+    """!persona: show, list, set, custom, reset - moderators only. The
+    chosen voice is what the model actually receives (pinned by
+    capturing the system prompt), and it survives a restart."""
+    assert len(chatai.PERSONAS) >= 5
+    assert len(set(chatai.PERSONAS.values())) == len(chatai.PERSONAS)
+    assert chatai.persona("SARGE") == chatai.PERSONAS["sarge"]
+    assert chatai.persona("nope") is None
+    assert chatai.PERSONAS["doc"] == chatai.DEFAULT_PERSONA
+
+    b = _bot(llm_api_key="k")
+    pre = bot_mod.DEFAULTS["prefix"]
+    # A viewer gets silence.
+    b._on_message("kvack", "#t", "!persona set sarge", "kvack", "")
+    assert b._jobs.empty()
+    b._persona_command("kvack", "", "set sarge")
+    assert b.said == [], b.said
+    # A mod switches to Sarge; the model's system prompt is Sarge's.
+    systems = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c: (systems.append(s) or "Copy that.")
+    try:
+        b._persona_command("amod", "moderator/1", "set sarge")
+        assert any("voice set to sarge" in s for s in b.said), b.said
+        assert b._persona_text() == chatai.PERSONAS["sarge"]
+        b._on_message("Hardclaws", "#t", "doc what do you think",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert systems and chatai.PERSONAS["sarge"] in systems[0]
+        # Unknown name, list, custom validation, reset.
+        b._persona_command("amod", "moderator/1", "set nobody")
+        assert any("no voice called" in s for s in b.said), b.said
+        b._persona_command("amod", "moderator/1", "list")
+        assert any("sarge" in s and "rookie" in s for s in b.said), b.said
+        b._persona_command("amod", "moderator/1", "custom too short")
+        assert any("12-300" in s for s in b.said), b.said
+        b._persona_command("amod", "moderator/1",
+                           "custom You are a pirate captain who "
+                           "delivers freight by sea and complains about it")
+        assert any("custom voice set" in s for s in b.said), b.said
+        assert "pirate" in b._persona_text()
+        b._persona_command("amod", "moderator/1", "reset")
+        assert any("back to Doc" in s for s in b.said), b.said
+        assert b._persona_text() == chatai.DEFAULT_PERSONA
+    finally:
+        llm.chat_reply = orig
+    # It survives a restart: a fresh bot on the same state file loads it.
+    b._persona_command("amod", "moderator/1", "set rookie")
+    b2 = _bot(persona_state_path=b.cfg["persona_state_path"])
+    assert b2._persona_text() == chatai.PERSONAS["rookie"]
+    print("[PASS] mods can switch the bot's voice; it reaches the model "
+          "and survives restarts")
+
+
 def test_no_failed_chat_attempt_is_silent():
     """'are you a Miami Dolphins fan as well?' got no reply AND no log
     line. Three paths were silent - a mention held by its cooldown, the
@@ -880,6 +936,7 @@ def main():
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
+    test_mods_can_switch_the_bots_voice()
     test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()
     test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()

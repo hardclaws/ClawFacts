@@ -228,6 +228,7 @@ Quick-and-dirty local alternatives:
 | `!help`               | Lists the commands and who may use them.                      |
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
 | `!ask anything`       | The bot answers in its own voice (see the chat AI below).     |
+| `!subgoal`            | The sub goal and how many subs to go (mods maintain it).      |
 
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
@@ -316,6 +317,43 @@ messages never trigger it: he already has the floor.
 The voice is `bot_personality` in `config.json` — your words, your
 rules — and the built-in default is Doc: a dry-witted old trucker who
 has been everywhere twice.
+
+### Changing the voice
+
+Mods can switch the persona at runtime — it reaches the model
+immediately and survives restarts (`!persona` is mod-only):
+
+```
+!persona            - which voice is active
+!persona list       - the voices
+!persona set sarge  - switch
+!persona custom <12-300 characters describing the voice>
+!persona reset      - back to Doc
+```
+
+The built-in voices: **doc** (the default long-haul dry wit), **sarge**
+(barking dispatcher, loud but never cruel), **rookie** (three weeks on
+the job, terrified of geese), **rusty** (shop mechanic, duct tape and
+blasphemy), **nightshift** (smooth 3am AM-radio voice). Every persona
+sits under the same hard rules — a voice changes the flavour, never the
+rails.
+
+### The sub goal
+
+`!subgoal` is open to everyone: it shows the current count, the goal,
+what happens when it's reached, and how many to go. Mods maintain it:
+
+```
+!subgoal set 50 wear a clown costume for a full driving shift
+!subgoal add 1     - a new sub
+!subgoal sub 1     - a sub lapsed
+!subgoal count 37  - sync the number from the dashboard
+!subgoal clear
+```
+
+Why manual: Twitch only lets the *broadcaster's own* token read live
+sub counts — the bot's token can't, by API design. `!subgoal count` is
+the honest sync point; `add`/`sub` keep it moving between syncs.
 
 ### It remembers its viewers
 
@@ -1852,6 +1890,7 @@ appends fake joke comments.
 | `mock_reminders_test.py` | Offline reminder and haul tests.          |
 | `mock_whois_test.py` | Offline `!whois` / `!twitch` tests.             |
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
+| `mock_subgoal_test.py` | Offline !subgoal tests.                        |
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
 | `mock_beef_test.py`  | Offline `!beef` story tests.                    |
 | `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |

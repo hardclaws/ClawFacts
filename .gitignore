@@ -19,4 +19,8 @@ beef_state.json
 
 # The chat AI's memory (runtime data, not code)
 chat_memory.db*
+
+# the mod-chosen voice and the sub goal (runtime state)
+persona.json
+subgoal.json
 *.log

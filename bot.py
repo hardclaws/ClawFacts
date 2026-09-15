@@ -104,6 +104,10 @@ BEEF_STATS_WORDS = {"stats", "stat", "score", "scoreboard", "leaderboard",
 CMD_COMMANDS = {"cmd", "customcmd"}
 # !forget <viewer> - wipe the chat AI's memory of that viewer (mods).
 FORGET_COMMANDS = {"forget"}
+# The bot's voice: !persona show/list/set/custom/reset, moderators only.
+PERSONALITY_COMMANDS = {"persona", "personality", "voice"}
+# The sub goal: anyone can read it, moderators maintain it.
+SUBGOAL_COMMANDS = {"subgoal", "subgoals"}
 
 # Everything a moderator must not be able to redefine. Without this, "!help"
 # typed by a moderator would silently stop meaning help.
@@ -186,6 +190,10 @@ DEFAULTS = {
     # 90 days; distilled per-viewer facts stay until a mod runs
     # !forget <viewer>, which erases everything held about them.
     "memory_db_path": "chat_memory.db",
+    # Runtime state files (like haul.json): the mod-chosen persona and
+    # the sub goal survive restarts without touching config.json.
+    "persona_state_path": "persona.json",
+    "subgoal_state_path": "subgoal.json",
     # Keep the console log in a file too (e.g. "bot.log"): everything the
     # window shows, plus crash tracebacks, survives the scrollback.
     # Empty = console only.
@@ -407,6 +415,10 @@ class TwitchBot:
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
+        self._persona = self._load_json_state(
+            self.cfg.get("persona_state_path", "persona.json"))
+        self._subgoal = self._load_json_state(
+            self.cfg.get("subgoal_state_path", "subgoal.json"))
         self._chat_ai_pending = []              # mentions held by cooldown
         self._chat_ai_names = set(
             str(n).lower() for n in
@@ -832,6 +844,17 @@ class TwitchBot:
             self._say_haul(nick)
             return
 
+        # The sub goal: anyone can check the progress, moderators maintain
+        # the numbers. Same shape as !haul - mutations answered even while
+        # paused, the read open to everyone.
+        if command in SUBGOAL_COMMANDS:
+            if self._subgoal_mutation(nick, badges, argument):
+                return
+            if self.paused:
+                return
+            self._say_subgoal(nick)
+            return
+
         # Defining a command is moderation rather than chatter, so like
         # !haul update it stays reachable while the bot is switched off.
         if command in CMD_COMMANDS:
@@ -842,6 +865,12 @@ class TwitchBot:
         # moderation command, reachable while the bot is switched off.
         if command in FORGET_COMMANDS:
             self._forget_command(nick, badges, argument)
+            return
+
+        # !persona <show|list|set|custom|reset> manages the bot's voice.
+        # A moderation command, reachable while the bot is switched off.
+        if command in PERSONALITY_COMMANDS:
+            self._persona_command(nick, badges, argument)
             return
 
         if self.paused:
@@ -1989,8 +2018,7 @@ class TwitchBot:
         the quiet-room opener. `vary` re-asks after a too-similar reply
         (explicit commands get one redemption; ambient lines do not)."""
         import llm as llm_mod
-        persona = self.cfg.get("bot_personality", "") or \
-            chatai.DEFAULT_PERSONA
+        persona = self._persona_text()
         speakers = [n for n, _ in lines[-6:]] + [nick]
         memories = self._memory.recall(speakers) if self._memory.ok else []
         # A local model on CPU reads the whole prompt before writing a
@@ -2200,6 +2228,179 @@ class TwitchBot:
         self._distill(nick, self._chat_ai_snapshot())
         return True
 
+    def _load_json_state(self, path: str) -> dict:
+        """A small runtime state file (persona, sub goal). Missing or
+        corrupt means empty state, never a crash - a mod can always
+        re-set it."""
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_json_state(self, path: str, data: dict) -> None:
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+        except OSError as exc:
+            self._log(f"could not save {path}: {exc!r}")
+
+    def _persona_text(self) -> str:
+        """The persona the chat AI actually uses: the mod-chosen preset
+        or custom text, else the config's bot_personality, else Doc."""
+        p = self._persona or {}
+        if p.get("name") == "custom" and (p.get("text") or "").strip():
+            return p["text"].strip()
+        text = chatai.persona(p.get("name") or "")
+        if text:
+            return text
+        return self.cfg.get("bot_personality", "") or chatai.DEFAULT_PERSONA
+
+    def _persona_command(self, nick: str, badges: str,
+                         argument: str) -> None:
+        """!persona - show, list, set, custom, reset. Moderators only;
+        a viewer gets silence, like the other mod switches."""
+        pre = self.cfg.get("prefix", "!")
+        if access.tier_from_badges(badges) not in ("broadcaster",
+                                                   "moderator"):
+            self._log(f"!persona from {nick} ignored - not a mod")
+            return
+        args = (argument or "").strip()
+        if not args:
+            cur = (self._persona or {}).get("name") or "doc"
+            self._say(f"@{nick} current voice: {cur}. {pre}persona list "
+                      f"to see them all, {pre}persona set <name> to "
+                      f"switch.")
+            return
+        verb, _, rest = args.partition(" ")
+        verb = verb.lower()
+        rest = rest.strip()
+        if verb == "list":
+            names = ", ".join(sorted(chatai.PERSONAS))
+            self._say(f"@{nick} voices: {names} - {pre}persona set "
+                      f"<name>, or {pre}persona custom <description> for "
+                      f"your own.")
+            return
+        if verb == "set":
+            if chatai.persona(rest):
+                self._persona = {"name": rest.lower()}
+                self._save_json_state(self.cfg.get(
+                    "persona_state_path", "persona.json"), self._persona)
+                self._say(f"@{nick} voice set to {rest.lower()}.")
+                self._log(f"persona set to {rest.lower()} by {nick}")
+                return
+            self._say(f"@{nick} no voice called '{rest}'. {pre}persona "
+                      f"list shows them all.")
+            return
+        if verb == "custom":
+            text = rest
+            if not 12 <= len(text) <= 300:
+                self._say(f"@{nick} describe the voice in 12-300 "
+                          f"characters.")
+                return
+            if funfacts._EXPLICIT.search(text) \
+                    or funfacts._TASTELESS.search(text):
+                self._say(f"@{nick} not that kind of stream.")
+                return
+            self._persona = {"name": "custom", "text": text}
+            self._save_json_state(self.cfg.get(
+                "persona_state_path", "persona.json"), self._persona)
+            self._say(f"@{nick} custom voice set.")
+            self._log(f"persona set to custom by {nick}: {text[:60]!r}")
+            return
+        if verb in ("reset", "default", "doc"):
+            self._persona = {"name": "doc"}
+            self._save_json_state(self.cfg.get(
+                "persona_state_path", "persona.json"), self._persona)
+            self._say(f"@{nick} back to Doc.")
+            return
+        self._say(f"@{nick} {pre}persona [list|set <name>|custom <text>|"
+                  f"reset]")
+
+    def _subgoal_mutation(self, nick: str, badges: str,
+                          argument: str) -> bool:
+        """Handle sub-goal changes. True if this was a mutation."""
+        verb, _, rest = (argument or "").strip().partition(" ")
+        verb = verb.lower()
+        if verb not in ("set", "count", "add", "sub", "clear"):
+            return False
+        if access.tier_from_badges(badges) not in ("broadcaster",
+                                                   "moderator"):
+            self._log(f"!subgoal {verb} from {nick} ignored - not a mod")
+            return True          # recognised, but not theirs to change
+        pre = self.cfg.get("prefix", "!")
+        if verb == "clear":
+            self._subgoal = {}
+            self._save_json_state(self.cfg.get(
+                "subgoal_state_path", "subgoal.json"), self._subgoal)
+            self._say(f"@{nick} sub goal cleared.")
+            return True
+        if verb == "set":
+            # !subgoal set 50 wear a clown costume for a whole shift
+            number, _, label = rest.partition(" ")
+            try:
+                goal = int(number)
+            except ValueError:
+                goal = 0
+            label = label.strip()
+            if goal < 2 or not label:
+                self._say(f"@{nick} usage: {pre}subgoal set <goal> <what "
+                          f"happens when we hit it>")
+                return True
+            self._subgoal = {"goal": goal,
+                             "current": int(self._subgoal.get("current",
+                                                              0) or 0),
+                             "label": label}
+            self._save_json_state(self.cfg.get(
+                "subgoal_state_path", "subgoal.json"), self._subgoal)
+            self._say(self._fit(f"@{nick} sub goal set: ",
+                                self._subgoal_line()))
+            self._log(f"sub goal set by {nick}: {goal} - {label[:60]!r}")
+            return True
+        # count/add/sub all take one number
+        try:
+            n = int(rest.split()[0])
+        except (ValueError, IndexError):
+            n = None
+        if n is None:
+            self._say(f"@{nick} usage: {pre}subgoal count <N> | "
+                      f"add <N> | sub <N>")
+            return True
+        if not self._subgoal.get("goal"):
+            self._say(f"@{nick} no goal set yet - {pre}subgoal set <goal> "
+                      f"<what happens when we hit it> first.")
+            return True
+        if verb == "count":
+            self._subgoal["current"] = max(0, n)
+        elif verb == "add":
+            self._subgoal["current"] = self._subgoal.get("current", 0) + n
+        elif verb == "sub":
+            self._subgoal["current"] = max(
+                0, self._subgoal.get("current", 0) - n)
+        self._save_json_state(self.cfg.get(
+            "subgoal_state_path", "subgoal.json"), self._subgoal)
+        self._say(self._fit(f"@{nick} ", self._subgoal_line()))
+        self._log(f"sub goal now {self._subgoal.get('current')}/"
+                  f"{self._subgoal.get('goal')} (by {nick})")
+        return True
+
+    def _subgoal_line(self) -> str:
+        g = self._subgoal or {}
+        goal, current = g.get("goal") or 0, g.get("current") or 0
+        label = g.get("label") or "the goal"
+        if current >= goal:
+            return (f"GOAL REACHED - {current}/{goal} subs, and that "
+                    f"means: {label}. Pay up.")
+        return (f"{current}/{goal} subs - {label} - {goal - current} "
+                f"to go!")
+
+    def _say_subgoal(self, nick: str) -> None:
+        if not (self._subgoal or {}).get("goal"):
+            self._say(f"@{nick} no sub goal set right now.")
+            return
+        self._say(self._fit(f"@{nick} ", self._subgoal_line()))
+
     def _reply_ask(self, nick: str, argument: str) -> None:
         """!ask <anything> - the persona answers, falling back to facts.
 
@@ -2313,6 +2514,14 @@ class TwitchBot:
             self._queue_fitted(
                 f"@{nick} ", f"mods: {prefix}haul update <cargo> / delete, "
                 f"and {prefix}bot off / on / status")
+            self._queue_fitted(
+                f"@{nick} ", f"mods: {prefix}subgoal set <goal> <what "
+                f"happens when we hit it>, {prefix}subgoal count/add/sub "
+                f"<N> to keep it moving")
+            self._queue_fitted(
+                f"@{nick} ", f"mods: {prefix}persona set <name> changes "
+                f"the bot's voice ({prefix}persona list, custom <text>, "
+                f"reset)")
             self._queue_fitted(
                 f"@{nick} ", f"mods: {prefix}cmd add <name> <message> to "
                 f"create your own command, {prefix}cmd list / {prefix}cmd "
