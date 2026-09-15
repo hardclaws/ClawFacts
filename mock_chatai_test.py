@@ -169,37 +169,56 @@ def test_a_timed_out_model_is_not_asked_twice():
     """A !ask that timed out on the chat call used to stack a second,
     BIGGER model call (the question path carries the sources) on the
     same busy model - a guaranteed extra timeout, and the two-minute
-    !ask. When the chat call just timed out on a local model, the fact
-    path runs keyless (records/facts), no second model call."""
+    !ask. Factual questions now hit the engine FIRST (the persona
+    guesses on trivia), so the protection lives in two places: the
+    engine-first call skips a known-busy model, and the persona fallback
+    for non-factual questions does too."""
     b = _bot(llm_api_key="", llm_base_url="http://127.0.0.1:11434/v1")
     orig_call, orig_fact = llm._call, bot_mod.get_funfact
     got = []
 
     def _fact(q, o):
-        got.append(o)
+        got.append((q, o))
         return {"place": "Road train",
                 "fact": "A driver pulled 113 trailers for 1,235 metres."}
 
     try:
-        llm._call = lambda *a, **k: (_ for _ in ()).throw(
-            TimeoutError("timed out"))
         bot_mod.get_funfact = _fact
+        # A factual ask on a quiet model: the engine answers first, the
+        # model is never called, plain opts.
         b._reply_ask("kvack", "whats the longest truck in the world")
         assert b.said and "113 trailers" in b.said[0], b.said
-        assert got and got[0].get("_skip_llm") is True, got
-        # A healthy chat call never sets the skip.
+        assert got and got[0][1].get("_skip_llm") is None, got
+        # A non-factual ask whose chat call times out: the flag is set,
+        # and the fallback engine call carries _skip_llm - no second
+        # model call on the busy model.
         got.clear()
+        llm._call = lambda *a, **k: (_ for _ in ()).throw(
+            TimeoutError("timed out"))
+        b._reply_ask("hollieburgin", "tell me about the iowa 80 truck stop")
+        assert len(b.said) == 2 and "113 trailers" in b.said[1], b.said
+        assert got and got[0][1].get("_skip_llm") is True, got
+        # And while the model is flagged busy, even a factual ask skips
+        # the engine's model call.
+        got.clear()
+        b._reply_ask("kvack", "how many trailers did the record pull")
+        assert len(b.said) == 3, b.said
+        assert got and got[0][1].get("_skip_llm") is True, got
+        # A healthy chat call clears the flag; the engine runs plain.
         llm._call = (lambda base, model, key, user, system=None,
                      timeout=60.0, max_tokens=None, hard_nothink=False:
                      "Fastest? Mine.")
-        b._reply_ask("hollieburgin", "whats the fastest you ever drove")
-        assert b.said[-1] == "@hollieburgin Fastest? Mine.", b.said
-        assert not got, got
+        assert b._chat_ai_line([], "hollieburgin", "hello") == "Fastest? Mine."
+        got.clear()
+        b._reply_ask("kvack", "whats the longest truck in the world")
+        assert len(b.said) == 4, b.said
+        assert got and got[0][1].get("_skip_llm") is None, got
     finally:
         llm._call = orig_call
         llm._set_chat_timeout(False)
         bot_mod.get_funfact = orig_fact
-    print("[PASS] a timed-out model is not asked twice by !ask")
+    print("[PASS] a timed-out model is not asked twice - by the engine "
+          "path or the persona fallback")
 
 
 def test_a_tease_gets_a_comeback_when_the_model_is_down():
@@ -234,6 +253,60 @@ def test_a_tease_gets_a_comeback_when_the_model_is_down():
         llm._call = orig_call
         llm._set_chat_timeout(False)
     print("[PASS] a tease gets a Doc comeback when the model is down")
+
+
+def test_factual_questions_get_the_engine_first():
+    """Field report: !ask 'what is a bongo twist?' was answered with a
+    persona GUESS ('sounds like a spin on a roadside snack') while the
+    real answer sat in the fact engine - the streamer's own !funfact
+    returned 'cut by Vince Castro in 1960'. Factual questions now hit
+    the engine first; the persona keeps opinions, chat and misses."""
+    assert chatai.factual_question("what is a bongo twist")
+    assert chatai.factual_question("how many trailers can a truck pull")
+    assert chatai.factual_question("doc, what is a bongo twist",
+                                   ("doc", "docbot"))
+    assert chatai.factual_question("doc what is a bongo twist",
+                                   ("doc", "docbot"))
+    assert not chatai.factual_question("whats your favorite truck")
+    assert not chatai.factual_question("are you a dolphins fan")
+    assert not chatai.factual_question("how are you today")
+    assert not chatai.factual_question("doc whats your favorite truck",
+                                       ("doc", "docbot"))
+
+    b = _bot(llm_api_key="k")
+    b._distill = lambda nick, lines: None   # routing test, not a memory test
+    engine, persona = [], []
+    orig_fact, orig_reply = bot_mod.get_funfact, llm.chat_reply
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or {
+        "place": "Bongo Twist",
+        "fact": "Bongo Twist was cut by Vince Castro in 1960."})
+    llm.chat_reply = lambda s, u, c: (persona.append(u) or "a guess")
+    try:
+        # !ask: the engine answers, the persona is never called
+        b._reply_ask("Hardclaws", "what is a bongo twist?")
+        assert engine == ["what is a bongo twist?"], engine
+        assert not persona, persona
+        assert "Vince Castro" in b.said[0] and "FunFact |" in b.said[0], \
+            b.said
+        # A factual mention: same rule
+        b._on_message("Hardclaws", "#t", "doc what is a bongo twist",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert len(b.said) == 2 and "Vince Castro" in b.said[1], b.said
+        assert not persona, persona
+        # The engine has nothing: the persona still gets its chance
+        bot_mod.get_funfact = lambda q, o: None
+        b._reply_ask("kvack", "what is a flux capacitor")
+        assert persona, "the persona was never asked"
+        # About-the-bot questions never touch the engine
+        engine.clear()
+        b._reply_ask("kvack", "whats your favorite truck")
+        assert not engine, engine
+    finally:
+        bot_mod.get_funfact = orig_fact
+        llm.chat_reply = orig_reply
+    print("[PASS] factual questions get the grounded answer first; the "
+          "persona keeps opinions")
 
 
 def test_no_failed_chat_attempt_is_silent():
@@ -634,6 +707,7 @@ def main():
     test_ask_answers_with_persona_then_facts()
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
+    test_factual_questions_get_the_engine_first()
     test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()
     test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()

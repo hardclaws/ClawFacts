@@ -2056,6 +2056,18 @@ class TwitchBot:
             if now - self._chat_ai_mention_last < float(self.cfg.get(
                     "chat_ai_mention_cooldown", 60)):
                 return                  # the room moved on while we queued
+        # A factual question aimed at the bot ('doc, what is a bongo
+        # twist?') is answered by the fact engine, not the persona - same
+        # rule as !ask: grounded beats charming, and a guess is the
+        # failure mode.
+        if not quiet and chatai.factual_question(
+                text, self._chat_ai_names) \
+                and self._answer_factual(nick, text):
+            now = time.time()
+            self._chat_ai_times = [t for t in self._chat_ai_times
+                                   if now - t < 3600] + [now]
+            self._chat_ai_mention_last = now
+            return
         line = self._chat_ai_line(self._chat_ai_snapshot(),
                                   nick or "chat", text, quiet=quiet)
         # Failed attempts back off too, or every following message would
@@ -2112,6 +2124,29 @@ class TwitchBot:
         if facts:
             self._memory.remember(nick, facts)
 
+    def _answer_factual(self, nick: str, question: str) -> bool:
+        """A factual question gets the fact engine's grounded answer.
+
+        The persona will happily guess on trivia it does not know
+        ('sounds like a spin on a roadside snack') while the real answer
+        sits in the engine - the streamer's own !funfact proved it. Used
+        by !ask and by factual mentions; returns True when an answer
+        posted (the caller bumps the clocks)."""
+        import llm as llm_mod
+        opts = self._opts
+        if llm_mod.chat_timed_out() and llm_mod._is_local(
+                (self._opts.get("llm_base_url") or "").strip()):
+            # The model is known-busy right now (a chat call just timed
+            # out on it): the engine's question path would stack another
+            # model call on the same busy model. Records only.
+            opts = {**self._opts, "_skip_llm": True}
+        result = get_funfact(question, opts)
+        if not result or not result.get("fact"):
+            return False
+        self._reply(nick, question, result)
+        self._distill(nick, self._chat_ai_snapshot())
+        return True
+
     def _reply_ask(self, nick: str, argument: str) -> None:
         """!ask <anything> - the persona answers, falling back to facts.
 
@@ -2123,6 +2158,12 @@ class TwitchBot:
         q = (argument or "").strip()
         if not q:
             self._say(f"@{nick} ask me anything - a question or a topic.")
+            return
+        # Factual questions get the engine's grounded answer FIRST: the
+        # persona guesses on trivia, the engine looks it up. If the engine
+        # has nothing, the persona still gets its chance below.
+        if chatai.factual_question(q, self._chat_ai_names) \
+                and self._answer_factual(nick, q):
             return
         if llm_mod.is_configured(self._opts):
             snapshot = self._chat_ai_snapshot()

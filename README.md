@@ -242,7 +242,12 @@ chime-ins, quiet-room openers, the memory — is off by default; flip
 fields (any provider, including local Ollama) supply the personality;
 everything else works without a key.
 
-- **`!ask anything`** — the persona answers. No LLM key configured? The
+- **`!ask anything`** — factual questions ("what is a bongo twist",
+  "how many trailers can a truck pull") are answered by the fact engine
+  FIRST — the persona will guess on trivia it doesn't know, and a
+  grounded answer beats a charming guess. The persona takes over when
+  the engine has nothing, and owns opinions and about-the-bot questions
+  ("whats your favorite truck") outright. No LLM key configured? The
   ask falls through to the fact engine's question path, which answers
   real questions from Wikipedia alone. It is not gated on
   `chat_ai_enabled` — it is a command, not the chatter — but while the
@@ -260,7 +265,9 @@ everything else works without a key.
   model that returned nothing, a reply the cleaner rejected, an
   unexpected HTTP code — so `bot.log` always shows which one it was.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
-  the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
+  the bot answers (a factual question in a mention gets the fact
+  engine's grounded answer, same as `!ask`), at most once per
+  `chat_ai_mention_cooldown` seconds,
   so it cannot be wound up like a toy. The streamer's own lines never
   trigger chime-ins — he has the floor — but directly addressing the bot
   by name does get a reply.

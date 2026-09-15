@@ -23,6 +23,7 @@ def main() -> int:
     import customcmds as _cc_mod
     import shoutout as _so
     import llm as _llm2
+    import chatai as _ch2
 
     def _fresh():
         return _cc_mod.CommandSet(
@@ -1321,6 +1322,12 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("factual questions get the grounded answer before the persona",
+         callable(getattr(_ch2, "factual_question", None))
+         and _ch2.factual_question("what is a bongo twist")
+         and not _ch2.factual_question("whats your favorite truck")
+         and "_answer_factual" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("the build is stamped in the log (a paste names its build)",
          "rev-parse" in pathlib.Path("bot.py").read_text(encoding="utf-8")),
         ("no silent chat failures: every dead end leaves a log line",

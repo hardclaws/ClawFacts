@@ -217,6 +217,39 @@ _INTERROGATIVE = re.compile(
     r"are|was|were|do|does|did|can|could|would|should|tell|name)\b",
     re.IGNORECASE)
 
+#: Factual questions about a third-party thing. These have a real answer
+#: the fact engine can look up; the persona guessing ("sounds like a spin
+#: on a roadside snack") is worse than the engine's grounded answer or an
+#: honest miss. Opened by an interrogative and never about the bot.
+_FACTUAL_Q = re.compile(
+    r"^\s*(?:whats|what|what's|whos|who|who's|when|where|which|"
+    r"how many|how much|how long|how old|how tall|how far)\b",
+    re.IGNORECASE)
+_ABOUT_BOT = re.compile(r"\b(?:you|your|u|ur)\b", re.IGNORECASE)
+
+
+def factual_question(text: str, names=()) -> bool:
+    """True when the text asks about a third-party thing the fact engine
+    can look up - 'what is a bongo twist'. Questions about the bot
+    ('what do you think of this', 'whats your favorite truck') are
+    False: those are the persona's job, and routing them at the fact
+    engine would answer a question nobody asked. A leading address to
+    the bot ('doc, what is a bongo twist') is stripped first - mentions
+    carry their trigger word."""
+    t = (text or "").strip()
+    low = t.lower()
+    for n in sorted({str(x).lower().lstrip("@") for x in names if x},
+                    key=len, reverse=True):
+        if low.startswith(n):
+            rest = t[len(n):].lstrip(" ,:!")
+            if rest:
+                t = rest
+            break
+    if not _FACTUAL_Q.match(t):
+        return False
+    return not _ABOUT_BOT.search(t)
+
+
 #: Opinion questions aimed at the bot ("are you a Miami Dolphins fan?",
 #: "do you like tacos?"). The model should answer these; when it is down,
 #: a deflection beats silence. Never fires for factual questions - the
