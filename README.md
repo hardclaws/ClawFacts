@@ -249,12 +249,17 @@ two-minute breaker window. Fill the `llm_fallback_*` fields in
 `config.json` and a second provider carries the voice until the window
 clears — the console announces the switch once per outage, both
 providers are warmed at startup, and each has its own breaker so a dead
-fallback key never takes the primary down. The natural pairing is Groq
-primary + OpenRouter fallback (e.g. `mistralai/mistral-nemo`, fractions
-of a cent per thousand lines — pick any live slug from
-openrouter.ai/models); a local Ollama works as the fallback too. Fun
-facts and `!ask`'s trivia pass keep their own model-level fallbacks;
-this one is for the chat voice.
+fallback key never takes the primary down. The free OpenRouter setup:
+any key from openrouter.ai/keys (no card) plus any model whose slug
+ends in `:free` — `google/gemma-4-31b-it:free` was live and $0 when
+last checked. Free slugs rotate (several older `:free` listings have
+gone dark), so take whatever is currently free on openrouter.ai/models;
+the free tier allows 20 requests/minute and 50/day — 1,000/day after
+any one-time $10 credit top-up — which is plenty for a fallback that
+only carries chat while Groq's window clears. A local Ollama works as
+the fallback too, with no limits at all. Fun facts and `!ask`'s trivia
+pass keep their own model-level fallbacks; this one is for the chat
+voice.
 
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
@@ -300,7 +305,12 @@ this one is for the chat voice.
   is told the message was NOT to it and must genuinely have something to
   add, or it declines; and an overheard question is never answered with
   a FunFact — the fact engine answers only questions *addressed* to the
-  bot. The conversation is carried by mentions, `!ask` and the openers;
+  bot. A chime must also be **about the message it jumps on**: the
+  reply has to share a content word with what was said, and is declined
+  otherwise — a persona poem at somebody who was talking about
+  something else (live-fire: "The freezer rattles like wind through
+  pine trees…" at a supplement comment) never reaches chat. The
+  conversation is carried by mentions, `!ask` and the openers;
   chime-ins are accents (default cap 12 an hour), not a second voice in
   the room.
 - **Quiet-room openers** — when nobody has spoken for
@@ -410,7 +420,11 @@ quietly extracts the durable stuff — work, vehicles, pets, hobbies,
 plans, strong preferences — and those facts are injected into its
 prompts from then on. That is what "remembers conversations from any
 point in time" actually looks like at channel scale: not recall of every
-line, but the handful of facts that make a reply feel personal.
+line, but the handful of facts that make a reply feel personal. Facts
+stay attached to their person: the prompt lists them by name with the
+instruction that one viewer's fact is never quoted at somebody else —
+and a chime has to be grounded in the message it answers regardless of
+what anyone's facts inspired.
 
 Deliberate limits: only public chat is recorded, and only while
 `chat_ai_enabled` is true — the feature owns its data. Health details,

@@ -1460,6 +1460,21 @@ def main() -> int:
          and _ch2.persona("flo") and _ch2.persona("commentator")
          and _ch2.persona("noir")
          and set(_ch2.PERSONA_BLURBS) == set(_ch2.PERSONAS)),
+        ("chimes answer what was said, not a poem at nobody",
+         callable(_ch2.grounded) and callable(_ch2.parrots)
+         and not _ch2.grounded(
+             "The freezer rattles and I'm swapping frozen beans for "
+             "an oat latte while the highway whispers",
+             "yeah I hipped 1athlete to that supplement")
+         and _ch2.grounded("that supplement worked for him",
+                           "yeah I hipped 1athlete to that supplement")
+         and _ch2.too_similar(
+             "I'm swapping stale jerky for a caramel macchiato",
+             ["I'm swapping frozen beans for a steaming oat latte"])
+         and not _ch2.parrots("that supplement worked for him",
+                              "yeah I hipped him to that supplement")
+         and "not about what was said" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

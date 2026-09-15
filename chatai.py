@@ -120,7 +120,9 @@ def user_prompt(lines: list, nick: str, text: str,
         out.append("")
     if memories:
         out.append("What you remember about people here (from past chat,"
-                   " may be stale):")
+                   " may be stale). Each fact belongs to the person it is"
+                   " listed under ONLY - never use one person's fact when"
+                   " replying to somebody else:")
         out.extend(f"- {n}: {f}" for n, f in memories[:max_memories])
         out.append("")
     out.append("Recent chat (it has gone quiet):" if quiet
@@ -142,8 +144,10 @@ def user_prompt(lines: list, nick: str, text: str,
         out.append(
             "You are jumping in on your own initiative. Reply ONLY if "
             "you genuinely have something to add to exactly what was "
-            "said - a relevant quip or a related story. When in doubt, "
-            "reply NOTHING TO SAY.")
+            "said - a relevant quip or a related story about THAT "
+            "subject. Your line must be about what they actually "
+            "said; performing your persona at the room is NOTHING TO "
+            "SAY. When in doubt, reply NOTHING TO SAY.")
     else:
         out.append(f"{nick} just said: {text}")
     out.append("")
@@ -315,12 +319,48 @@ def too_similar(line: str, own_lines, jaccard: float = 0.3) -> bool:
     if not words or not recent:
         return False
     for w in words:
-        if sum(1 for s in recent if w in s) >= 2:
+        # A signature word across recent lines, OR any content word
+        # from the immediately previous line: live-fire, 'I'm swapping
+        # frozen beans for a steaming oat latte' was followed by 'I'm
+        # swapping stale jerky for a caramel macchiato' - they share
+        # only 'swapping', and the old >= 2-of-3 rule let the template
+        # through twice running.
+        if sum(1 for s in recent if w in s) >= 2 or w in recent[-1]:
             return True
     for s in recent:
         if s and len(words & s) / len(words | s) >= jaccard:
             return True
     return False
+
+
+def grounded(line: str, source: str) -> bool:
+    """True when a chime actually answers the message it jumps in on.
+
+    Live-fire: 'yeah I hipped 1athlete to that supplement' got
+    '@PiMPleff The freezer rattles like wind through pine trees, and
+    I'm swapping frozen beans for a steaming oat latte' - a persona
+    poem at a person who said nothing about freezers, which is the
+    single most awkward thing the bot does. The bar: the reply shares
+    at least one content word with the message it is replying to. A
+    relevant line almost always names the thing being discussed; a
+    musing at the room never does. Only chime-ins are gated - a
+    mention or an !ask was addressed to the bot, so relevance is
+    already given."""
+    return bool(_content_words(line) & _content_words(source))
+
+
+def parrots(line: str, source: str, jaccard: float = 0.6) -> bool:
+    """True when a chime mostly repeats the message it answers.
+
+    This is NOT too_similar with a higher bar: too_similar's
+    word-sharing rule would reject every GOOD chime, because a good
+    chime shares words with what was said. Only near-total overlap is
+    parroting - the model handing chat's own line back."""
+    words = _content_words(line)
+    src = _content_words(source)
+    if not words or not src:
+        return False
+    return len(words & src) / len(words | src) >= jaccard
 
 
 #: The voice library. Mods switch between these at runtime (!persona set),

@@ -84,7 +84,9 @@ def test_a_mention_gets_one_bounded_reply():
 def test_chime_ins_are_gated():
     b = _bot(llm_api_key="k")
     orig_roll, orig_reply = bot_mod.random, llm.chat_reply
-    llm.chat_reply = lambda s, u, c: "Ten-four on that."
+    # Grounded in the message it answers ('running', 'tonight') - a
+    # chime that is not about what was said gets declined now.
+    llm.chat_reply = lambda s, u, c: "Running I-80 tonight, keep the hammer down."
     try:
         bot_mod.random = _FixedRoll(0.9)      # the fillers roll high too
         for i in range(6):                    # a room worth joining
@@ -100,7 +102,8 @@ def test_chime_ins_are_gated():
         b._on_message("viewer9", "#t", "anyone else running I-80 tonight",
                       "viewer9", "")
         _drain(b)
-        assert b.said == ["@viewer9 Ten-four on that."], b.said
+        assert b.said == ["@viewer9 Running I-80 tonight, keep the "
+                          "hammer down."], b.said
         # The long cooldown holds even on a winning roll.
         b._chat_ai_last = time.time() - 30
         bot_mod.random = _FixedRoll(0.05)
@@ -378,7 +381,8 @@ def test_overheard_questions_never_get_funfacts():
         "place": "Illinois",
         "fact": "You may not cut through private property."})
     llm.chat_reply = lambda s, u, c: (prompts.append(u) or
-                                      "I-80 to Joliet. Skip the Circle.")
+                                      "Illinois? I-80 to Joliet. Skip "
+                                      "the Circle.")
     try:
         bot_mod.random = _FixedRoll(1.0)     # fillers never chime
         for i in range(6):
@@ -585,6 +589,70 @@ def test_mods_can_switch_the_bots_voice():
     assert b2._persona_text() == chatai.PERSONAS["rookie"]
     print("[PASS] mods can switch the bot's voice; it reaches the model "
           "and survives restarts")
+
+
+def test_chimes_answer_what_was_said():
+    """Live-fire: 'yeah I hipped 1athlete to that supplement' got
+    '@PiMPleff The freezer rattles like wind through pine trees, and
+    I'm swapping frozen beans for a steaming oat latte' - a persona
+    poem at a person who said nothing about freezers. A chime now has
+    to share a content word with the message it jumps on, must not
+    repeat chat back, and the bot's own consecutive lines may not
+    share even one template word."""
+    src1 = "yeah I hipped 1athlete to that supplement"
+    bad1 = ("The freezer rattles like wind through pine trees, and I'm "
+            "swapping frozen beans for a steaming oat latte while the "
+            "highway whispers secrets")
+    src2 = ("goodmorning indeed, this is my other account, its Martin "
+            "the farmer")
+    bad2 = ("The road's amber glow kisses the chrome, and I'm swapping "
+            "stale jerky for a warm cup of caramel macchiato as the "
+            "night drifts like a soft vinyl record")
+    # The two real stream lines are not grounded in their messages.
+    assert not chatai.grounded(bad1, src1), bad1
+    assert not chatai.grounded(bad2, src2), bad2
+    assert chatai.grounded("That supplement hipped him up nicely", src1)
+    assert chatai.grounded("Farmer by day, chatter by morning", src2)
+    # The template the old rule missed: only 'swapping' is shared, but
+    # it was the immediately previous line.
+    assert chatai.too_similar(bad2, [bad1])
+    # Repeating chat back is not chiming in.
+    assert chatai.parrots("goodmorning indeed this is my other "
+                          "account Martin", src2)
+
+    # Live-fire: the model returns the freezer line for the supplement
+    # message; the bot declines and the room stays clean.
+    b = _bot(llm_api_key="k")
+    orig_reply, orig_roll = llm.chat_reply, bot_mod.random
+    llm.chat_reply = lambda s, u, c: bad1
+    try:
+        bot_mod.random = _FixedRoll(1.0)     # fillers never chime
+        for i in range(6):
+            b._on_message("v%d" % i, "#t", "chatter line %d" % i,
+                          "v%d" % i, "")
+        bot_mod.random = _FixedRoll(0.0)     # the chime moment wins
+        b._on_message("PiMPleff", "#t", src1, "pimpleff", "")
+        _drain(b)
+        assert b.said == [], b.said
+        # A grounded reply goes out, @-tagged to the speaker.
+        b._chat_ai_mention_last = 0.0
+        llm.chat_reply = lambda s, u, c: "That supplement hipped him up"
+        b._on_message("PiMPleff", "#t", "that supplement really works",
+                      "pimpleff", "")
+        _drain(b)
+        assert b.said and "@PiMPleff" in b.said[0], b.said
+        assert "supplement" in b.said[0], b.said
+        # Parroting the message back is not an answer either.
+        b._chat_ai_mention_last = 0.0
+        llm.chat_reply = lambda s, u, c: "that supplement really works"
+        b._on_message("PiMPleff", "#t", "that supplement really works",
+                      "pimpleff", "")
+        _drain(b)
+        assert len(b.said) == 1, b.said
+    finally:
+        llm.chat_reply = orig_reply
+        bot_mod.random = orig_roll
+    print("[PASS] chimes answer what was said, or the bot stays quiet")
 
 
 def test_no_failed_chat_attempt_is_silent():
@@ -995,6 +1063,7 @@ def main():
     test_emoji_walls_never_chime()
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_overheard_questions_never_get_funfacts()
+    test_chimes_answer_what_was_said()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
     test_mods_can_switch_the_bots_voice()

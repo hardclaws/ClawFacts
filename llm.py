@@ -449,6 +449,18 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
             _disable_fallback(exc.code)
             if exc.code == 404:
                 _model_404_hint()
+            elif exc.code not in (401, 402, 403, 429):
+                # A 400/5xx must never vanish silently - the fallback
+                # failing quietly reads as 'the bot just stopped'.
+                detail = ""
+                try:
+                    detail = exc.read().decode(
+                        "utf-8", "replace").strip()[:200]
+                except Exception:
+                    pass
+                print(f"[llm] fallback chat call failed (HTTP "
+                      f"{exc.code}){': ' + detail if detail else ''}",
+                      flush=True)
             return None
         except TimeoutError as exc:
             print(f"[llm] fallback chat error: {exc!r} - still too busy",

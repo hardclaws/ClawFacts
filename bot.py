@@ -2233,6 +2233,23 @@ class TwitchBot:
             self._log(f"chat line declined - too similar to its own "
                       f"recent lines: {line[:80]!r}")
             return
+        if not quiet and not addressed:
+            # A chime must be ABOUT the message it jumps on. Live-fire:
+            # a supplement comment got 'The freezer rattles like wind
+            # through pine trees, and I'm swapping frozen beans for a
+            # steaming oat latte' - a persona poem at a person who said
+            # nothing about freezers. It must share a content word with
+            # what was said... and must not simply repeat chat back.
+            # Mentions and !ask are not gated: they were addressed to
+            # the bot, so relevance is already given.
+            if not chatai.grounded(line, text):
+                self._log(f"chime declined - not about what was said: "
+                          f"{line[:80]!r}")
+                return
+            if chatai.parrots(line, text):
+                self._log(f"chime declined - it repeated chat back: "
+                          f"{line[:80]!r}")
+                return
         self._chat_ai_times = [t for t in self._chat_ai_times
                                if now - t < 3600] + [now]
         self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
