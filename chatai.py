@@ -217,6 +217,21 @@ _INTERROGATIVE = re.compile(
     r"are|was|were|do|does|did|can|could|would|should|tell|name)\b",
     re.IGNORECASE)
 
+#: Opinion questions aimed at the bot ("are you a Miami Dolphins fan?",
+#: "do you like tacos?"). The model should answer these; when it is down,
+#: a deflection beats silence. Never fires for factual questions - the
+#: trigger needs you+an allegiance verb, so "do you know how long the
+#: Amazon is" does not match.
+_OPINION_ASKED = re.compile(
+    r"\b(?:are|do|does)\s+(?:you|u)\b.*\b"
+    r"(?:fan|like|support|root(?:ing)?\s+for|follow)\b", re.IGNORECASE)
+_OPINION_LINES = (
+    "I'm a fan of anything I can enjoy from the driver's seat.",
+    "My allegiance is to the mile markers.",
+    "I follow the freight, not the standings.",
+    "Ask me again when the coffee's down.",
+)
+
 _COMEBACKS = (
     "Useless? Those facts are load-bearing.",
     "They're not useless, they're highly specialised.",
@@ -249,4 +264,6 @@ def smalltalk(text: str):
             and not funfacts._SPECIFIC_Q.search(text)
             and not _INTERROGATIVE.search(text.strip())):
         return random.choice(_COMEBACKS)
+    if _OPINION_ASKED.search(text):
+        return random.choice(_OPINION_LINES)
     return None

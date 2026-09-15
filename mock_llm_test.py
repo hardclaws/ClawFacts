@@ -334,6 +334,26 @@ def main():
     print("[PASS] local + llm_no_think sends Ollama's hard think:false; "
           "hosted never sees it")
 
+    # A 400/5xx from the chat endpoint used to vanish without a log
+    # line - the single worst way to debug a silent bot (an Ollama build
+    # that rejects the think field would 400 here).
+    import contextlib
+    import urllib.error as _ue
+
+    def _400(req, timeout=60):
+        raise _ue.HTTPError(req.full_url, 400, "Bad Request", {},
+                            io.BytesIO(b'{"error":"unknown field"}'))
+    llm.urllib.request.urlopen = _400
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = llm.chat_reply("s", "u", {"llm_api_key": "k"})
+    finally:
+        llm.urllib.request.urlopen = orig
+    assert got is None
+    assert "HTTP 400" in out.getvalue(), out.getvalue()
+    print("[PASS] an unexpected HTTP code on the chat call is logged")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

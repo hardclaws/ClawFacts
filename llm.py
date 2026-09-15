@@ -317,6 +317,18 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
         _disable(exc.code)
         if exc.code == 404:
             _model_404_hint()
+        elif exc.code not in (401, 402, 403, 429):
+            # 400 (a parameter this Ollama build rejects?) and 5xx used
+            # to vanish without a line - the single worst way to debug a
+            # silent bot.
+            detail = ""
+            try:
+                detail = exc.read().decode(
+                    "utf-8", "replace").strip()[:200]
+            except Exception:
+                pass
+            print(f"[llm] chat call failed (HTTP {exc.code})"
+                  f"{': ' + detail if detail else ''}", flush=True)
         return None
     except TimeoutError as exc:
         _set_chat_timeout(True)

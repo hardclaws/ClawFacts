@@ -1950,6 +1950,13 @@ class TwitchBot:
                 max_hour=int(self.cfg.get("chat_ai_max_hour", 20)),
                 buffer_len=buffer_len,
                 min_chat=int(self.cfg.get("chat_ai_min_chat", 5))):
+            if kind == chatai.MENTION:
+                # The only user-visible silence that is not the model's
+                # fault: someone addressed the bot inside the 60s mention
+                # cooldown or past the hourly cap. Say so in the log, or
+                # it reads as the bot being broken.
+                self._log(f"mention from {nick} held - mention cooldown "
+                          f"or the hourly cap (a rail, not a bug)")
             return
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
@@ -1985,9 +1992,20 @@ class TwitchBot:
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
             return None
-        if not raw or chatai.declined(raw):
+        if not raw:
+            self._log("chat model returned nothing - see the [llm] lines "
+                      "above; if this repeats the model is still thinking "
+                      "past its cap or erroring")
             return None
-        return chatai.clean_line(raw)
+        if chatai.declined(raw):
+            return None
+        line = chatai.clean_line(raw)
+        if line is None:
+            # The rails stay the rails (length, no @, no links) - but a
+            # rejected line must not vanish silently: on a small local
+            # model, cleaner rejections are COMMON and invisible.
+            self._log(f"chat line rejected by the cleaner: {raw[:120]!r}")
+        return line
 
     def _chat_ai_tick(self, now: float = None) -> bool:
         """The quiet-room half of the chat AI.

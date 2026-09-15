@@ -236,6 +236,53 @@ def test_a_tease_gets_a_comeback_when_the_model_is_down():
     print("[PASS] a tease gets a Doc comeback when the model is down")
 
 
+def test_no_failed_chat_attempt_is_silent():
+    """'are you a Miami Dolphins fan as well?' got no reply AND no log
+    line. Three paths were silent - a mention held by its cooldown, the
+    model returning nothing, the cleaner rejecting a line - and the
+    question matched no canned tier. All four now speak or answer."""
+    assert chatai.smalltalk(
+        "are you a Miami Dolphins fan as well?") in chatai._OPINION_LINES
+    assert chatai.smalltalk("doc do you like tacos") in chatai._OPINION_LINES
+    assert chatai.smalltalk(
+        "do you know how long the amazon river is") is None
+
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    orig = llm.chat_reply
+    try:
+        # Model returns nothing: the log says so, and the opinion quip
+        # answers the Dolphins question.
+        llm.chat_reply = lambda s, u, c: None
+        b._on_message("Hardclaws", "#t",
+                      "@TruckingWithDocBot are you a Miami Dolphins fan "
+                      "as well?", "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert len(b.said) == 1 and b.said[0].startswith("@Hardclaws "), \
+            b.said
+        assert b.said[0].split(" ", 1)[1] in chatai._OPINION_LINES, b.said
+        assert any("returned nothing" in l for l in logs), logs
+        # The cleaner rejects a 400-char ramble: the log says so.
+        logs.clear()
+        llm.chat_reply = lambda s, u, c: "x" * 400
+        b._chat_ai_mention_last = 0.0
+        b._on_message("kvack", "#t", "doc hello there friend", "kvack", "")
+        _drain(b)
+        assert len(b.said) == 1, b.said
+        assert any("rejected by the cleaner" in l for l in logs), logs
+        # A mention inside the 60s cooldown: held, and the log says so.
+        logs.clear()
+        llm.chat_reply = lambda s, u, c: "Fine."
+        b._on_message("kvack", "#t", "doc one more thing", "kvack", "")
+        _drain(b)
+        assert any("held" in l for l in logs), logs
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] no failed chat attempt is silent: held, empty and "
+          "rejected all log; opinions get a quip")
+
+
 def test_local_models_get_a_smaller_room_to_read():
     """On CPU the model reads every prompt token before writing a word -
     that read, not the generation, blew a 20s timeout on a warm model
@@ -587,6 +634,7 @@ def main():
     test_ask_answers_with_persona_then_facts()
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
+    test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()
     test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()
     test_memory_roundtrip_and_forget()

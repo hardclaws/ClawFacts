@@ -252,9 +252,13 @@ everything else works without a key.
   questions still get the concrete record answer from the records
   miner, chatty ones ("how are you today?") get a canned Doc line
   instead of a Wikipedia fact about the word "today", and playful digs
-  at the bot ("you have alot of useless facts") get a canned comeback —
-  never silence. Questions and third-party venting never get a canned
-  line; only digs aimed at the bot do.
+  at the bot ("you have alot of useless facts") get a canned comeback,
+  and asked-at-the-bot opinion questions ("are you a Miami Dolphins
+  fan?") get a deflection — never silence. Factual questions and
+  third-party venting never get a canned line. And every failed
+  attempt leaves a line in the log — a mention held by its cooldown, a
+  model that returned nothing, a reply the cleaner rejected, an
+  unexpected HTTP code — so `bot.log` always shows which one it was.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
   so it cannot be wound up like a toy. The streamer's own lines never
