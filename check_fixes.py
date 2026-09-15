@@ -1321,6 +1321,14 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("a timed-out model is not asked twice (the 2-minute !ask)",
+         callable(getattr(_llm2, "chat_timed_out", None))
+         and "_skip_llm" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and "_skip_llm" in pathlib.Path(
+             "funfacts.py").read_text(encoding="utf-8")
+         and "TimeoutError" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")),
         ("local prompts are trimmed: 8 room lines, 4 memories",
          "max_lines=8 if local" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")

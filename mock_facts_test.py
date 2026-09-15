@@ -1876,6 +1876,33 @@ def test_the_question_path_also_searches_wikipedia():
     print("[PASS] the question path searches Wikipedia by its subject")
 
 
+def test_skip_llm_declines_without_touching_the_model():
+    """opts['_skip_llm'] (set by !ask when the chat call just timed out)
+    must decline instantly - no model call, straight to the records."""
+    import llm
+    orig = (llm.is_configured, llm.answer_question,
+            funfacts._question_sources, funfacts._mine_records)
+    llm.is_configured = lambda o: True
+
+    def _must_not_run(q, s, c):
+        raise AssertionError("the model was called despite _skip_llm")
+
+    llm.answer_question = _must_not_run
+    funfacts._question_sources = lambda q, o: ["A source line."]
+    funfacts._mine_records = lambda subject: (
+        ["A driver pulled 113 trailers for 1,235 metres."], "Road train")
+    try:
+        got = funfacts._answer_question(
+            "whats the longest truck in the world",
+            {"llm_api_key": "k", "_skip_llm": True}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+    finally:
+        (llm.is_configured, llm.answer_question,
+         funfacts._question_sources, funfacts._mine_records) = orig
+        funfacts._cache.clear()
+    print("[PASS] _skip_llm declines instantly, records answer")
+
+
 def test_a_dead_model_still_gets_the_records():
     """The records miner used to run only when NO model was configured.
     A configured-but-erroring model (a retired OpenRouter slug, a stopped
@@ -3039,6 +3066,7 @@ def main():
     test_a_question_is_answered_from_what_a_search_returned()
     test_a_one_typo_query_still_finds_the_article()
     test_the_question_path_also_searches_wikipedia()
+    test_skip_llm_declines_without_touching_the_model()
     test_a_dead_model_still_gets_the_records()
     test_a_misspelled_dish_still_gets_its_facts()
     test_a_namesake_cannot_label_or_speak_for_the_subject()

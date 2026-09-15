@@ -203,6 +203,49 @@ def main():
     print("[PASS] local chat budget self-defaults to 30s; chat is capped "
           "at 120 tokens")
 
+    # A timed-out model is not asked twice: the flag is set by a chat
+    # timeout, cleared by the next success, and the question path reads
+    # fewer sources with a local-sized budget.
+    calls = []
+    orig_call = llm._call
+    try:
+        def _boom(base, model, key, user, system=None, timeout=60.0,
+                  max_tokens=None):
+            calls.append((user, timeout))
+            raise TimeoutError("timed out")
+
+        llm._call = _boom
+        assert llm.chat_reply("s", "u", {"llm_api_key": "k",
+                                         "llm_base_url":
+                                         "http://127.0.0.1:11434/v1"}) is None
+        assert llm.chat_timed_out() is True
+        llm._call = (lambda base, model, key, user, system=None,
+                     timeout=60.0, max_tokens=None: "fine")
+        assert llm.chat_reply("s", "u", {"llm_api_key": "k"}) == "fine"
+        assert llm.chat_timed_out() is False
+        # The question path: 5 sources and a 30s budget locally, 8 and 60
+        # hosted.
+        seen = []
+        llm._call = (lambda base, model, key, user, system=None,
+                     timeout=60.0, max_tokens=None:
+                     (seen.append((user, timeout)) or "a line."))
+        llm.answer_question(
+            "q?", ["source %d." % i for i in range(10)],
+            {"llm_api_key": "k", "llm_base_url":
+             "http://127.0.0.1:11434/v1"})
+        assert seen[-1][1] == 30.0, seen[-1]
+        assert seen[-1][0].count("- source") == 5, seen[-1][0]
+        llm.answer_question(
+            "q?", ["source %d." % i for i in range(10)],
+            {"llm_api_key": "k"})
+        assert seen[-1][1] == 60.0, seen[-1]
+        assert seen[-1][0].count("- source") == 8, seen[-1][0]
+    finally:
+        llm._call = orig_call
+        llm._set_chat_timeout(False)
+    print("[PASS] a timed-out model is flagged; the question path is "
+          "smaller locally")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

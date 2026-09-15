@@ -3247,7 +3247,15 @@ def _answer_question(question: str, opts: dict, limit: int):
 
 
 def _answer_question_llm(question: str, opts: dict, limit: int):
-    """The model's attempt: sources in, one grounded answer out, or None."""
+    """The model's attempt: sources in, one grounded answer out, or None.
+
+    opts["_skip_llm"] is set by !ask when the chat call just timed out on
+    this same model: stacking the question call (a BIGGER prompt - it
+    carries the sources) on a model that just proved too slow is a
+    guaranteed extra timeout. Declining here falls straight through to
+    the records miner."""
+    if opts.get("_skip_llm"):
+        return None
     try:
         import llm
     except Exception as exc:

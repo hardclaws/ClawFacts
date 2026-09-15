@@ -320,6 +320,13 @@ model on CPU would otherwise burn the whole budget.)
 
 Three box-specific notes:
 
+- **No double-billing a busy model.** When the chat call times out
+  (usually another generation holding the CPU — the webpage sharing the
+  Ollama), `!ask` does not stack a second, *bigger* model call on top:
+  the question path carries the sources, so it would just burn another
+  full timeout before the records answered anyway. It skips straight to
+  the keyless paths, and the question path itself reads fewer sources
+  (5 instead of 8) with a 30s budget when local.
 - **Prompt size.** On CPU the model reads every token of the prompt
   before writing a word — that read, not the generation, is what blows
   past a 20s timeout on a *warm* model. For local models the bot sends

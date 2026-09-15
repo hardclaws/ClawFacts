@@ -165,6 +165,42 @@ def test_the_streamer_can_address_the_bot_but_it_never_butts_in():
     print("[PASS] the streamer can address the bot; it never butts in")
 
 
+def test_a_timed_out_model_is_not_asked_twice():
+    """A !ask that timed out on the chat call used to stack a second,
+    BIGGER model call (the question path carries the sources) on the
+    same busy model - a guaranteed extra timeout, and the two-minute
+    !ask. When the chat call just timed out on a local model, the fact
+    path runs keyless (records/facts), no second model call."""
+    b = _bot(llm_api_key="", llm_base_url="http://127.0.0.1:11434/v1")
+    orig_call, orig_fact = llm._call, bot_mod.get_funfact
+    got = []
+
+    def _fact(q, o):
+        got.append(o)
+        return {"place": "Road train",
+                "fact": "A driver pulled 113 trailers for 1,235 metres."}
+
+    try:
+        llm._call = lambda *a, **k: (_ for _ in ()).throw(
+            TimeoutError("timed out"))
+        bot_mod.get_funfact = _fact
+        b._reply_ask("kvack", "whats the longest truck in the world")
+        assert b.said and "113 trailers" in b.said[0], b.said
+        assert got and got[0].get("_skip_llm") is True, got
+        # A healthy chat call never sets the skip.
+        got.clear()
+        llm._call = (lambda base, model, key, user, system=None,
+                     timeout=60.0, max_tokens=None: "Fastest? Mine.")
+        b._reply_ask("hollieburgin", "whats the fastest you ever drove")
+        assert b.said[-1] == "@hollieburgin Fastest? Mine.", b.said
+        assert not got, got
+    finally:
+        llm._call = orig_call
+        llm._set_chat_timeout(False)
+        bot_mod.get_funfact = orig_fact
+    print("[PASS] a timed-out model is not asked twice by !ask")
+
+
 def test_local_models_get_a_smaller_room_to_read():
     """On CPU the model reads every prompt token before writing a word -
     that read, not the generation, blew a 20s timeout on a warm model
@@ -514,6 +550,7 @@ def main():
     test_the_streamer_can_address_the_bot_but_it_never_butts_in()
     test_unsafe_or_lazy_lines_never_post()
     test_ask_answers_with_persona_then_facts()
+    test_a_timed_out_model_is_not_asked_twice()
     test_local_models_get_a_smaller_room_to_read()
     test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()
     test_memory_roundtrip_and_forget()

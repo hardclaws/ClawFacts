@@ -2117,6 +2117,18 @@ class TwitchBot:
         if quip:
             self._say(self._fit(f"@{nick} ", quip))
             return
+        # If the chat call just TIMED OUT on a local model, the model is
+        # too busy to answer anything: the question path would stack a
+        # second, bigger call (it carries the sources) on it and burn
+        # another full timeout before the records answer anyway. Skip
+        # straight to the keyless paths.
+        if llm_mod.chat_timed_out() and llm_mod._is_local(
+                (self._opts.get("llm_base_url") or "").strip()):
+            self._log("chat model is too slow right now - answering "
+                      "without it")
+            self._reply(nick, q, get_funfact(
+                q, {**self._opts, "_skip_llm": True}))
+            return
         result = get_funfact(q, self._opts)
         self._reply(nick, q, result)
 

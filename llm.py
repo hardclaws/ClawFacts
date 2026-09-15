@@ -94,6 +94,25 @@ def _disable(code: int) -> None:
 
 _warned_404 = False
 
+#: When the most recent chat_reply call timed out (cleared by the next
+#: one succeeding). The !ask fallback reads this: stacking a second,
+#: BIGGER model call (the question path sends the sources too) on a model
+#: that just timed out on a small prompt is a guaranteed extra minute of
+#: dead air before the records answer anyway.
+_CHAT_TIMEOUT_AT = 0.0
+
+
+def chat_timed_out() -> bool:
+    """True when the most recent chat call timed out - the model is too
+    busy or too slow right now (on a shared mini PC, usually another
+    generation holding the CPU)."""
+    return _CHAT_TIMEOUT_AT > 0.0
+
+
+def _set_chat_timeout(flag: bool) -> None:
+    global _CHAT_TIMEOUT_AT
+    _CHAT_TIMEOUT_AT = time.time() if flag else 0.0
+
 
 def _model_404_hint() -> None:
     """A 404 is not transient: the llm_model slug has no endpoints on
@@ -241,6 +260,7 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     """
     if not is_configured(cfg) or _unavailable():
         return None
+    _set_chat_timeout(False)
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
     model = cfg.get("llm_model") or (
@@ -271,6 +291,11 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
         _disable(exc.code)
         if exc.code == 404:
             _model_404_hint()
+        return None
+    except TimeoutError as exc:
+        _set_chat_timeout(True)
+        print(f"[llm] chat error: {exc!r} - the model is too busy or too "
+              f"slow right now", flush=True)
         return None
     except Exception as exc:
         print(f"[llm] chat error: {exc!r}", flush=True)
@@ -424,7 +449,7 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
 
 
 def _complete(base: str, model: str, key: str, user: str, cfg: dict,
-              tag: str, system: str = None) -> str | None:
+              tag: str, system: str = None, timeout: float = None) -> str | None:
     """One chat completion with the provider fallbacks. `tag` labels debug logs."""
     candidates = [model]
     spare = _fallback_model(base, model)
@@ -434,7 +459,8 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
     last_detail = ""
     for m in candidates:
         try:
-            text = _call(base, m, key, _maybe_nothink(user, cfg), system)
+            text = _call(base, m, key, _maybe_nothink(user, cfg), system,
+                         timeout=timeout if timeout is not None else 60.0)
             if cfg.get("debug"):
                 print(f"[llm] ---- response ----\n" + text, flush=True)
             return text
@@ -510,12 +536,20 @@ def answer_question(question: str, sources: list, cfg: dict) -> str | None:
         f"Answer in at most {max_chars} characters, using only the sources "
         f"below.\n\nSources:\n"
     )
-    user += "\n".join(f"- {s}" for s in sources[:8])
+    # A local model on CPU reads every source line before writing a
+    # word; 8 sentences is 400-800 tokens of reading before the answer
+    # even starts. Fewer sources, and a local-sized budget instead of
+    # _complete's 60s default.
+    local = _is_local(base)
+    user += "\n".join(f"- {s}" for s in sources[:5 if local else 8])
 
     if cfg.get("debug"):
         print(f"[llm] POST {base}/chat/completions  model={model}", flush=True)
         print(f"[llm] ---- answer prompt ----\n{user}", flush=True)
 
+    if local:
+        return _complete(base, model, key, user, cfg, tag="",
+                         system=ANSWER_SYSTEM, timeout=30.0)
     return _complete(base, model, key, user, cfg, tag="", system=ANSWER_SYSTEM)
 
 
