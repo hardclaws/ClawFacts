@@ -190,7 +190,8 @@ def test_a_timed_out_model_is_not_asked_twice():
         # A healthy chat call never sets the skip.
         got.clear()
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None: "Fastest? Mine.")
+                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     "Fastest? Mine.")
         b._reply_ask("hollieburgin", "whats the fastest you ever drove")
         assert b.said[-1] == "@hollieburgin Fastest? Mine.", b.said
         assert not got, got

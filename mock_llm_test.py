@@ -224,7 +224,7 @@ def main():
     orig_call = llm._call
     try:
         def _boom(base, model, key, user, system=None, timeout=60.0,
-                  max_tokens=None):
+                  max_tokens=None, hard_nothink=False):
             calls.append((user, timeout))
             raise TimeoutError("timed out")
 
@@ -234,14 +234,15 @@ def main():
                                          "http://127.0.0.1:11434/v1"}) is None
         assert llm.chat_timed_out() is True
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None: "fine")
+                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     "fine")
         assert llm.chat_reply("s", "u", {"llm_api_key": "k"}) == "fine"
         assert llm.chat_timed_out() is False
         # The question path: 5 sources and a 30s budget locally, 8 and 60
         # hosted.
         seen = []
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None:
+                     timeout=60.0, max_tokens=None, hard_nothink=False:
                      (seen.append((user, timeout)) or "a line."))
         llm.answer_question(
             "q?", ["source %d." % i for i in range(10)],
@@ -285,7 +286,7 @@ def main():
         caps = []
 
         def _two(base, model, key, user, system=None, timeout=60.0,
-                 max_tokens=None):
+                 max_tokens=None, hard_nothink=False):
             caps.append(max_tokens)
             return "OK" if len(caps) > 1 else ""
 
@@ -296,6 +297,42 @@ def main():
         llm._call = orig_call
     print("[PASS] think blocks are stripped; the warm-up retries with a "
           "generous cap")
+
+    # The HARD switch: /no_think is only a soft request and qwen3:4b
+    # ignored it, thinking anyway until every capped generation died
+    # inside the think block. Local + llm_no_think now sends Ollama's
+    # engine-level think:false; hosted providers never see the field.
+    llm.urllib.request.urlopen = _fake_urlopen
+    try:
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "",
+                                  "llm_base_url":
+                                  "http://127.0.0.1:11434/v1",
+                                  "llm_no_think": True})
+        body = json.loads(captured[-1]["body"])
+        assert body.get("think") is False, body
+        assert body["messages"][-1]["content"].endswith("/no_think"), body
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "",
+                                  "llm_base_url":
+                                  "http://127.0.0.1:11434/v1"})
+        body = json.loads(captured[-1]["body"])
+        assert "think" not in body, body
+        captured.clear()
+        llm.chat_reply("s", "u", {"llm_api_key": "k",
+                                  "llm_no_think": True})
+        body = json.loads(captured[-1]["body"])
+        assert "think" not in body, body
+        captured.clear()
+        assert llm.warm_up({"llm_api_key": "",
+                            "llm_base_url": "http://127.0.0.1:11434/v1",
+                            "llm_no_think": True}) is True
+        body = json.loads(captured[-1]["body"])
+        assert body.get("think") is False, body
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] local + llm_no_think sends Ollama's hard think:false; "
+          "hosted never sees it")
 
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1

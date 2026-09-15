@@ -341,6 +341,12 @@ Three box-specific notes:
   full timeout before the records answered anyway. It skips straight to
   the keyless paths, and the question path itself reads fewer sources
   (5 instead of 8) with a 30s budget when local.
+- **The hard switch.** `/no_think` in the prompt is only a soft
+  request — qwen3:4b ignored it outright and thought anyway, and every
+  capped generation died inside the think block (stripped to an empty
+  reply, warm-up included). With `llm_no_think: true` on a local
+  Ollama, the bot also sends the engine-level `think: false`, which the
+  model cannot overrule. Hosted providers never see the field.
 - **The empty think block.** Qwen3 opens its reply with an empty
   `<think></think>` even with `/no_think`, and a generation cap counts
   the stripped block's tokens — a tight cap can cut the answer out

@@ -1321,6 +1321,11 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("qwen3:4b ignoring /no_think gets the hard think:false switch",
+         'body["think"] = False' in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and "_hard_nothink" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")),
         ("qwen3's empty think block cannot eat the answer",
          'rsplit("</think>"' in pathlib.Path("llm.py").read_text(
              encoding="utf-8")

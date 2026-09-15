@@ -194,6 +194,17 @@ _SUMMARIZE_SYSTEM = (
 )
 
 
+def _hard_nothink(cfg: dict, base: str) -> bool:
+    """Ollama's `think: false` hard switch, for local thinking models.
+
+    /no_think in the prompt is only a soft request - qwen3:4b ignored it
+    and thought anyway, and every capped generation died inside the think
+    block (stripped to an empty reply; even a 200-token warm-up retry).
+    The engine-level switch cannot be overruled by the model. Only sent
+    to local endpoints: hosted providers would 400 on the unknown field."""
+    return bool(cfg.get("llm_no_think")) and _is_local(base)
+
+
 def _maybe_nothink(user: str, cfg: dict) -> str:
     """Qwen3-family models think before answering - on a CPU mini PC that
     turns a one-line chat reply into a half-minute stall, and every
@@ -206,12 +217,14 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 
 
 def _build_body(model: str, user_prompt: str, system: str = None,
-                max_tokens: int = None) -> str:
+                max_tokens: int = None, hard_nothink: bool = False) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
     body = {"model": model, "messages": messages}
+    if hard_nothink:
+        body["think"] = False
     if _REASONING.search(model):
         body["max_completion_tokens"] = 300
         body["reasoning_effort"] = "low"
@@ -254,10 +267,11 @@ def _request(base: str, key: str, body: bytes,
 
 def _call(base: str, model: str, key: str, user_prompt: str,
           system: str = None, timeout: float = 60.0,
-          max_tokens: int = None) -> str:
+          max_tokens: int = None, hard_nothink: bool = False) -> str:
     return _request(base, key,
                     _build_body(model, user_prompt, system,
-                                max_tokens=max_tokens),
+                                max_tokens=max_tokens,
+                                hard_nothink=hard_nothink),
                     timeout=timeout)
 
 
@@ -297,7 +311,8 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
         # on CPU, 300 tokens of nobody-will-read-this costs the whole
         # timeout budget.
         return _call(base, model, key, _maybe_nothink(user, cfg), system,
-                     timeout=timeout, max_tokens=120)
+                     timeout=timeout, max_tokens=120,
+                     hard_nothink=_hard_nothink(cfg, base))
     except urllib.error.HTTPError as exc:
         _disable(exc.code)
         if exc.code == 404:
@@ -336,7 +351,8 @@ def warm_up(cfg: dict) -> bool:
         text = _call(base, model, key,
                      _maybe_nothink("Reply with exactly: OK", cfg),
                      "You are a warm-up probe. Reply with exactly: OK.",
-                     timeout=90.0, max_tokens=24)
+                     timeout=90.0, max_tokens=24,
+                     hard_nothink=_hard_nothink(cfg, base))
     except urllib.error.HTTPError:
         return False        # already logged (404 hint, key, credits)
     except Exception as exc:
@@ -351,7 +367,8 @@ def warm_up(cfg: dict) -> bool:
             text = _call(base, model, key,
                          _maybe_nothink("Reply with exactly: OK", cfg),
                          "You are a warm-up probe. Reply with exactly: OK.",
-                         timeout=90.0, max_tokens=200)
+                         timeout=90.0, max_tokens=200,
+                         hard_nothink=_hard_nothink(cfg, base))
         except Exception as exc:
             print(f"[llm] warm-up retry failed: {exc!r}", flush=True)
     if text:
@@ -386,6 +403,8 @@ def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
     else:
         body["max_tokens"] = 120
         body["temperature"] = 0.3
+    if _hard_nothink(cfg, base):
+        body["think"] = False
     if cfg.get("debug"):
         print(f"[llm] POST {base}/chat/completions  model={model} (summarize)", flush=True)
         print("[llm] ---- user prompt ----\n" + user, flush=True)
@@ -488,7 +507,8 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
     for m in candidates:
         try:
             text = _call(base, m, key, _maybe_nothink(user, cfg), system,
-                         timeout=timeout if timeout is not None else 60.0)
+                         timeout=timeout if timeout is not None else 60.0,
+                         hard_nothink=_hard_nothink(cfg, base))
             if cfg.get("debug"):
                 print(f"[llm] ---- response ----\n" + text, flush=True)
             return text
