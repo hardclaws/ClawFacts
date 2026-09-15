@@ -629,8 +629,57 @@ _DANGLING_TAIL = re.compile(
     r"is|are|was|were|that|which|who|whose|their|its|his|her|they|it|he|"
     r"she|than|so|such|while|when|where|after|before|during|toward|towards|"
     r"into|onto|over|under|near|across|along|around|between|through|"
-    r"without|within|beyond|up|down|out|off)\s*$",
+    r"without|within|beyond|up|down|out|off|"
+    r"be|been|being|do|does|did|have|has|had|will|would|can|could|"
+    r"shall|should|may|might|must)\s*$",
     re.IGNORECASE)
+
+#: Speech verbs dangle off a cut quote: '...split, saying:' is a
+#: lead-in whose quote got cut off with the rest of the line.
+_DANGLING_SAY = re.compile(
+    r"\s*\b(?:saying|said|says|telling|told|asking|asked|according)\W*$",
+    re.IGNORECASE)
+
+#: Bare pronouns dangle off a cut tail: '...wages, I will' strips
+#: 'will' and would leave '...wages, I.' - the pronoun is not a
+#: sentence either.
+_DANGLING_PRONOUN = re.compile(
+    r"\s*\b(?:i|we|you|they|he|she|it|this|that|there)\W*$",
+    re.IGNORECASE)
+
+
+def _finish_line(s: str) -> str:
+    """Repair a model-written line that came back cut off. Returns "" for
+    anything that cannot stand as a complete line.
+
+    Live-fire: the Daft Punk split fact posted as 'He cited concerns
+    about ... as to why Daft Punk split, saying: "As much as I love
+    this character, the last thing I would want to be' - the model
+    squeezed the quote into its character budget, gave up mid-sentence,
+    and every downstream filter saw a line that was short enough and
+    grounded enough. A half-quote is not a fact: strip the model's
+    truncation marker, cut at the unclosed quote, strip dangling
+    connectors, and keep only what still reads complete."""
+    s = _ELLIPSIS_END.sub("", (s or "").strip())
+    # An unclosed quote means its back half was cut off with the rest -
+    # the whole quote goes, not just its ending. Curly and straight.
+    if s.count("\u201c") > s.count("\u201d"):
+        s = s[:s.rfind("\u201c")]
+    if s.count('"') % 2 == 1:
+        s = s[:s.rfind('"')]
+    s = s.rstrip(" ,;:-\u2014\u2026")
+    while True:
+        new = _DANGLING_TAIL.sub(
+            "", _DANGLING_PRONOUN.sub("", _DANGLING_SAY.sub("", s))).rstrip(
+                " ,;:-\u2014")
+        if new == s:
+            break
+        s = new
+    if not s or len(s) < 12 or s.endswith(":"):
+        return ""
+    if s[-1] not in ".!?\u201d'\")]":
+        s += "."
+    return s
 
 
 def _tidy_sentence(s: str) -> str:
@@ -879,6 +928,7 @@ def _fit_fact(fact: str, limit: int, opts: dict) -> str:
             s = llm.summarize(fact, limit, opts)
             if s:
                 s = " ".join(s.split()).strip('"“”')
+                s = _finish_line(s)
                 # stay grounded: the summary may not introduce names/dates
                 # that the source fact didn't contain.
                 s2 = _grounded_filter([s], "", "", [fact])
@@ -2428,6 +2478,12 @@ def _llm_facts(place: str, location: str, seed_facts: list, options: dict) -> li
         # Drop chain-of-thought / meta chatter before it can reach chat.
         if _META_LINE.match(ln):
             continue
+        # A line the model cut off (its own ellipsis, a quote it never
+        # closed) is repaired to its last complete clause or dropped -
+        # before grounding, before the pool, before chat ever sees it.
+        ln = _finish_line(ln)
+        if not ln:
+            continue
         lines.append(ln)
     kept = [ln for ln in lines if not _EXPLICIT.search(ln)
             and not _TASTELESS.search(ln)]
@@ -3012,7 +3068,8 @@ _QSTRIP = frozenset((
 _SPECIFIC_Q = re.compile(
     r"\b(?:longest|shortest|biggest|largest|smallest|tallest|fastest|"
     r"slowest|oldest|newest|first|last|most|how many|how much|how long|"
-    r"how far|how old|how tall|when|who|which)\b", re.IGNORECASE)
+    r"how far|how old|how tall|when|who|which|what time)\b",
+    re.IGNORECASE)
 #: A capitalised word after the first is a proper noun; a digit is a figure.
 _CAP_MID = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _DIGIT = re.compile(r"\d")
@@ -3053,6 +3110,16 @@ _IN_PLACE = re.compile(
     r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
 
 
+def _place_at_end(question: str):
+    """The place after 'in/for/at' at the end of a question, ignoring
+    trailing punctuation. Live-fire: 'what time we expecting sunrise
+    today in Vandalia, IL ?' found no place - the '?' sat between the
+    place and the end of the line, so even the weather header lost its
+    label on a question asked with a question mark."""
+    m = _IN_PLACE.search((question or "").strip().rstrip("?!.,;: "))
+    return " ".join(m.group(1).split()) if m else None
+
+
 def _weather_header(question: str):
     """(place, 'Weather') for a weather question, else (None, None).
 
@@ -3063,9 +3130,92 @@ def _weather_header(question: str):
     label instead of the whole question."""
     if not _WEATHER_Q.search(question or ""):
         return None, None
-    m = _IN_PLACE.search((question or "").strip())
-    place = " ".join(m.group(1).split()) if m else None
-    return place, "Weather"
+    return _place_at_end(question), "Weather"
+
+
+#: Sunrise/sunset questions are data questions, not trivia (see
+#: _sun_times).
+_SUN_Q = re.compile(
+    r"\b(?:sunrise|sunsets?|sun\s?rises?|sun\s?sets?|first light|"
+    r"last light)\b", re.IGNORECASE)
+
+#: State disambiguation reuses the _US_STATES table defined above (the
+#: region matcher's own): Open-Meteo's geocoder answers 'Illinois'
+#: while the question says 'IL' - and there are four Vandalias in the
+#: United States to choose between.
+
+_OM_GEO = "https://geocoding-api.open-meteo.com/v1/search"
+_OM_FORECAST = "https://api.open-meteo.com/v1/forecast"
+
+
+def _sun_header(question: str):
+    """(place, 'Sun') for a sunrise/sunset question, else (None, None)."""
+    if not _SUN_Q.search(question or ""):
+        return None, None
+    return _place_at_end(question), "Sun"
+
+
+def _clock_time(iso: str) -> str:
+    """'2026-09-15T06:37' -> '6:37 AM'. Open-Meteo speaks ISO-8601 in
+    the place's own timezone; chat does not."""
+    t = (iso or "").split("T")[-1][:5]
+    h, m = int(t[:2]), t[3:5]
+    return f"{h % 12 or 12}:{m} {'AM' if h < 12 else 'PM'}"
+
+
+def _sun_times(question: str):
+    """Sunrise/sunset for a named place, straight from Open-Meteo's
+    free keyless API - no model in the path, nothing to rate-limit,
+    nothing to cut off.
+
+    Live-fire: 'Docbot what time we expecting sunrise today in
+    Vandalia, IL ?' was answered 'All times are local time for the City
+    of Vandalia.' - the footnote of a scraped sun-times page, not the
+    time. Sun times are data like the weather: look them up, don't
+    summarize them. Returns the answer dict, or None to fall through to
+    the model path (no place, no geocode hit, API down)."""
+    place, kind = _sun_header(question)
+    if not place:
+        return None
+    try:
+        name, state = place, None
+        m = re.match(r"^(.+?)[,\s]+([A-Za-z]{2})$", place)
+        if m and m.group(2).lower() in _US_STATES:
+            name, state = m.group(1).strip(), _US_STATES[m.group(2).lower()]
+        geo = _http_get_json(_OM_GEO,
+                             {"name": name, "count": "10",
+                              "language": "en", "format": "json"})
+        hits = geo.get("results") or []
+        if not hits:
+            print(f"[funfacts] no geocode hit for {place!r} - leaving "
+                  f"the sun question to the model path", flush=True)
+            return None
+        # Prefer the state the question named; otherwise the geocoder's
+        # first hit (its own idea of 'the' Vandalia).
+        hit = next((h for h in hits
+                    if state and (h.get("admin1") or "").lower() == state),
+                   None) or hits[0]
+        tomorrow = bool(re.search(r"\btomorrow\b", question, re.IGNORECASE))
+        fc = _http_get_json(_OM_FORECAST, {
+            "latitude": str(hit.get("latitude")),
+            "longitude": str(hit.get("longitude")),
+            "daily": "sunrise,sunset", "timezone": "auto",
+            "forecast_days": "2" if tomorrow else "1"})
+        daily = fc.get("daily") or {}
+        sr = daily.get("sunrise") or []
+        ss = daily.get("sunset") or []
+        idx = 1 if tomorrow else 0
+        if len(sr) <= idx or len(ss) <= idx or not sr[idx] or not ss[idx]:
+            return None
+        when = "tomorrow" if tomorrow else "today"
+        line = (f"sunrise {_clock_time(sr[idx])}, sunset "
+                f"{_clock_time(ss[idx])} {when} - times are local.")
+        print(f"[funfacts] sun times from Open-Meteo for {place}", flush=True)
+        return {"place": place, "facts": [line], "kind": kind}
+    except Exception as exc:      # never let a data lookup break answering
+        print(f"[funfacts] sun times lookup failed for {place!r}: {exc!r}",
+              flush=True)
+        return None
 
 
 def _question_place(question: str) -> str:
@@ -3291,6 +3441,9 @@ def _answer_question(question: str, opts: dict, limit: int):
     whenever the model path has nothing. A broken model must not turn an
     answerable question into a decline.
     """
+    sun = _sun_times(question)
+    if sun:
+        return sun
     result = _answer_question_llm(question, opts, limit)
     if result:
         return result
@@ -3369,6 +3522,9 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
             ln = ln.replace("**", "").replace("`", "").strip()
             if not ln or _META_LINE.match(ln):
                 continue
+            ln = _finish_line(ln)
+            if not ln:
+                continue
             if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
                 continue
             if (_is_dangling(ln) or _is_fragment(ln) or _is_boring(ln)
@@ -3441,7 +3597,14 @@ def get_funfact(location: str, options=None):
 
     if entry is None:
         result = None
-        if llm_only:
+        # Sun times are data, not trivia: answer them before any
+        # search, scrape or model call (see _sun_times). A sunrise
+        # question must never be summarized by a model that can 429,
+        # time out, or post the page's footnote, when the actual times
+        # are one keyless lookup away.
+        if _SUN_Q.search(location):
+            result = _sun_times(location)
+        if result is None and llm_only:
             facts = _llm_only_facts(location.strip(), limit, opts)
             if facts:
                 result = {"place": location.strip(), "facts": facts}
@@ -3486,7 +3649,10 @@ def get_funfact(location: str, options=None):
             elif result and result.get("facts"):
                 # facts arrive ranked best-first; show facts[0] on the first
                 # call so the reply matches the place's most famous story.
+                # The kind rides along: a 'Sun |' answer must still be a
+                # 'Sun |' answer on the cached second ask.
                 entry = {"place": result["place"], "facts": list(result["facts"]),
+                         "kind": result.get("kind"),
                          "shown": 0, "t": now, "ttl": _HIT_TTL}
             else:
                 entry = {"place": None, "facts": [], "shown": 0,
@@ -3518,7 +3684,10 @@ def get_funfact(location: str, options=None):
         entry["shown"] = shown + 1
         entry["last"] = fact
 
-    return {"place": place, "fact": _fit_fact(fact, limit, opts)}
+    out = {"place": place, "fact": _fit_fact(fact, limit, opts)}
+    if entry.get("kind"):
+        out["kind"] = entry["kind"]
+    return out
 
 
 if __name__ == "__main__":

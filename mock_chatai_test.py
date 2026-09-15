@@ -414,6 +414,88 @@ def test_overheard_questions_never_get_funfacts():
     print("[PASS] overheard questions never get FunFacts; addressed ones do")
 
 
+def test_sunrise_and_weather_get_data_headers():
+    """Live-fire: 'Docbot what time we expecting sunrise today in
+    Vandalia, IL ?' was answered 'All times are local time for the City
+    of Vandalia.' - the footnote of a page a scraper fed the model, not
+    the time. Sun times are data: the engine answers them from
+    Open-Meteo with a 'Sun |' header and NO model call in the path, so
+    a rate-limited evening cannot mute them. Weather keeps its own
+    'Weather |' header end-to-end (the unit test pinned the helper; the
+    mention path had never been driven through it)."""
+    import funfacts
+
+    b = _bot(llm_api_key="k")
+    # The memory distill normally runs after every reply - close its
+    # database here so 'no model call' means exactly that for the
+    # question path.
+    b._memory._db = None
+    GEO = {"results": [
+        {"name": "Vandalia", "latitude": 38.96, "longitude": -89.09,
+         "admin1": "Illinois"},
+        {"name": "Vandalia", "latitude": 39.89, "longitude": -84.19,
+         "admin1": "Ohio"},
+    ]}
+    FC = {"daily": {"sunrise": ["2026-09-15T06:37"],
+                    "sunset": ["2026-09-15T19:04"]}}
+    urls = []
+
+    def fake_json(url, params, timeout=8.0):
+        urls.append(url)
+        return GEO if "geocoding" in url else FC
+
+    model_calls = []
+    orig_http = funfacts._http_get_json
+    orig_lookup = funfacts._lookup_all
+    orig_sources = funfacts._question_sources
+    orig_answer = llm.answer_question
+    orig_reply = llm.chat_reply
+
+    def no_model(system, user, cfg):
+        model_calls.append(user)
+        return None
+
+    funfacts._http_get_json = fake_json
+    funfacts._lookup_all = lambda *a, **k: None
+    llm.chat_reply = no_model
+    try:
+        # 1. His exact live-fire question, verbatim.
+        b._on_message("hardclaws", "#t",
+                      "docbot what time we expecting sunrise today in "
+                      "Vandalia, IL ?", "hardclaws", "")
+        _drain(b)
+        assert any(s.startswith("Sun | Vandalia, IL: sunrise 6:37 AM, "
+                                "sunset 7:04 PM today - times are local.")
+                   for s in b.said), b.said
+        assert not model_calls, "a sun question must not reach the model"
+        assert any("geocoding-api.open-meteo.com" in u for u in urls), urls
+        assert any("api.open-meteo.com/v1/forecast" in u for u in urls), urls
+
+        # 2. Weather through the same mention path: sources + answer
+        # stubbed at the engine's edge, the header decision real.
+        funfacts._question_sources = lambda q, o: [
+            "It is Clear and 76.7F in Saint Clair, Missouri right now."]
+        llm.answer_question = (
+            lambda q, sources, cfg:
+            "Skies are Clear at 76.7F in Saint Clair, Missouri right now.")
+        b._chat_ai_mention_last = 0.0
+        b._on_message("hardclaws", "#t",
+                      "doc whats the weather like in Saint Clair, Mo ?",
+                      "hardclaws", "")
+        _drain(b)
+        assert any(s.startswith("Weather | Saint Clair, Mo: Skies are "
+                                "Clear at 76.7F")
+                   for s in b.said), b.said
+    finally:
+        funfacts._http_get_json = orig_http
+        funfacts._lookup_all = orig_lookup
+        funfacts._question_sources = orig_sources
+        llm.answer_question = orig_answer
+        llm.chat_reply = orig_reply
+    print("[PASS] sunrise gets 'Sun |' with the actual times; weather "
+          "keeps 'Weather |' end-to-end")
+
+
 def test_the_bot_cannot_repeat_itself():
     """Live-fire: the model found 'midnight coffee and donuts' and used
     some form of it in eight straight lines ('does this bot just repeat
@@ -1283,6 +1365,7 @@ def main():
     test_emoji_walls_never_chime()
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_overheard_questions_never_get_funfacts()
+    test_sunrise_and_weather_get_data_headers()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()
     test_a_direct_ask_gets_a_redemption_when_it_repeats_itself()

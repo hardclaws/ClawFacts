@@ -910,6 +910,181 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _facts_ride_the_fallback():
+        """The second provider used to serve the chat voice only: a
+        Groq 429 muted every fact, question and !ask for its breaker
+        window while a healthy OpenRouter fallback sat idle (live-fire:
+        an evening of rate-limit lines, zero fallback lines). Now the
+        completion path rides it, a dead fallback slug opens its own
+        breaker with a line, and summarize (polish, not substance)
+        sits the window out."""
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+
+        cfg = {"llm_api_key": "gsk", "llm_base_url":
+               "https://api.groq.com/openai/v1",
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_key": "or", "llm_fallback_base_url":
+               "https://openrouter.ai/api/v1",
+               "llm_fallback_model": "mistralai/mistral-nemo"}
+        hits = []
+
+        def _fb_ok(req, timeout=60):
+            hits.append(req.full_url)
+            if "groq" in req.full_url:
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b"{}"))
+            return _io.BytesIO(_json.dumps(
+                {"choices": [{"message": {"content": "A fact."}}]}
+            ).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fb_ok
+        try:
+            _llm2.reset_disable_state()
+            ok1 = (_llm2.rewrite_fact("X", "X", ["seed fact."], cfg)
+                   == "A fact."
+                   and hits == [
+                       "https://api.groq.com/openai/v1/chat/completions",
+                       "https://openrouter.ai/api/v1/chat/completions"])
+            hits.clear()
+            ok2 = (_llm2.answer_question("q?", ["source."], cfg)
+                   == "A fact."
+                   and hits == [
+                       "https://openrouter.ai/api/v1/chat/completions"])
+            hits.clear()
+            ok3 = (_llm2.summarize("long fact " * 20, 40, cfg) is None
+                   and not hits)
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
+        if not (ok1 and ok2 and ok3):
+            return False
+
+        def _fb_dead(req, timeout=60):
+            if "groq" in req.full_url:
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b"{}"))
+            raise _ue.HTTPError(req.full_url, 404, "gone", {},
+                                _io.BytesIO(b"{}"))
+
+        import contextlib as _cl
+        _llm2.urllib.request.urlopen = _fb_dead
+        try:
+            _llm2.reset_disable_state()
+            out = _io.StringIO()
+            with _cl.redirect_stdout(out):
+                dead1 = _llm2.rewrite_fact("X", "X", ["seed fact."], cfg) \
+                    is None
+            loud = "fallback model not found (HTTP 404)" in out.getvalue()
+            hits.clear()
+            dead2 = (_llm2.rewrite_fact("X", "X", ["seed fact."], cfg)
+                     is None and not hits)
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
+        return dead1 and loud and dead2
+
+    def _warmup_names_the_fallback():
+        """'The fallback never fired' is undiagnosable from a config
+        that looks right. Startup names what it resolved - or exactly
+        why there is none."""
+        import contextlib as _cl
+        import io as _io
+        _orig = _llm2._call
+        _llm2._call = lambda *a, **k: "OK"
+        try:
+            _llm2.reset_disable_state()
+            out = _io.StringIO()
+            with _cl.redirect_stdout(out):
+                _llm2.warm_up({"llm_api_key": "k"})
+            no_model = ("fallback NOT active - no llm_fallback_model"
+                        in out.getvalue())
+            out = _io.StringIO()
+            with _cl.redirect_stdout(out):
+                _llm2.warm_up(
+                    {"llm_api_key": "k",
+                     "llm_fallback_model": "some/model:free",
+                     "llm_fallback_base_url":
+                         "https://openrouter.ai/api/v1"})
+            no_key = "llm_fallback_key is empty" in out.getvalue()
+            out = _io.StringIO()
+            with _cl.redirect_stdout(out):
+                _llm2.warm_up(
+                    {"llm_api_key": "k", "llm_fallback_key": "or",
+                     "llm_fallback_base_url":
+                         "https://openrouter.ai/api/v1",
+                     "llm_fallback_model": "mistralai/mistral-nemo"})
+            named = ("fallback configured: mistralai/mistral-nemo via "
+                     "openrouter.ai/api/v1") in out.getvalue()
+        finally:
+            _llm2._call = _orig
+            _llm2.reset_disable_state()
+        return no_model and no_key and named
+
+    def _sun_times_answer():
+        """'Docbot what time we expecting sunrise today in Vandalia, IL
+        ?' was answered 'All times are local time for the City of
+        Vandalia.' - a scraped page's footnote. Sun times are data:
+        Open-Meteo answers them (keyless), the state picks between the
+        four Vandalias, and the place survives the trailing '?'."""
+        geo = {"results": [
+            {"name": "Vandalia", "latitude": 38.96, "longitude": -89.09,
+             "admin1": "Illinois"},
+            {"name": "Vandalia", "latitude": 39.89, "longitude": -84.19,
+             "admin1": "Ohio"}]}
+        fc = {"daily": {"sunrise": ["2026-09-15T06:37"],
+                        "sunset": ["2026-09-15T19:04"]}}
+        calls = []
+
+        def fake(url, params, timeout=8.0):
+            calls.append((url, dict(params)))
+            return geo if "geocoding" in url else fc
+
+        _orig = funfacts._http_get_json
+        funfacts._http_get_json = fake
+        try:
+            funfacts._cache.clear()
+            r = funfacts.get_funfact(
+                "what time we expecting sunrise today in Vandalia, IL ?",
+                {"llm_api_key": "k", "answer_questions": True})
+            ok = (r and r["place"] == "Vandalia, IL"
+                  and r["kind"] == "Sun"
+                  and r["fact"] == ("sunrise 6:37 AM, sunset 7:04 PM "
+                                    "today - times are local.")
+                  and calls and calls[1][1]["latitude"] == "38.96")
+            calls.clear()
+            no_http = (funfacts._sun_times("whats sunrise") is None
+                       and not calls)
+            weather = funfacts._weather_header(
+                "how's the weather in Vandalia, IL ?") == (
+                    "Vandalia, IL", "Weather")
+        finally:
+            funfacts._http_get_json = _orig
+            funfacts._cache.clear()
+        return ok and no_http and weather
+
+    def _cut_facts_are_repaired():
+        """The Daft Punk split fact posted cut off mid-quote ('...the
+        last thing I would want to be') - the model squeezed the quote
+        into its char budget and nothing downstream noticed. A cut line
+        is repaired to its last complete clause or dropped."""
+        repaired = funfacts._finish_line(
+            'He cited concerns about the progress of artificial '
+            'intelligence and other technology as to why Daft Punk '
+            'split, saying: "As much as I love this character, the '
+            'last thing I would want to be\u2026')
+        ok = repaired == (
+            'He cited concerns about the progress of artificial '
+            'intelligence and other technology as to why Daft Punk '
+            'split.')
+        ok = ok and funfacts._finish_line("A whole line stands.") == \
+            "A whole line stands."
+        ok = ok and funfacts._finish_line("wages, I will be") == ""
+        ok = ok and callable(getattr(_llm2, "provider_available", None))
+        return ok
+
     def _subs_count_themselves():
         """Twitch lets only the broadcaster's own token read the sub
         count, so the bot counts what chat SEES: sub, resub and gift
@@ -1568,6 +1743,24 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("facts, questions and !ask ride the fallback too",
+         _facts_ride_the_fallback()
+         and "provider_available" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")),
+        ("startup names the fallback, or says why there is none",
+         _warmup_names_the_fallback()
+         and "fallback NOT active" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")),
+        ("sunrise questions get the actual times (Sun |, no model)",
+         _sun_times_answer()
+         and "_sun_times" in pathlib.Path(
+             "funfacts.py").read_text(encoding="utf-8")
+         and "what time" in pathlib.Path(
+             "funfacts.py").read_text(encoding="utf-8")),
+        ("a fact line cut off mid-quote is repaired, never posted half",
+         _cut_facts_are_repaired()
+         and "_finish_line" in pathlib.Path(
+             "funfacts.py").read_text(encoding="utf-8")),
         ("subs the bot sees in chat count toward the sub goal",
          "subgoal_auto_count" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")

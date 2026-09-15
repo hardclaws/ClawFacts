@@ -448,6 +448,130 @@ def main():
         llm.urllib.request.urlopen = orig
     print("[PASS] both providers down: two breakers, no request storm")
 
+    # FACTS AND QUESTIONS RIDE THE FALLBACK TOO. Live-fire: an evening
+    # of '[llm] LLM rate-limited' lines with a healthy OpenRouter
+    # fallback configured - and not one '[llm] fallback' line. The
+    # second provider used to be wired into the chat voice alone; the
+    # fact path died on the primary's breaker.
+    def _groq_429_fb_ok(req, timeout=60):
+        captured.append({"url": req.full_url})
+        if "groq" in req.full_url:
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(b"{}"))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "A rewritten fact."}}]}
+        ).encode("utf-8"))
+
+    llm.urllib.request.urlopen = _groq_429_fb_ok
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.rewrite_fact("X", "X", ["seed fact."], fbcfg)
+        assert got == "A rewritten fact.", got
+        assert [c["url"] for c in captured] == [
+            "https://api.groq.com/openai/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        # Inside the primary's window the fact path goes straight to
+        # the fallback - no dead-primary request.
+        captured.clear()
+        got = llm.answer_question("q?", ["source line."], fbcfg)
+        assert got == "A rewritten fact.", got
+        assert [c["url"] for c in captured] == [
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        # Summarize is polish, not substance: it sits the window out
+        # (the clause trim answers) instead of paying a fallback call.
+        captured.clear()
+        assert llm.summarize("a long fact " * 20, 40, fbcfg) is None
+        assert not captured, captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] facts and questions ride the fallback provider too")
+
+    # A retired fallback slug (free ones rotate!) opens the fallback's
+    # OWN breaker with a line that says so - it used to 404 silently
+    # forever after the one-time hint, which reads exactly like 'the
+    # bot just stopped'.
+    import contextlib as _ctxlib
+
+    def _groq_429_fb_404(req, timeout=60):
+        if "groq" in req.full_url:
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(b"{}"))
+        raise _ue.HTTPError(req.full_url, 404, "no endpoints", {},
+                            io.BytesIO(b'{"error":"not found"}'))
+
+    llm.urllib.request.urlopen = _groq_429_fb_404
+    try:
+        llm.reset_disable_state()
+        out = io.StringIO()
+        with _ctxlib.redirect_stdout(out):
+            assert llm.rewrite_fact("X", "X", ["seed fact."], fbcfg) is None
+        assert "fallback model not found (HTTP 404)" in out.getvalue(), \
+            out.getvalue()
+        # Both breakers open: no request at all, no retry storm.
+        captured.clear()
+        assert llm.rewrite_fact("X", "X", ["seed fact."], fbcfg) is None
+        assert llm.answer_question("q?", ["source line."], fbcfg) is None
+        assert not captured, captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] a dead fallback slug says so and stops the storm")
+
+    # A reply cut off on an auxiliary ('...the last thing I would want
+    # to be' - the Daft Punk live-fire) is a fragment like any other:
+    # it pays the doubled-budget retry.
+    _be_calls = []
+    _orig_call = llm._call
+
+    def _be_stub(base, model, key, user, system=None, timeout=60.0,
+                 max_tokens=None, hard_nothink=False, reasoning_budget=None):
+        _be_calls.append(reasoning_budget)
+        if reasoning_budget is None:
+            return "The last thing I would want to be"
+        return "The last thing I would want to be is home by dark."
+
+    llm._call = _be_stub
+    try:
+        llm.reset_disable_state()
+        got = llm.chat_reply("s", "u" * 20, {"llm_api_key": "k"})
+        assert got == "The last thing I would want to be is home by dark.", got
+        assert _be_calls == [None, 600], _be_calls
+        llm.reset_disable_state()
+    finally:
+        llm._call = _orig_call
+    print("[PASS] a reply cut off on 'be' pays the doubled-budget retry")
+
+    # Startup names the fallback's state in plain English: what it
+    # resolved to, or exactly why there is none. 'The fallback never
+    # fired' is undiagnosable from a config that looks right.
+    _orig_warm_call = llm._call
+    llm._call = lambda *a, **k: "OK"
+    try:
+        llm.reset_disable_state()
+        out = io.StringIO()
+        with _ctxlib.redirect_stdout(out):
+            llm.warm_up({"llm_api_key": "k"})
+        assert "fallback NOT active - no llm_fallback_model" in \
+            out.getvalue(), out.getvalue()
+        out = io.StringIO()
+        with _ctxlib.redirect_stdout(out):
+            llm.warm_up({"llm_api_key": "k",
+                         "llm_fallback_model": "some/model:free",
+                         "llm_fallback_base_url":
+                             "https://openrouter.ai/api/v1"})
+        assert "llm_fallback_key is empty" in out.getvalue(), out.getvalue()
+        out = io.StringIO()
+        with _ctxlib.redirect_stdout(out):
+            llm.warm_up(fbcfg)
+        assert ("fallback configured: mistralai/mistral-nemo via "
+                "openrouter.ai/api/v1") in out.getvalue(), out.getvalue()
+        llm.reset_disable_state()
+    finally:
+        llm._call = _orig_warm_call
+    print("[PASS] warm-up names the fallback, or says why there is none")
+
     # An EMPTY reply (live-fire: a held mention 'answered' at 17:33:23
     # came back with nothing at 17:33:24 - the reasoning model thought
     # past its completion budget) gets ONE retry at a doubled thinking

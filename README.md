@@ -243,14 +243,17 @@ chime-ins, quiet-room openers, the memory — is off by default; flip
 fields (any provider, including local Ollama) supply the personality;
 everything else works without a key.
 
-**A second provider for the voice.** Groq's free tier rate-limits
-mid-stream (HTTP 429), and the chat voice used to go quiet for the
-two-minute breaker window. Fill the `llm_fallback_*` fields in
-`config.json` and a second provider carries the voice until the window
-clears — the console announces the switch once per outage, both
-providers are warmed at startup (a failed warm-up says so on the
-console), and each has its own breaker so a dead fallback key never
-takes the primary down. The free OpenRouter setup:
+**A second provider for everything the model does.** Groq's free tier
+rate-limits mid-stream (HTTP 429), and one whole evening of the bot
+going quiet on every fact, `!ask` and chat line taught the lesson: the
+fallback used to serve the chat voice only. Fill the `llm_fallback_*`
+fields in `config.json` and a second provider carries chat, facts,
+questions and `!ask` until the window clears — the console announces
+the switch once per outage, both providers are warmed at startup (a
+failed warm-up says so on the console, and startup names the fallback —
+or says in plain English why there is none), and each has its own
+breaker so a dead fallback key or a retired `:free` slug (they rotate!)
+never takes the primary down — or fails silently ever again. The free OpenRouter setup:
 any key from openrouter.ai/keys (no card) plus any model whose slug
 ends in `:free` — verified live and healthy as of September 2026:
 `nvidia/nemotron-3-super-120b-a12b:free` (912ms, 62 t/s, months
@@ -263,25 +266,27 @@ older `:free` listings have
 gone dark), so take whatever is currently free on openrouter.ai/models;
 the free tier allows 20 requests/minute and 50/day — 1,000/day after
 any one-time $10 credit top-up — which is plenty for a fallback that
-only carries chat while Groq's window clears. A local Ollama works as
-the fallback too, with no limits at all. An empty reply — or one cut
+only carries the load while Groq's window clears. A local Ollama works
+as the fallback too, with no limits at all. An empty reply — or one cut
 off mid-sentence ("If they try to slash wages, I'll") — a reasoning
 model that thought past its completion budget, the silent miss of a
 held mention, is retried once at a doubled thinking budget before the
-fallback takes the line. Fun facts and `!ask`'s trivia
-pass keep their own model-level fallbacks; this one is for the chat
-voice.
+fallback takes the line.
 
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
   grounded answer beats a charming guess. Weather questions get their
-  own header — `Weather | Saint Clair, Mo: Clear, 76.7°F…` — because
-  live data is not trivia; and when the records miner backs a
-  superlative question, the article it digs through must actually be
-  about the subject (a US freight-lane question once came back with
-  Ivory Coast's GDP — the search loved "coat"~"Côte" and "west
-  coast"). The persona takes over when
+  own header — `Weather | Saint Clair, Mo: Clear, 76.7°F…` — and
+  sunrise/sunset questions get the actual times — `Sun | Vandalia, IL:
+  sunrise 6:37 AM, sunset 7:04 PM today — times are local.` — straight
+  from Open-Meteo (free, keyless, no model in the path to rate-limit or
+  cut off), because "All times are local time for the City of Vandalia"
+  was a scraped page's footnote, not the time. And when the records
+  miner backs a superlative question, the article it digs through must
+  actually be about the subject (a US freight-lane question once came
+  back with Ivory Coast's GDP — the search loved "coat"~"Côte" and
+  "west coast"). The persona takes over when
   the engine has nothing, and owns opinions and about-the-bot questions
   ("whats your favorite truck") outright. No LLM key configured? The
   ask falls through to the fact engine's question path, which answers
@@ -608,7 +613,12 @@ fun facts. Three layers, in order:
    any rowdy stories the supplied facts actually contain, each ≤ 200 chars."*
    The model rewrites **only the supplied facts** (never invents its own),
    returns up to 10 one-liners, and the bot serves the top one first, then a
-   random one on repeat calls. **This is what makes spicy mode actually spicy**
+   random one on repeat calls. A line the model cut off mid-sentence (it
+   squeezed a long quote into the character budget and gave up — live-fire:
+   *"…as to why Daft Punk split, saying: "As much as I love this character,
+   the last thing I would want to be…"*) is repaired to its last complete
+   clause before it can post; what cannot be repaired is dropped.
+   **This is what makes spicy mode actually spicy**
    — but see the note below: for real adult output you want a **local Ollama
    model**, because hosted models are filtered.
 
