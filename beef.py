@@ -504,7 +504,7 @@ THEME_CLIMAXES = (
     "The final was \"{topic}\", best of three. {w} took it in two; {l} took it personally.",
     "{w} settled it with one perfect \"{topic}\" run that got slow-clapped. {l} left during the applause.",
     "The \"{topic}\" title match went long. {w} endured; {l} asked if they could start over.",
-    "Judges' decision, unanimous: {w}. {l} submitted a counter-argument with diagrams. The diagrams were wrong.",
+    "Judges' decision, unanimous at \"{topic}\": {w}. {l} submitted a counter-argument with diagrams. The diagrams were wrong.",
     "{w} clutched the \"{topic}\" final with a move nobody has attempted since. {l} saw it coming and could do nothing.",
     "It came down to the last attempt at \"{topic}\". {w} delivered; {l} delivered slightly less.",
     "The \"{topic}\" showdown ended in a score so lopsided the scoreboard asked for confirmation. {w} confirmed. {l} left.",

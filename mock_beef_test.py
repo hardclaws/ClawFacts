@@ -244,7 +244,13 @@ def test_a_theme_fallback_stays_on_theme():
         res = beef.feud("Hardclaws", "", "", theme="poledancing")
         assert res["rival"] in named, res["rival"]
         assert "poledancing" in res["lines"][1], res["lines"][1]
-    print("[PASS] theme fallbacks tell the story the player asked for")
+    # Every themed act template must carry the {topic} slot - one climax
+    # template didn't, and one draw in twelve dropped the theme the player
+    # typed (a flaky test was the only witness). Deterministic now.
+    for name in ("THEME_SPARKS", "THEME_ESCALATIONS", "THEME_CLIMAXES"):
+        for t in getattr(beef, name):
+            assert "{topic}" in t, (name, t)
+    print("[PASS] every themed act template carries the {topic} slot")
 
 
 def test_a_typed_rival_keeps_its_real_casing():
