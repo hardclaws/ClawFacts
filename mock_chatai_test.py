@@ -132,15 +132,25 @@ def test_chime_ins_are_gated():
     print("[PASS] chime-ins are gated by roll, room, cooldown and cap")
 
 
-def test_the_streamer_commands_and_own_lines_never_trigger():
+def test_the_streamer_can_address_the_bot_but_it_never_butts_in():
     b = _bot(llm_api_key="k")
     orig_roll, orig_reply = bot_mod.random, llm.chat_reply
     bot_mod.random = _FixedRoll(0.0)
-    llm.chat_reply = lambda s, u, c: "Should never be needed."
+    llm.chat_reply = lambda s, u, c: "Only when asked directly."
     try:
-        # The streamer already has the floor.
-        b._on_message("Hardclaws", "#t", "doc what do you think of this",
-                      "hardclaws", "broadcaster/1")
+        # A direct @-mention from the streamer is him addressing the bot:
+        # it replies. It used to ignore him entirely, which read as
+        # broken the moment he tested his own bot from the streamer seat.
+        b._on_message("truckingwithdoc", "#t",
+                      "doc what do you think of this",
+                      "truckingwithdoc", "broadcaster/1")
+        assert b._jobs.qsize() == 1, b._jobs.qsize()
+        _drain(b)
+        assert b.said == ["@truckingwithdoc Only when asked directly."], b.said
+        # His ordinary lines never trigger a chime-in - the floor is his.
+        b._on_message("truckingwithdoc", "#t",
+                      "this load feels heavy today",
+                      "truckingwithdoc", "broadcaster/1")
         # Commands are not chatter.
         b._on_message("kvack", "#t", "!doc hello", "kvack", "")
         # The bot never reacts to its own lines.
@@ -152,8 +162,49 @@ def test_the_streamer_commands_and_own_lines_never_trigger():
     finally:
         bot_mod.random = orig_roll
         llm.chat_reply = orig_reply
-    print("[PASS] streamer lines, commands, own lines and explicit text "
-          "never trigger")
+    print("[PASS] the streamer can address the bot; it never butts in")
+
+
+def test_smalltalk_keeps_the_bot_alive_when_the_model_is_down():
+    """A dead model slug used to mean total silence on direct address and,
+    for !ask, a Wikipedia fact about the word 'today'. Chatty messages now
+    get a canned Doc line; factual questions still take the real paths."""
+    assert chatai.smalltalk("how are you today?") in chatai._SMALLTALK_LINES
+    assert chatai.smalltalk("hows it going doc") in chatai._SMALLTALK_LINES
+    assert chatai.smalltalk("who are you") in chatai._SMALLTALK_LINES
+    assert chatai.smalltalk("whats the longest truck in the world") is None
+    assert chatai.smalltalk("doc link me some porn") is None
+
+    b = _bot(llm_api_key="k")
+    orig_reply, orig_fact = llm.chat_reply, bot_mod.get_funfact
+    asked = []
+
+    def _fact(q, o):
+        asked.append(q)
+        return {"place": "Road train",
+                "fact": "A driver pulled 113 trailers for 1,235 metres."}
+
+    llm.chat_reply = lambda s, u, c: None          # the model is down
+    bot_mod.get_funfact = _fact
+    try:
+        # A chatty mention: a canned Doc line, not silence.
+        b._on_message("kvack", "#t", "doc hows it going", "kvack", "")
+        _drain(b)
+        assert len(b.said) == 1 and b.said[0].startswith("@kvack "), b.said
+        assert b.said[0].split(" ", 1)[1] in chatai._SMALLTALK_LINES, b.said
+        # A chatty !ask: the quip, not a Wikipedia fact about "today".
+        b._reply_ask("hollieburgin", "how are you today?")
+        assert len(b.said) == 2, b.said
+        assert b.said[1].split(" ", 1)[1] in chatai._SMALLTALK_LINES, b.said
+        assert not asked, asked
+        # A factual !ask still reaches the fact engine.
+        b._reply_ask("kvack", "whats the longest truck in the world")
+        assert asked == ["whats the longest truck in the world"], asked
+        assert "113 trailers" in b.said[-1], b.said
+    finally:
+        llm.chat_reply = orig_reply
+        bot_mod.get_funfact = orig_fact
+    print("[PASS] chatty lines get a Doc quip when the model is down")
 
 
 def test_unsafe_or_lazy_lines_never_post():
@@ -172,7 +223,10 @@ def test_unsafe_or_lazy_lines_never_post():
     orig = llm.chat_reply
     llm.chat_reply = lambda s, u, c: "NOTHING TO SAY"
     try:
-        b._on_message("kvack", "#t", "doc say something", "kvack", "")
+        # A factual message: the decline posts nothing (a chatty one
+        # would still get the canned quip - that is the smalltalk test).
+        b._on_message("kvack", "#t",
+                      "doc whats the freight rate to denver", "kvack", "")
         _drain(b)
         assert b.said == [], b.said
         assert b._chat_ai_mention_last > 0, "a decline did not back off"
@@ -423,9 +477,10 @@ def test_nothing_is_recorded_while_the_feature_is_off():
 def main():
     test_a_mention_gets_one_bounded_reply()
     test_chime_ins_are_gated()
-    test_the_streamer_commands_and_own_lines_never_trigger()
+    test_the_streamer_can_address_the_bot_but_it_never_butts_in()
     test_unsafe_or_lazy_lines_never_post()
     test_ask_answers_with_persona_then_facts()
+    test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()
     test_memory_roundtrip_and_forget()
     test_the_bot_remembers_and_forgets()
     test_the_quiet_room_gets_a_conversation_opener()

@@ -3226,10 +3226,28 @@ def _question_sources(question: str, options: dict) -> list:
 def _answer_question(question: str, opts: dict, limit: int):
     """Answer a question from what a search actually returned.
 
-    Returns None rather than a guess: no model configured, nothing found, the
-    model declining, or the answer failing the same checks every other fact
-    has to pass.
+    The model path returns None for many reasons - no model, a dead model
+    (a retired slug, a stopped Ollama), a model that declines, an answer
+    that fails grounding. A specific question ("the longest...", "how
+    many...") still deserves its concrete answer whatever happened to
+    the model: the records miner needs only Wikipedia, so it runs
+    whenever the model path has nothing. A broken model must not turn an
+    answerable question into a decline.
     """
+    result = _answer_question_llm(question, opts, limit)
+    if result:
+        return result
+    if _SPECIFIC_Q.search(question):
+        facts, src = _mine_records(_question_subject(question) or question)
+        if facts:
+            print(f"[funfacts] answered from the record lines of {src} "
+                  f"(the model path had nothing)", flush=True)
+            return {"place": _question_place(question), "facts": facts[:4]}
+    return None
+
+
+def _answer_question_llm(question: str, opts: dict, limit: int):
+    """The model's attempt: sources in, one grounded answer out, or None."""
     try:
         import llm
     except Exception as exc:
@@ -3243,16 +3261,8 @@ def _answer_question(question: str, opts: dict, limit: int):
                   "OPENROUTER_API_KEY), or point llm_base_url at a local "
                   "Ollama. Until then !funfact only answers things with a "
                   "Wikipedia article.", flush=True)
-        # A superlative question still gets its answer: the article's own
-        # record sentences need no model, only Wikipedia.
-        if _SPECIFIC_Q.search(question):
-            facts, src = _mine_records(_question_subject(question)
-                                       or question)
-            if facts:
-                print(f"[funfacts] answered from the record lines of "
-                      f"{src} (no LLM needed)", flush=True)
-                return {"place": _question_place(question),
-                        "facts": facts[:4]}
+        # A specific question still gets its answer - the wrapper above
+        # mines the article's record lines, which need no model.
         return None
     sources = _question_sources(question, opts)
     if not sources:
@@ -3326,14 +3336,6 @@ def _answer_question(question: str, opts: dict, limit: int):
     # noun or claim appears in the answer unless it appeared in a source.
     lines = _grounded_filter(lines, question, question, sources,
                              paraphrase=True)
-    if not lines and specific:
-        # The model would not produce a concrete answer. The records are in
-        # the article; post them directly rather than decline.
-        facts, src = _mine_records(_question_subject(question) or question)
-        if facts:
-            print(f"[funfacts] answered from the record lines of {src}",
-                  flush=True)
-            lines = facts
     if not lines:
         print(f"[funfacts] the answer did not survive grounding against its "
               f"{len(sources)} source line(s) - posting nothing rather than "

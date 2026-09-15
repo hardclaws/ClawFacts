@@ -545,7 +545,7 @@ def main() -> int:
         if not got or "(" in got[0] or "\u2026" in got[0]:
             return False
         if "it|they|he|she" not in inspect.getsource(
-                funfacts._answer_question):
+                funfacts._answer_question_llm):
             return False
         wiki_src = inspect.getsource(funfacts._wikipedia)
         return "deep" in wiki_src and "require_subject=True" in wiki_src
@@ -631,7 +631,7 @@ def main() -> int:
                 funfacts._question_sources):
             return False
         return "nothing specific" in inspect.getsource(
-            funfacts._answer_question)
+            funfacts._answer_question_llm)
 
     def _funfact_no_promises_or_teasers():
         """The promise returned via the fact path (a snippet passes every
@@ -815,6 +815,39 @@ def main() -> int:
         if "chat_ai_enabled" not in _distill_src:
             return False
         return '"chime"' in _bot_src
+
+    def _dead_model_degrades_gracefully():
+        """A live-fire transcript: an OpenRouter slug with no endpoints
+        (404). The bot must degrade, not break - specific questions still
+        get the record answer (the records miner no longer waits for NO
+        model to be configured, it runs whenever the model path has
+        nothing), chatty questions get a canned Doc line instead of
+        silence or a Wikipedia fact about the word 'today', the 404 says
+        so once and loudly on every path, and the streamer can address
+        the bot by name (chime-ins stay off for him)."""
+        import chatai as _ch
+        fsrc = pathlib.Path("funfacts.py").read_text(encoding="utf-8")
+        if "def _answer_question_llm" not in fsrc:
+            return False
+        wrapper = fsrc.split("def _answer_question(", 1)[1]
+        wrapper = wrapper.split("def _answer_question_llm", 1)[0]
+        if "_mine_records" not in wrapper:
+            return False
+        if not callable(getattr(_ch, "smalltalk", None)):
+            return False
+        if _ch.smalltalk("whats the longest truck") is not None:
+            return False
+        if _ch.smalltalk("how are you today") not in _ch._SMALLTALK_LINES:
+            return False
+        bsrc = pathlib.Path("bot.py").read_text(encoding="utf-8")
+        if bsrc.count("chatai.smalltalk") < 2:
+            return False
+        if "return m or chatai.CHIME" not in bsrc:
+            return False
+        lsrc = pathlib.Path("llm.py").read_text(encoding="utf-8")
+        if lsrc.count("_model_404_hint(") < 4:
+            return False          # def + the three failure paths
+        return True
 
     def _chat_ai_remembers_and_forgets():
         """The chat AI's memory: a log pruned to 90 days, distilled
@@ -1286,6 +1319,8 @@ def main() -> int:
          _chat_ai_remembers_and_forgets()),
         ("llm_no_think: Qwen3 answers instead of thinking",
          _llm_no_think_switch()),
+        ("a dead model degrades gracefully: records, quips, loud 404",
+         _dead_model_degrades_gracefully()),
         ("a freeform theme is kept, not silently re-genred",
          _beef_freeform_theme_is_kept()),
         ("beef_act_delay is the literal gap (no multipliers)",

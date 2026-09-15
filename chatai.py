@@ -10,7 +10,8 @@ Three layers, deliberately boring:
   * chime-ins - on a busy channel the bot occasionally adds a line of its
     own: a probability gate, a long cooldown and an hourly cap, so it
     never dominates the room. The streamer's own messages never trigger
-    it - he already has the floor.
+    chime-ins - he already has the floor - but directly addressing the
+    bot by name does get a reply.
 
 Everything it says passes one cleaning gate: one short line, no @mentions
 (they are prepended by the caller), no links, no explicit content, at most
@@ -23,6 +24,7 @@ saying replies NOTHING TO SAY and the bot stays quiet.
 Off by default: ``chat_ai_enabled`` in config.json.
 """
 
+import random
 import re
 
 import funfacts
@@ -162,3 +164,50 @@ def should_speak(*, enabled: bool, paused: bool, ambient_off: bool,
     if len([t for t in times if now - t < 3600]) >= max_hour:
         return False
     return True
+
+
+#: Chatty, non-factual things people say to the bot. The persona answers
+#: these when it is up; when it is not, a canned Doc line keeps the bot
+#: from going mute on direct address - and keeps the fact engine from
+#: answering "how are you today?" with the history of the word "today".
+_SMALLTALK = (
+    re.compile(r"\bhow (?:are|r) (?:you|u)\b", re.IGNORECASE),
+    re.compile(r"\bhow(?:'s| is|s) it going\b", re.IGNORECASE),
+    re.compile(r"\bhow (?:you|u) doin\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s| is|s) up\b", re.IGNORECASE),
+    re.compile(r"\bsup\b", re.IGNORECASE),
+    re.compile(r"\bwho are (?:you|u)\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s| is|s) your name\b", re.IGNORECASE),
+    re.compile(r"\bare (?:you|u) (?:a bot|real|human|alive|an ai)\b",
+               re.IGNORECASE),
+    re.compile(r"\bhow old are (?:you|u)\b", re.IGNORECASE),
+    re.compile(r"\bsay something\b", re.IGNORECASE),
+    re.compile(r"\bwhere are (?:you|u) (?:from|at)\b", re.IGNORECASE),
+    re.compile(r"\bi love (?:you|u)\b", re.IGNORECASE),
+)
+
+_SMALLTALK_LINES = (
+    "Running fine. Ask me something with a fact in it.",
+    "Better than the freight, worse than the coffee.",
+    "Still here. Me and the truck both idle a little rough.",
+    "Old enough to remember when diesel was cheap.",
+    "Doc. I drive, I talk, I mostly drive.",
+    "On the road in my head even when I'm parked.",
+)
+
+
+def smalltalk(text: str):
+    """A canned Doc line for a chatty, non-factual message, or None.
+
+    Used when the persona model is unreachable: "doc, hows it going?"
+    gets a line instead of silence, and !ask "how are you today?" gets a
+    line instead of a Wikipedia fact about the word "today". Factual
+    questions return None so they take the real paths - a canned line is
+    never posted where a fact is being asked for.
+    """
+    text = text or ""
+    if funfacts._EXPLICIT.search(text) or funfacts._TASTELESS.search(text):
+        return None
+    if any(p.search(text) for p in _SMALLTALK):
+        return random.choice(_SMALLTALK_LINES)
+    return None

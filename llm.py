@@ -92,6 +92,27 @@ def _disable(code: int) -> None:
         print("[llm] LLM rate-limited (HTTP 429); backing off for 2 minutes.", flush=True)
 
 
+_warned_404 = False
+
+
+def _model_404_hint() -> None:
+    """A 404 is not transient: the llm_model slug has no endpoints on
+    this provider (OpenRouter retires models). The raw error body does
+    not say what to DO about it, so say so once, loudly - every
+    LLM-backed feature is quietly running on its fallback until the
+    config is fixed."""
+    global _warned_404
+    if _warned_404:
+        return
+    _warned_404 = True
+    print("[llm] model not found (HTTP 404) - the llm_model slug has no "
+          "endpoints on this provider. Model slugs change (OpenRouter "
+          "retires models); pick a live one from openrouter.ai/models, or "
+          "point llm_base_url at your local Ollama. Until then every "
+          "LLM-backed feature uses its fallback. This message prints once.",
+          flush=True)
+
+
 def reset_disable_state() -> None:
     """Testing hook: clear the transient 'LLM disabled' state."""
     global _DISABLED_UNTIL
@@ -234,6 +255,8 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
                      timeout=timeout)
     except urllib.error.HTTPError as exc:
         _disable(exc.code)
+        if exc.code == 404:
+            _model_404_hint()
         return None
     except Exception as exc:
         print(f"[llm] chat error: {exc!r}", flush=True)
@@ -267,6 +290,8 @@ def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
         text = _request(base, key, json.dumps(body).encode("utf-8"))
     except urllib.error.HTTPError as exc:
         _disable(exc.code)
+        if exc.code == 404:
+            _model_404_hint()
         return None
     except Exception as exc:
         print(f"[llm] summarize error: {exc!r}", flush=True)
@@ -375,6 +400,8 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
                 print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying fallback\u2026",
                       flush=True)
                 continue
+            if exc.code == 404:
+                _model_404_hint()
             print(f"[llm] HTTP {exc.code}: {detail}", flush=True)
             return None
         except (KeyError, IndexError, TypeError, ValueError) as exc:

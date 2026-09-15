@@ -235,10 +235,17 @@ everything else works without a key.
   ask falls through to the fact engine's question path, which answers
   real questions from Wikipedia alone. It is not gated on
   `chat_ai_enabled` — it is a command, not the chatter — but while the
-  chat AI is off its answers record nothing to memory.
+  chat AI is off its answers record nothing to memory. And when the
+  model is configured but *unreachable* (a retired model slug, a stopped
+  Ollama), the question path degrades instead of dying: superlative
+  questions still get the concrete record answer from the records
+  miner, and chatty ones ("how are you today?") get a canned Doc line
+  instead of a Wikipedia fact about the word "today".
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
-  so it cannot be wound up like a toy.
+  so it cannot be wound up like a toy. The streamer's own lines never
+  trigger chime-ins — he has the floor — but directly addressing the bot
+  by name does get a reply.
 - **Chime-ins** — on a busy channel it adds a line of its own: a moment
   must win a `chat_ai_chance` roll, the room must have at least
   `chat_ai_min_chat` recent messages, and `chat_ai_cooldown` seconds

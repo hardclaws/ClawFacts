@@ -1892,12 +1892,16 @@ class TwitchBot:
         text = (message or "").strip()
         if len(text) < 3 or text.startswith(self.cfg.get("prefix", "!")):
             return None
-        if "broadcaster/1" in (badges or ""):
-            return None
         if funfacts._EXPLICIT.search(text) \
                 or funfacts._TASTELESS.search(text):
             return None
         m = chatai.mention_kind(text, self._chat_ai_names)
+        if "broadcaster/1" in (badges or ""):
+            # The streamer has the floor: the bot never butts into his
+            # lines with a chime-in. But a direct @-mention is him
+            # addressing the bot, and ignoring it reads as broken - so
+            # mentions reply, chime-ins stay off for him.
+            return m
         return m or chatai.CHIME
 
     def _maybe_chime(self, nick: str, login: str, kind: str,
@@ -1951,7 +1955,7 @@ class TwitchBot:
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
             return None
-        if chatai.declined(raw):
+        if not raw or chatai.declined(raw):
             return None
         return chatai.clean_line(raw)
 
@@ -2015,6 +2019,13 @@ class TwitchBot:
         else:
             self._chat_ai_mention_last = now
         if not line:
+            # The model is down or declined. A chatty direct address still
+            # gets a canned Doc line - the bot never goes fully mute on
+            # "doc, hows it going?" - but a factual question stays silent
+            # rather than risk a made-up answer.
+            quip = chatai.smalltalk(text)
+            if quip and not quiet:
+                self._say(self._fit(f"@{nick} ", quip))
             return
         self._chat_ai_times = [t for t in self._chat_ai_times
                                if now - t < 3600] + [now]
@@ -2073,6 +2084,13 @@ class TwitchBot:
                 self._log(f"chat ai answered {nick}")
                 self._distill(nick, snapshot)
                 return
+        # The persona is down or declined. Chatty questions still get a
+        # canned Doc line - the fact engine would otherwise answer "how
+        # are you today?" with the history of the word "today".
+        quip = chatai.smalltalk(q)
+        if quip:
+            self._say(self._fit(f"@{nick} ", quip))
+            return
         result = get_funfact(q, self._opts)
         self._reply(nick, q, result)
 

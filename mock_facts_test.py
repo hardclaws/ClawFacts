@@ -1876,6 +1876,46 @@ def test_the_question_path_also_searches_wikipedia():
     print("[PASS] the question path searches Wikipedia by its subject")
 
 
+def test_a_dead_model_still_gets_the_records():
+    """The records miner used to run only when NO model was configured.
+    A configured-but-erroring model (a retired OpenRouter slug, a stopped
+    Ollama) turned 'whats the longest truck' into a decline. Now any LLM
+    failure on a specific question falls back to the record lines."""
+    import llm
+    orig = (llm.is_configured, llm.answer_question,
+            funfacts._question_sources, funfacts._mine_records)
+    llm.is_configured = lambda o: True
+    funfacts._question_sources = lambda q, o: [
+        "The road train record was set with 113 trailers behind one truck."]
+    funfacts._mine_records = lambda subject: (
+        ["A driver pulled 113 trailers for 1,235 metres."], "Road train")
+
+    def _boom(q, src_lines, cfg):
+        raise RuntimeError("HTTP 404: no endpoints found")
+
+    try:
+        # The model returns nothing (a 404 upstream, say).
+        llm.answer_question = lambda q, s, c: None
+        got = funfacts._answer_question(
+            "whats the longest truck in the world", {"llm_api_key": "k"}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+        # The call itself blew up.
+        llm.answer_question = _boom
+        got = funfacts._answer_question(
+            "how many trailers did the record truck pull",
+            {"llm_api_key": "k"}, 200)
+        assert got and "113 trailers" in got["facts"][0], got
+        # A chatty question is not a records question: no answer, no crash.
+        llm.answer_question = lambda q, s, c: None
+        assert funfacts._answer_question(
+            "how are you today", {"llm_api_key": "k"}, 200) is None
+    finally:
+        (llm.is_configured, llm.answer_question,
+         funfacts._question_sources, funfacts._mine_records) = orig
+        funfacts._cache.clear()
+    print("[PASS] a dead model still gets the records for specific questions")
+
+
 def test_a_misspelled_dish_still_gets_its_facts():
     """End to end: 'quesobirria' against a Wikipedia that has the Quesabirria
     article. No LLM, no keys - the topic path should carry it alone."""
@@ -2999,6 +3039,7 @@ def main():
     test_a_question_is_answered_from_what_a_search_returned()
     test_a_one_typo_query_still_finds_the_article()
     test_the_question_path_also_searches_wikipedia()
+    test_a_dead_model_still_gets_the_records()
     test_a_misspelled_dish_still_gets_its_facts()
     test_a_namesake_cannot_label_or_speak_for_the_subject()
     test_a_one_fact_answer_gets_deepened_and_rotates()
