@@ -516,6 +516,36 @@ def main():
         llm.reset_disable_state()
     finally:
         llm.urllib.request.urlopen = orig
+    # A cut-off that made it past the length floor (live-fire: 'If
+    # they try to slash wages, I'll' - 33 characters, stopped only by
+    # the downstream gates) gets the same retry; a complete line does
+    # not pay for one.
+    _fake, _ = _empty_chain(["If they try to slash wages, I\u2019ll",
+                             "If they slash wages, I park the rig."],
+                            "FB.")
+    llm.urllib.request.urlopen = _fake
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "If they slash wages, I park the rig.", got
+        budgets = [json.loads(c["body"]).get("max_completion_tokens")
+                   for c in captured]
+        assert budgets == [300, 600], budgets
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    _fake, _ = _empty_chain(["A complete line, no dangling tail."], "FB.")
+    llm.urllib.request.urlopen = _fake
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "A complete line, no dangling tail.", got
+        assert len(captured) == 1, "a complete line must not pay a retry"
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
     print("[PASS] an empty chat reply is retried once at a doubled "
           "budget, then the fallback takes it")
 

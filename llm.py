@@ -56,6 +56,16 @@ OLLAMA_MODEL = "llama3.1:8b"
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
+#: A reply cut off mid-thought often ends on a glue word or a dangling
+#: contraction (live-fire: 'If they try to slash wages, I'll' - longer
+#: than the 12-character floor, so the old fragment check missed it and
+#: the downstream gates had to stop it). A complete line never ends on
+#: one, so it pays the same doubled-budget retry as an empty reply.
+_DANGLING_TAIL = re.compile(
+    r"\b(?:and|or|but|because|the|a|an|to|of|in|on|at|for|with|from|"
+    r"i['\u2019]ll|you['\u2019]ll|we['\u2019]ll|they['\u2019]ll)"
+    r"[^A-Za-z0-9]*$", re.IGNORECASE)
+
 # Reasoning models (o1/o3/gpt-oss/deepseek-r1/…) reject `temperature` and want
 # `max_completion_tokens` instead of `max_tokens`. Detect them by name.
 _REASONING = re.compile(
@@ -405,14 +415,17 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
             text = _call(base, model, key, prompt, system,
                          timeout=timeout, max_tokens=120,
                          hard_nothink=_hard_nothink(cfg, base))
-            if not text or len(text) < 12:
-                # An empty 200 - or a fragment ('The', 'CyclingWith',
-                # both live-fire, cut off before the answer started) -
-                # is the reasoning model thinking past its cap, or a
-                # filter fluke; not a decline (that is the literal
-                # NOTHING TO SAY). One retry at a doubled thinking
-                # budget; a cheap second, not a loop. 12 is the
-                # cleaner's floor: below it the line could never post.
+            if not text or len(text) < 12 \
+                    or _DANGLING_TAIL.search(text):
+                # An empty 200 - or a reply cut off before the answer
+                # finished ('The', 'CyclingWith', 'If they try to slash
+                # wages, I'll', all live-fire) - is the reasoning model
+                # thinking past its cap, or a filter fluke; not a
+                # decline (that is the literal NOTHING TO SAY). One
+                # retry at a doubled thinking budget; a cheap second,
+                # not a loop. 12 is the cleaner's floor: below it the
+                # line could never post; the tail check catches cuts
+                # that made it past that floor.
                 print(f"[llm] {model} returned an empty chat reply - "
                       f"one retry with a bigger thinking budget",
                       flush=True)

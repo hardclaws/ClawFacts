@@ -1616,6 +1616,13 @@ def main() -> int:
          and "kind" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
          and _weather_and_miner_behave()),
+        ("a reply cut off mid-sentence is retried like an empty one",
+         "_DANGLING_TAIL" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         and bool(_llm2._DANGLING_TAIL.search(
+             "If they try to slash wages, I\u2019ll"))
+         and not _llm2._DANGLING_TAIL.search(
+             "Running I-80 tonight, keep the hammer down")),
         ("notes taken in chat are kept; person-questions skip the encyclopedia",
          callable(_ch2.note_request) and callable(_ch2.named_people)
          and "asks_about_someone" in pathlib.Path(
