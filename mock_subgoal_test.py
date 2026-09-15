@@ -122,6 +122,67 @@ def test_the_full_command_path_routes():
     print("[PASS] the full !subgoal path answers in chat")
 
 
+def _subnotice(msg_id="sub", display="Subber"):
+    """A verbatim-style USERNOTICE line, the way Twitch sends subs."""
+    login = display.lower()
+    return (f"@badge-info=;badges=;display-name={display};login={login};"
+            f"msg-id={msg_id};system-msg={display}\\sjust\\ssubscribed;"
+            f" :{login}!{login}@{login}.tmi.twitch.tv USERNOTICE #t :here "
+            f"for the trucker")
+
+
+def test_subs_seen_in_chat_count_the_goal():
+    """Twitch lets no bot token read the sub count, but every sub,
+    resub and gift announces itself in chat - the bot counts what the
+    room sees. Driven through _handle because the interesting part is
+    the USERNOTICE parse, the same way the raid test does it."""
+    b = _bot()
+    b._subgoal_mutation("amod", MOD, "set 2 wear a clown costume for a "
+                                     "full driving shift")
+    b._handle(_subnotice("sub", "NewSub"))
+    assert b._subgoal["current"] == 1, b._subgoal
+    # The second one crosses the goal - the payoff line is queued for
+    # the worker, exactly like a mod's !subgoal add crossing it.
+    b._handle(_subnotice("resub", "LoyalSub"))
+    assert b._subgoal["current"] == 2, b._subgoal
+    nick, login, badges, command, argument = b._jobs.get()
+    assert command == "say" and "GOAL REACHED" in argument, (command,
+                                                             argument)
+    assert "clown costume" in argument and "Pay up" in argument, argument
+    # Past the goal, subs still count - but no second announcement.
+    b._handle(_subnotice("subgift", "GiftGiver"))
+    assert b._subgoal["current"] == 3, b._subgoal
+    assert b._jobs.empty(), "crossing announces once, not per sub"
+    # The count survives a restart like every mod change does.
+    b2 = _bot(subgoal_state_path=b.cfg["subgoal_state_path"])
+    assert b2._subgoal.get("current") == 3, b2._subgoal
+    print("[PASS] subs seen in chat count the goal; crossing it "
+          "announces the payoff once")
+
+
+def test_community_gift_banners_do_not_double_count():
+    """A submysterygift banner is followed by one subgift notice per
+    recipient - counting both would double every community gift."""
+    b = _bot()
+    b._subgoal_mutation("amod", MOD, "set 50 clown costume shift")
+    b._handle(_subnotice("submysterygift", "GiftGiver"))
+    assert b._subgoal.get("current", 0) == 0, b._subgoal
+    b._handle(_subnotice("anonsubgift", "AnAnonymousGifter"))
+    assert b._subgoal["current"] == 1, b._subgoal
+    print("[PASS] the community-gift banner never double-counts gifts")
+
+
+def test_auto_count_needs_a_goal_and_a_switch():
+    b = _bot(subgoal_auto_count=False)
+    b._subgoal_mutation("amod", MOD, "set 50 clown costume shift")
+    b._handle(_subnotice("sub", "NewSub"))
+    assert b._subgoal.get("current", 0) == 0, b._subgoal
+    b2 = _bot()
+    b2._handle(_subnotice("sub", "NewSub"))    # no goal set: ignored
+    assert b2._subgoal.get("current", 0) == 0, b2._subgoal
+    print("[PASS] auto-count can be switched off, and waits for a goal")
+
+
 def main():
     test_anyone_can_read_no_goal()
     test_mods_set_the_goal()
@@ -130,6 +191,9 @@ def main():
     test_numbers_before_a_goal_are_rejected()
     test_the_goal_survives_a_restart()
     test_the_full_command_path_routes()
+    test_subs_seen_in_chat_count_the_goal()
+    test_community_gift_banners_do_not_double_count()
+    test_auto_count_needs_a_goal_and_a_switch()
     print("\nALL PASSED \u2714")
     return 0
 

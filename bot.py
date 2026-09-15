@@ -109,6 +109,12 @@ PERSONALITY_COMMANDS = {"persona", "personality", "voice"}
 # The sub goal: anyone can read it, moderators maintain it.
 SUBGOAL_COMMANDS = {"subgoal", "subgoals"}
 
+#: The USERNOTICE ids that announce a sub the whole channel can see.
+#: 'submysterygift' is deliberately absent: the community-gift banner
+#: is followed by one 'subgift' notice per recipient, and counting both
+#: would count every gift twice.
+_SUB_NOTICE_IDS = ("sub", "resub", "subgift", "anonsubgift")
+
 # Everything a moderator must not be able to redefine. Without this, "!help"
 # typed by a moderator would silently stop meaning help.
 RESERVED_COMMANDS = (
@@ -184,6 +190,15 @@ DEFAULTS = {
     # documented /no_think soft switch to every prompt. No effect on
     # models that do not know the switch.
     "llm_no_think": False,
+    # The chat voice's second provider: when the llm_* provider is
+    # rate-limited (Groq's free tier 429s mid-stream), chat replies
+    # switch to this one until the window clears - the streamer never
+    # sees the gap. Empty model = no fallback (the default). A local
+    # Ollama works here too: no key needed, and it is warmed at startup
+    # like the primary.
+    "llm_fallback_key": "",
+    "llm_fallback_base_url": "",
+    "llm_fallback_model": "",
     "chat_ai_names": ["doc", "docbot"],
     "bot_personality": "",
     # The chat AI's memory: one SQLite file. Messages are pruned after
@@ -194,6 +209,12 @@ DEFAULTS = {
     # the sub goal survive restarts without touching config.json.
     "persona_state_path": "persona.json",
     "subgoal_state_path": "subgoal.json",
+    # Subs the bot SEES in chat (sub, resub and gift announcements)
+    # bump the sub goal on their own - Twitch lets only the
+    # broadcaster's own token read the live count, so counting the
+    # announcements is the honest automated half, and !subgoal count is
+    # still the sync point for anything missed while offline.
+    "subgoal_auto_count": True,
     # Keep the console log in a file too (e.g. "bot.log"): everything the
     # window shows, plus crash tracebacks, survives the scrollback.
     # Empty = console only.
@@ -419,6 +440,9 @@ class TwitchBot:
             self.cfg.get("persona_state_path", "persona.json"))
         self._subgoal = self._load_json_state(
             self.cfg.get("subgoal_state_path", "subgoal.json"))
+        # Chat-side sub notices and mod !subgoal commands both write the
+        # sub goal; the lock keeps the two writers honest.
+        self._subgoal_lock = threading.Lock()
         self._chat_ai_pending = []              # mentions held by cooldown
         self._chat_ai_names = set(
             str(n).lower() for n in
@@ -762,8 +786,11 @@ class TwitchBot:
         elif command == "USERNOTICE":
             # Twitch sends this for subs, gift subs and - the one that matters
             # here - raids. Nothing handled it before, so raids were invisible.
-            if tags.get("msg-id") == "raid":
+            msg = tags.get("msg-id")
+            if msg == "raid":
                 self._on_raid(tags)
+            elif msg in _SUB_NOTICE_IDS:
+                self._on_sub_notice(tags)
         elif command == "USERSTATE":
             # Twitch sends this when we join a channel and again after every
             # PRIVMSG we send, and it carries OUR OWN badges. That is the only
@@ -1277,6 +1304,36 @@ class TwitchBot:
             self._log("[so] raid notice carried no raider name; skipped")
             return
         self._jobs.put((name, login or name.lower(), "", "raid", count))
+
+    def _on_sub_notice(self, tags: dict) -> None:
+        """A sub the whole channel just saw. Twitch will not let a bot
+        read the live sub count - that number belongs to the
+        broadcaster's own token alone - but every sub, resub and gift
+        announces itself in chat, and counting what the room actually
+        SEES keeps the goal moving without any API at all. The count
+        itself is quick enough for the read loop; only the goal-crossing
+        announcement is queued, because saying paces at over a second a
+        line and the read loop must not wait for that."""
+        if not self.cfg.get("subgoal_auto_count", True):
+            return
+        with self._subgoal_lock:
+            g = self._subgoal or {}
+            if not g.get("goal"):
+                return          # nothing to count toward yet
+            was = int(g.get("current", 0))
+            g["current"] = was + 1
+            self._save_json_state(self.cfg.get("subgoal_state_path",
+                                               "subgoal.json"),
+                                  self._subgoal)
+            goal = int(g["goal"])
+            cur = g["current"]
+            crossed = was < goal <= cur
+            line = self._subgoal_line() if crossed else ""
+        who = self._unescape_tag(tags.get("display-name")
+                                 or tags.get("login") or "someone")
+        self._log(f"sub seen in chat ({who}): {cur}/{goal}")
+        if crossed:
+            self._jobs.put(("", "", "", "say", line))
 
     def _say_shoutout(self, name: str, login: str, count,
                       is_raid: bool = True) -> None:

@@ -24,6 +24,10 @@
   "serper_api_key": "",
   "tavily_api_key": "",
   "_llm_options": "The three llm_* fields above are set for OpenRouter (recommended for adult-aligned facts). Other providers: Groq -> key 'gsk_...', base 'https://api.groq.com/openai/v1', model 'openai/gpt-oss-120b'. Local Ollama -> key '' (empty), base 'http://localhost:11434/v1', model 'llama3.1:8b'. Other OpenRouter models: 'sao10k/l3.3-euryale-70b' (edgiest), 'cognitivecomputations/dolphin-mistral-24b-venice-edition' (uncensored), 'mistralai/mistral-nemo' (cheapest).",
+  "llm_fallback_key": "",
+  "llm_fallback_base_url": "",
+  "llm_fallback_model": "",
+  "_llm_fallback": "The chat voice's second chance: when the llm_* provider above is rate-limited (Groq's free tier 429s mid-stream), chat replies switch to this provider until the window clears, and both are warmed at startup. OpenRouter example: key 'sk-or-...', base 'https://openrouter.ai/api/v1' (the default when left empty), model 'mistralai/mistral-nemo' (~$0.03 per MILLION output tokens; pick any live slug from openrouter.ai/models). A local Ollama fallback works too: key '', base 'http://localhost:11434/v1', model 'llama3.1:8b' - it needs no key. Leave llm_fallback_model empty (the default) to keep a single provider. Fun facts and !ask's trivia pass keep their own fallbacks; this one is for the chat voice.",
   "chat_ai_enabled": false,
   "_chat_ai": "The bot's own voice in chat. When enabled: !ask anything gets a persona answer (needs the llm_* fields; without a key, !ask falls back to the fact engine), the bot replies when addressed by one of chat_ai_names, it occasionally chimes in on a busy channel, and when nobody has spoken for chat_ai_quiet_seconds it opens the conversation itself. Bounded: chat_ai_mention_cooldown between mention replies, chat_ai_cooldown between unprompted lines on a busy channel, chat_ai_quiet_cooldown between quiet-room openers, chat_ai_chance is the odds per eligible moment, chat_ai_max_hour is the hard cap, and !cb off silences it for the session. bot_personality empty = the built-in Doc voice.",
   "chat_ai_cooldown": 240,
@@ -70,7 +74,9 @@
   "log_file": "",
   "_log_file": "Set to a filename (e.g. \"bot.log\") and everything the console shows is also appended to that file - including crash tracebacks - so the log survives the window scrolling away. Watch it live with PowerShell: Get-Content .\\bot.log -Wait. Empty = console only.",
   "persona_state_path": "persona.json",
-  "_persona_state_path": "Where the mod-chosen voice (!persona set) is saved so it survives restarts. The bot's available voices: doc, sarge, rookie, rusty, nightshift, medic, cb, squaddie, coach, cowboy (or !persona custom <description>) - and whichever is active, it always knows the streamer's story.",
+  "_persona_state_path": "Where the mod-chosen voice (!persona set) is saved so it survives restarts. The bot's available voices: doc, sarge, rookie, rusty, nightshift, medic, cb, squaddie, coach, cowboy, flo, commentator, noir (or !persona custom <description>) - and whichever is active, it always knows the streamer's story.",
   "subgoal_state_path": "subgoal.json",
-  "_subgoal_state_path": "Where the sub goal (!subgoal set <goal> <what happens when we hit it>) is saved. Twitch only lets the broadcaster's own token read live sub counts, so mods keep the number moving with !subgoal add/sub/count - anyone can check it with a bare !subgoal."
+  "_subgoal_state_path": "Where the sub goal (!subgoal set <goal> <what happens when we hit it>) is saved. Twitch only lets the broadcaster's own token read live sub counts, so mods keep the number moving with !subgoal add/sub/count - anyone can check it with a bare !subgoal.",
+  "subgoal_auto_count": true,
+  "_subgoal_auto_count": "true (the default): every sub, resub and gifted sub the bot SEES announced in chat bumps the sub goal on its own - the community-gift banner is skipped so gifts are never counted twice, and crossing the goal posts the payoff line. Anything the bot misses while offline is corrected with !subgoal count N. false: mods move the number entirely by hand."
 }

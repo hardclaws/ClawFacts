@@ -520,17 +520,19 @@ def test_mods_can_switch_the_bots_voice():
     """!persona: show, list, set, custom, reset - moderators only. The
     chosen voice is what the model actually receives (pinned by
     capturing the system prompt), and it survives a restart."""
-    assert len(chatai.PERSONAS) >= 10
+    assert len(chatai.PERSONAS) >= 13
     assert len(set(chatai.PERSONAS.values())) == len(chatai.PERSONAS)
     assert chatai.persona("SARGE") == chatai.PERSONAS["sarge"]
     assert chatai.persona("nope") is None
     assert chatai.PERSONAS["doc"] == chatai.DEFAULT_PERSONA
-    # The streamer's own crew: the unit medic, the CB, the drop
-    # partner, the coach, the trail hand. Every voice - including a
-    # custom one - also receives his story, so a voice that lands on a
-    # run night or a Warzone night knows what room it is in.
-    crew = ("medic", "cb", "squaddie", "coach", "cowboy")
-    for v in crew:
+    # The streamer's own crew (the unit medic, the CB, the drop
+    # partner, the coach, the trail hand) plus the roadhouse floor
+    # (the waitress, the commentator, the detective). Every voice -
+    # including a custom one - also receives his story, so a voice
+    # that lands on a run night or a Warzone night knows what room it
+    # is in.
+    for v in ("medic", "cb", "squaddie", "coach", "cowboy",
+              "flo", "commentator", "noir"):
         assert chatai.persona(v), v
     assert set(chatai.PERSONA_BLURBS) == set(chatai.PERSONAS)
     bio = chatai.system_prompt()

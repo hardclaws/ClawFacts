@@ -243,6 +243,19 @@ chime-ins, quiet-room openers, the memory — is off by default; flip
 fields (any provider, including local Ollama) supply the personality;
 everything else works without a key.
 
+**A second provider for the voice.** Groq's free tier rate-limits
+mid-stream (HTTP 429), and the chat voice used to go quiet for the
+two-minute breaker window. Fill the `llm_fallback_*` fields in
+`config.json` and a second provider carries the voice until the window
+clears — the console announces the switch once per outage, both
+providers are warmed at startup, and each has its own breaker so a dead
+fallback key never takes the primary down. The natural pairing is Groq
+primary + OpenRouter fallback (e.g. `mistralai/mistral-nemo`, fractions
+of a cent per thousand lines — pick any live slug from
+openrouter.ai/models); a local Ollama works as the fallback too. Fun
+facts and `!ask`'s trivia pass keep their own model-level fallbacks;
+this one is for the chat voice.
+
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
@@ -292,7 +305,7 @@ everything else works without a key.
   the room.
 - **Quiet-room openers** — when nobody has spoken for
   `chat_ai_quiet_seconds`, the bot opens the conversation itself (a
-  question for chat, a hook from its trucking life), at most once per
+  question for chat, a hook from its own life), at most once per
   `chat_ai_quiet_cooldown`. A chime-in can only trigger off someone's
   message, which is impossible in a silent room — exactly when the bot
   should be doing the talking. Mention replies run on their own clock,
@@ -335,12 +348,32 @@ immediately and survives restarts (`!persona` is mod-only):
 !persona reset      - back to Doc
 ```
 
-The built-in voices: **doc** (the default long-haul dry wit), **sarge**
-(barking dispatcher, loud but never cruel), **rookie** (three weeks on
-the job, terrified of geese), **rusty** (shop mechanic, duct tape and
-blasphemy), **nightshift** (smooth 3am AM-radio voice). Every persona
-sits under the same hard rules — a voice changes the flavour, never the
-rails.
+The built-in voices come in two crews. From the streamer's own world:
+**medic** (airborne combat medic from his army days — calm, clipped,
+counting everyone's water bottles like ammo), **cb** (1970s Citizens
+Band radio, breaker one-nine, hands out handles and calls the streamer
+Driver), **squaddie** (his longtime Warzone/Fortnite drop partner —
+callouts, hype comms, zero tilt), **coach** (track-and-trail hype man
+for the indoor runs, cycling rides and truck-stop 5Ks), and **cowboy**
+(an old-west drift for Red Dead nights — laconic, every line lands).
+The roadhouse originals: **doc** (the default long-haul dry wit),
+**sarge** (barking dispatcher, loud but never cruel), **rookie** (three
+weeks on the job, terrified of geese), **rusty** (shop mechanic, duct
+tape and blasphemy), **nightshift** (smooth 3am AM-radio voice). The
+roadhouse floor: **flo** (truck-stop diner waitress, forty years of
+coffee refills, calls everybody "hon"), **commentator** (a posh British
+play-by-play voice treating a treadmill mile and a Warzone drop with
+equal gravity — disasters are "regrettable"), and **noir** (a
+hardboiled private eye narrating the stream like a case file — short,
+hard sentences). Every persona sits under the same hard rules — a
+voice changes the flavour, never the rails.
+
+Whichever voice is active — including a custom one — it also always
+receives the streamer's story: army veteran, airborne combat medic,
+two tours of Afghanistan, driving semi trucks cross-country, truck-stop
+5Ks, indoor runs, cycling rides, Fortnite/Warzone/Red Dead nights.
+That is what keeps the chimes aimed at what is actually on screen, not
+generic chatter.
 
 ### The sub goal
 
@@ -355,9 +388,17 @@ what happens when it's reached, and how many to go. Mods maintain it:
 !subgoal clear
 ```
 
-Why manual: Twitch only lets the *broadcaster's own* token read live
-sub counts — the bot's token can't, by API design. `!subgoal count` is
-the honest sync point; `add`/`sub` keep it moving between syncs.
+The automated half: **every sub, resub and gifted sub the bot sees
+announced in chat bumps the count on its own** (`subgoal_auto_count`,
+on by default), and the moment the goal is crossed the bot posts the
+payoff line — someone gifts the 50th sub and "GOAL REACHED … Pay up."
+lands immediately. Community-gift banners are skipped (each recipient
+gets their own gift notice, so counting both would double every gift).
+It still can't know the true total: Twitch only lets the
+*broadcaster's own* token read live sub counts — the bot's token can't,
+by API design, moderator or not — and anything it misses while offline
+goes unsaid. `!subgoal count` remains the honest sync point;
+`add`/`sub` keep it moving between syncs.
 
 ### It remembers its viewers
 

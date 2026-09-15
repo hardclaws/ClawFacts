@@ -92,6 +92,83 @@ def _disable(code: int) -> None:
         print("[llm] LLM rate-limited (HTTP 429); backing off for 2 minutes.", flush=True)
 
 
+#: The second provider. When the primary is rate-limited (Groq's free
+#: tier 429s mid-stream), the chat voice used to go dark for the whole
+#: breaker window - and the stream does not care whose fault it is. A
+#: fallback provider carries chat until the window clears. Its breaker
+#: is SEPARATE: a dead fallback key must never take the primary down
+#: with it.
+FALLBACK_BASE_URL = "https://openrouter.ai/api/v1"
+
+_FALLBACK_DISABLED_UNTIL = 0.0
+_ON_FALLBACK = False
+
+
+def _fallback_unavailable() -> bool:
+    return time.time() < _FALLBACK_DISABLED_UNTIL
+
+
+def _disable_fallback(code: int) -> None:
+    """The fallback's own breaker, mirroring _disable()."""
+    global _FALLBACK_DISABLED_UNTIL
+    if _fallback_unavailable():
+        return
+    if code in (401, 403):
+        _FALLBACK_DISABLED_UNTIL = time.time() + 21600  # ~6h
+        print("[llm] fallback key rejected (HTTP %d) - check "
+              "llm_fallback_key in config.json. Fallback disabled for "
+              "this session." % code, flush=True)
+    elif code == 402:
+        _FALLBACK_DISABLED_UNTIL = time.time() + 3600
+        print("[llm] fallback account has no credits (HTTP 402). "
+              "Fallback disabled for an hour.", flush=True)
+    elif code == 429:
+        _FALLBACK_DISABLED_UNTIL = time.time() + 120
+        print("[llm] fallback rate-limited (HTTP 429); backing off for "
+              "2 minutes.", flush=True)
+
+
+def fallback_endpoint(cfg: dict):
+    """(base, key, model) for the second provider, or None when there
+    is none.
+
+    Active when llm_fallback_model names a model and either a key is
+    set or the fallback base is a local Ollama (which needs no key).
+    The base defaults to OpenRouter because that is what a fallback is
+    for; point llm_fallback_base_url anywhere else. A fallback that is
+    just the primary again (same base and model) is rejected - it would
+    fail identically.
+    """
+    model = (cfg.get("llm_fallback_model") or "").strip()
+    if not model:
+        return None
+    base = ((cfg.get("llm_fallback_base_url") or "").strip()
+            or FALLBACK_BASE_URL).rstrip("/")
+    key = (cfg.get("llm_fallback_key") or "").strip()
+    if not key and not _is_local(base):
+        return None
+    pbase = ((cfg.get("llm_base_url") or "").strip()
+             or DEFAULT_BASE_URL).rstrip("/")
+    if base == pbase and model == (cfg.get("llm_model") or "").strip():
+        return None
+    return base, key, model
+
+
+def _note_fallback_line(model: str, fallback_model: str) -> None:
+    """Announce the switch once per outage, not once per line - the
+    breaker already said why."""
+    global _ON_FALLBACK
+    if not _ON_FALLBACK:
+        _ON_FALLBACK = True
+        print(f"[llm] {model} is unavailable - chat answers come from "
+              f"{fallback_model} until it clears", flush=True)
+
+
+def _note_primary_line() -> None:
+    global _ON_FALLBACK
+    _ON_FALLBACK = False
+
+
 _warned_404 = False
 
 #: When the most recent chat_reply call timed out (cleared by the next
@@ -134,8 +211,10 @@ def _model_404_hint() -> None:
 
 def reset_disable_state() -> None:
     """Testing hook: clear the transient 'LLM disabled' state."""
-    global _DISABLED_UNTIL
+    global _DISABLED_UNTIL, _FALLBACK_DISABLED_UNTIL, _ON_FALLBACK
     _DISABLED_UNTIL = 0.0
+    _FALLBACK_DISABLED_UNTIL = 0.0
+    _ON_FALLBACK = False
 
 SYSTEM_PROMPT = (
     "You write fun facts about places for a trucker's Twitch stream watched by "
@@ -278,18 +357,22 @@ def _call(base: str, model: str, key: str, user_prompt: str,
 def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     """One line of chat personality, or None on any failure.
 
-    The persona's own endpoint: same provider fallbacks and circuit
-    breaker as everything else, but a SHORT timeout - a chime-in that
-    arrives a minute after the moment it was for is worse than silence,
-    and chat will not wait for it.
+    The persona's own endpoint: same circuit breaker as everything
+    else, plus a SECOND PROVIDER (see fallback_endpoint) so a
+    rate-limited primary does not mute the voice for its breaker
+    window. SHORT timeout either way - a chime-in that arrives a minute
+    after the moment it was for is worse than silence, and chat will
+    not wait for it.
     """
-    if not is_configured(cfg) or _unavailable():
-        return None
-    _set_chat_timeout(False)
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
     model = cfg.get("llm_model") or (
         OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    fb = fallback_endpoint(cfg)
+    primary_up = is_configured(cfg) and not _unavailable()
+    if not primary_up and not (fb and not _fallback_unavailable()):
+        return None
+    _set_chat_timeout(False)
     # A local model on CPU needs a budget a hosted API does not: the chat
     # prompt is the big one (persona + memories + the room), and reading
     # it alone can run 10s+ on a mini PC. 8s was tuned for hosted APIs
@@ -301,63 +384,86 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
                                       or default_to), 30.0))
     except (TypeError, ValueError):
         timeout = default_to
-    if cfg.get("debug"):
-        print(f"[llm] POST {base}/chat/completions  model={model} "
-              f"(chat, timeout {timeout}s)", flush=True)
-        print(f"[llm] ---- chat prompt ----\n{user}", flush=True)
-    try:
-        # One cleaned line is <= 280 chars (~60 words). 120 tokens is
-        # generous for that, and caps the damage a rambling model can do:
-        # on CPU, 300 tokens of nobody-will-read-this costs the whole
-        # timeout budget.
-        return _call(base, model, key, _maybe_nothink(user, cfg), system,
-                     timeout=timeout, max_tokens=120,
-                     hard_nothink=_hard_nothink(cfg, base))
-    except urllib.error.HTTPError as exc:
-        _disable(exc.code)
-        if exc.code == 404:
-            _model_404_hint()
-        elif exc.code not in (401, 402, 403, 429):
-            # 400 (a parameter this Ollama build rejects?) and 5xx used
-            # to vanish without a line - the single worst way to debug a
-            # silent bot.
-            detail = ""
-            try:
-                detail = exc.read().decode(
-                    "utf-8", "replace").strip()[:200]
-            except Exception:
-                pass
-            print(f"[llm] chat call failed (HTTP {exc.code})"
-                  f"{': ' + detail if detail else ''}", flush=True)
-        return None
-    except TimeoutError as exc:
-        _set_chat_timeout(True)
-        print(f"[llm] chat error: {exc!r} - the model is too busy or too "
-              f"slow right now", flush=True)
-        return None
-    except Exception as exc:
-        print(f"[llm] chat error: {exc!r}", flush=True)
-        return None
+    prompt = _maybe_nothink(user, cfg)
+    if primary_up:
+        if cfg.get("debug"):
+            print(f"[llm] POST {base}/chat/completions  model={model} "
+                  f"(chat, timeout {timeout}s)", flush=True)
+            print(f"[llm] ---- chat prompt ----\n{user}", flush=True)
+        try:
+            # One cleaned line is <= 280 chars (~60 words). 120 tokens is
+            # generous for that, and caps the damage a rambling model can
+            # do: on CPU, 300 tokens of nobody-will-read-this costs the
+            # whole timeout budget.
+            text = _call(base, model, key, prompt, system,
+                         timeout=timeout, max_tokens=120,
+                         hard_nothink=_hard_nothink(cfg, base))
+            _note_primary_line()
+            return text
+        except urllib.error.HTTPError as exc:
+            _disable(exc.code)
+            if exc.code == 404:
+                _model_404_hint()
+            elif exc.code not in (401, 402, 403, 429):
+                # 400 (a parameter this Ollama build rejects?) and 5xx used
+                # to vanish without a line - the single worst way to debug a
+                # silent bot.
+                detail = ""
+                try:
+                    detail = exc.read().decode(
+                        "utf-8", "replace").strip()[:200]
+                except Exception:
+                    pass
+                print(f"[llm] chat call failed (HTTP {exc.code})"
+                      f"{': ' + detail if detail else ''}", flush=True)
+        except TimeoutError as exc:
+            _set_chat_timeout(True)
+            print(f"[llm] chat error: {exc!r} - the model is too busy or too "
+                  f"slow right now", flush=True)
+        except Exception as exc:
+            print(f"[llm] chat error: {exc!r}", flush=True)
+    # The primary could not answer - it just failed, or its breaker
+    # window from an earlier 429 is still open. A second provider
+    # carries the line instead of the room going quiet.
+    if fb and not _fallback_unavailable():
+        fbase, fkey, fmodel = fb
+        # The fallback pays for the primary's budget only when it is the
+        # same kind of endpoint: a local Ollama fallback behind a hosted
+        # primary would inherit 8s and time out on the prompt read alone.
+        try:
+            default_to_fb = 30.0 if _is_local(fbase) else 8.0
+            fb_timeout = max(timeout, min(float(cfg.get("chat_ai_timeout")
+                                                  or default_to_fb), 30.0))
+        except (TypeError, ValueError):
+            fb_timeout = max(timeout, 30.0 if _is_local(fbase) else 8.0)
+        if cfg.get("debug"):
+            print(f"[llm] POST {fbase}/chat/completions  model={fmodel} "
+                  f"(chat fallback, timeout {fb_timeout}s)", flush=True)
+        try:
+            text = _call(fbase, fmodel, fkey, prompt, system,
+                         timeout=fb_timeout, max_tokens=120,
+                         hard_nothink=_hard_nothink(cfg, fbase))
+            _note_fallback_line(model, fmodel)
+            return text
+        except urllib.error.HTTPError as exc:
+            _disable_fallback(exc.code)
+            if exc.code == 404:
+                _model_404_hint()
+            return None
+        except TimeoutError as exc:
+            print(f"[llm] fallback chat error: {exc!r} - still too busy",
+                  flush=True)
+            return None
+        except Exception as exc:
+            print(f"[llm] fallback chat error: {exc!r}", flush=True)
+            return None
+    return None
 
 
-def warm_up(cfg: dict) -> bool:
-    """Load the model at startup so the first real line of chat does not
-    pay the cold start.
-
-    A local Ollama takes 10-25s to load an 8B model into RAM - longer
-    than any chat timeout is allowed to be (chat_reply clamps at 30s) -
-    but only the first request pays it. This pays it in the background,
-    where nobody is waiting, with a timeout no chat line would ever get.
-    Hosted APIs pay nothing but one tiny request - and as a side effect
-    a dead model slug (a retired OpenRouter ID) surfaces at startup,
-    not at the first mention.
-    """
-    if not is_configured(cfg) or _unavailable():
-        return False
-    key = (cfg.get("llm_api_key") or "").strip()
-    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
-    model = cfg.get("llm_model") or (
-        OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+def _warm_probe(base: str, model: str, key: str, cfg: dict) -> str:
+    """One warm-up attempt against one provider: the probe, plus the
+    generous retry for the empty-think-block case. Returns the reply
+    text ('' counts as failure)."""
     started = time.time()
     try:
         text = _call(base, model, key,
@@ -366,10 +472,10 @@ def warm_up(cfg: dict) -> bool:
                      timeout=90.0, max_tokens=24,
                      hard_nothink=_hard_nothink(cfg, base))
     except urllib.error.HTTPError:
-        return False        # already logged (404 hint, key, credits)
+        return ""            # already logged (404 hint, key, credits)
     except Exception as exc:
         print(f"[llm] warm-up failed: {exc!r}", flush=True)
-        return False
+        return ""
     if not text:
         # qwen3 opens with an EMPTY <think></think> block even with
         # /no_think, and the token cap counts the stripped block too - a
@@ -386,13 +492,47 @@ def warm_up(cfg: dict) -> bool:
     if text:
         print(f"[llm] warm-up OK - {model} is loaded and answering "
               f"({time.time() - started:.1f}s)", flush=True)
-        return True
+        return text
     # An empty reply is odd but not fatal - chat lines will try anyway.
     # It must not be SILENT, though: a missing warm-up line in the log is
     # indistinguishable from the feature being off.
     print(f"[llm] warm-up got an empty reply from {model} - chat lines "
           f"will try anyway", flush=True)
-    return False
+    return ""
+
+
+def warm_up(cfg: dict) -> bool:
+    """Load the model at startup so the first real line of chat does not
+    pay the cold start.
+
+    A local Ollama takes 10-25s to load an 8B model into RAM - longer
+    than any chat timeout is allowed to be (chat_reply clamps at 30s) -
+    but only the first request pays it. This pays it in the background,
+    where nobody is waiting, with a timeout no chat line would ever get.
+    Hosted APIs pay nothing but one tiny request - and as a side effect
+    a dead model slug (a retired OpenRouter ID) surfaces at startup,
+    not at the first mention.
+
+    A configured fallback is warmed too: the moment it is needed - the
+    primary just got rate-limited mid-stream - is the worst possible
+    time to discover a cold local model or a dead slug.
+    """
+    ok = False
+    if is_configured(cfg) and not _unavailable():
+        base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+        model = cfg.get("llm_model") or (
+            OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+        ok = bool(_warm_probe(base, model,
+                              (cfg.get("llm_api_key") or "").strip(), cfg))
+    fb = fallback_endpoint(cfg)
+    if fb and not _fallback_unavailable():
+        fbase, fkey, fmodel = fb
+        fok = bool(_warm_probe(fbase, fmodel, fkey, cfg))
+        if fok and not ok:
+            print("[llm] the primary could not be warmed - chat will "
+                  "run on the fallback", flush=True)
+        ok = ok or fok
+    return ok
 
 
 def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:

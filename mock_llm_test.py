@@ -354,6 +354,97 @@ def main():
     assert "HTTP 400" in out.getvalue(), out.getvalue()
     print("[PASS] an unexpected HTTP code on the chat call is logged")
 
+    # The fallback provider: Groq's free tier 429s mid-stream and the
+    # chat voice used to go dark for the two-minute breaker window. A
+    # configured second provider (OpenRouter here) carries the line
+    # instead - and when the primary's breaker is open, it is not even
+    # asked again.
+    def _groq_429_openrouter_ok(req, timeout=60):
+        captured.append({"url": req.full_url, "headers": req.headers,
+                         "body": req.data.decode("utf-8"),
+                         "timeout": timeout})
+        if "groq" in req.full_url:
+            raise _ue.HTTPError(req.full_url, 429, "Too Many Requests",
+                                {}, io.BytesIO(b'{"error":"rate limited"}'))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "Fallback line."}}]}
+        ).encode("utf-8"))
+
+    llm.urllib.request.urlopen = _groq_429_openrouter_ok
+    fbcfg = {"llm_api_key": "gsk-test",
+             "llm_base_url": "https://api.groq.com/openai/v1",
+             "llm_model": "openai/gpt-oss-120b",
+             "llm_fallback_key": "or-test",
+             "llm_fallback_base_url": "https://openrouter.ai/api/v1",
+             "llm_fallback_model": "mistralai/mistral-nemo"}
+    # fallback_endpoint itself: off by default, needs a model, a local
+    # base needs no key, and the primary wearing a different hat is not
+    # a fallback.
+    assert llm.fallback_endpoint({}) is None
+    assert llm.fallback_endpoint({"llm_fallback_key": "k"}) is None
+    assert llm.fallback_endpoint(
+        {"llm_fallback_model": "llama3.1:8b",
+         "llm_fallback_base_url": "http://localhost:11434/v1"}) is not None
+    assert llm.fallback_endpoint(
+        {"llm_api_key": "k", "llm_model": "m",
+         "llm_base_url": "https://api.groq.com/openai/v1",
+         "llm_fallback_key": "k",
+         "llm_fallback_base_url": "https://api.groq.com/openai/v1",
+         "llm_fallback_model": "m"}) is None
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "Fallback line.", got
+        assert [c["url"] for c in captured] == [
+            "https://api.groq.com/openai/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        auth = captured[1]["headers"]["Authorization"]
+        assert auth == "Bearer or-test", auth
+        assert json.loads(captured[1]["body"])["model"] == \
+            "mistralai/mistral-nemo"
+        assert llm._unavailable(), "the 429 must open Groq's window"
+        # Inside the window the primary is not asked again - the next
+        # line goes straight to the fallback.
+        captured.clear()
+        got = llm.chat_reply("s", "u" * 20, fbcfg)
+        assert got == "Fallback line.", got
+        assert [c["url"] for c in captured] == [
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        # Warm-up warms the fallback too - and with the primary's
+        # breaker open it warms ONLY the fallback.
+        captured.clear()
+        assert llm.warm_up(fbcfg) is True
+        assert [c["url"] for c in captured] == [
+            "https://openrouter.ai/api/v1/chat/completions"], captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] a rate-limited provider hands chat to the fallback")
+
+    # When BOTH providers are rate-limited, the bot goes quiet politely:
+    # each breaker opens once, and a call with both windows open makes
+    # no request at all.
+    def _all_429(req, timeout=60):
+        captured.append({"url": req.full_url, "headers": req.headers,
+                         "body": req.data.decode("utf-8"),
+                         "timeout": timeout})
+        raise _ue.HTTPError(req.full_url, 429, "Too Many Requests", {},
+                            io.BytesIO(b"{}"))
+
+    llm.urllib.request.urlopen = _all_429
+    try:
+        llm.reset_disable_state()
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, fbcfg) is None
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, fbcfg) is None
+        assert not captured, captured
+        llm.reset_disable_state()
+    finally:
+        llm.urllib.request.urlopen = orig
+    print("[PASS] both providers down: two breakers, no request storm")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

@@ -868,6 +868,80 @@ def main() -> int:
         b._say_subgoal("kvack")
         return "12/50" in said[-1] and "38 to go" in said[-1]
 
+    def _chat_falls_back():
+        """Groq's free tier 429s mid-stream: a configured second
+        provider carries the chat line, and while the primary's breaker
+        window is open it is not even asked."""
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+
+        cfg = {"llm_api_key": "gsk", "llm_base_url":
+               "https://api.groq.com/openai/v1",
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_key": "or", "llm_fallback_base_url":
+               "https://openrouter.ai/api/v1",
+               "llm_fallback_model": "mistralai/mistral-nemo"}
+        hits = []
+
+        def _fake(req, timeout=60):
+            hits.append(req.full_url)
+            if "groq" in req.full_url:
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b"{}"))
+            return _io.BytesIO(_json.dumps(
+                {"choices": [{"message": {"content": "Line."}}]}
+            ).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fake
+        try:
+            _llm2.reset_disable_state()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok1 = got == "Line." and hits == [
+                "https://api.groq.com/openai/v1/chat/completions",
+                "https://openrouter.ai/api/v1/chat/completions"]
+            hits.clear()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok2 = got == "Line." and hits == [
+                "https://openrouter.ai/api/v1/chat/completions"]
+            return ok1 and ok2
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
+
+    def _subs_count_themselves():
+        """Twitch lets only the broadcaster's own token read the sub
+        count, so the bot counts what chat SEES: sub, resub and gift
+        notices bump the goal, the community-gift banner does not
+        double-count, and crossing the goal queues the payoff line."""
+        b = _bot.TwitchBot(
+            dict(_bot.DEFAULTS, nick="n", channel="#c",
+                 oauth_token="oauth:x",
+                 subgoal_state_path=os.path.join(
+                     tempfile.mkdtemp(), "sg.json")))
+        said = []
+        b._say = said.append
+        b._log = lambda *a, **k: None
+        if not b._subgoal_mutation("amod", "moderator/1",
+                                   "set 2 wear a clown costume"):
+            return False
+        b._handle("@display-name=NewSub;login=newsub;msg-id=sub :newsub!"
+                  "newsub@newsub.tmi.twitch.tv USERNOTICE #c :hi")
+        b._handle("@display-name=Loyal;login=loyal;msg-id=resub :loyal!"
+                  "loyal@loyal.tmi.twitch.tv USERNOTICE #c :6 months")
+        if b._subgoal.get("current") != 2:
+            return False
+        if b._jobs.empty():
+            return False
+        _, _, _, command, argument = b._jobs.get()
+        if command != "say" or "GOAL REACHED" not in argument:
+            return False
+        b._handle("@display-name=G;login=g;msg-id=submysterygift;msg-"
+                  "param-mass-gift-count=5 :g!g@g.tmi.twitch.tv "
+                  "USERNOTICE #c")
+        return b._subgoal.get("current") == 2 and b._jobs.empty()
+
     def _chat_ai_remembers_and_forgets():
         """The chat AI's memory: a log pruned to 90 days, distilled
         per-viewer facts injected into its prompts, a 25-fact cap, and
@@ -1367,6 +1441,25 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "build unknown" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("chat survives a rate-limited provider: the fallback answers",
+         callable(_llm2.fallback_endpoint)
+         and _llm2.fallback_endpoint({}) is None
+         and _llm2.fallback_endpoint({"llm_fallback_key": "k",
+                                      "llm_fallback_model": "m"}) is not None
+         and "llm_fallback_key" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and _chat_falls_back()),
+        ("subs the bot sees in chat count toward the sub goal",
+         "subgoal_auto_count" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and "subgift" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+         and _subs_count_themselves()),
+        ("the roadhouse floor: flo, commentator and noir join the voices",
+         len(_ch2.PERSONAS) >= 13
+         and _ch2.persona("flo") and _ch2.persona("commentator")
+         and _ch2.persona("noir")
+         and set(_ch2.PERSONA_BLURBS) == set(_ch2.PERSONAS)),
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
