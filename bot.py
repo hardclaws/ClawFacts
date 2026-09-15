@@ -2545,6 +2545,14 @@ class TwitchBot:
             self._chat_ai_mention_last = now
             return
         if not quiet and addressed \
+                and chatai.creative_request(text, self._chat_ai_names) \
+                and self._do_creative(nick, text):
+            now = time.time()
+            self._chat_ai_times = [t for t in self._chat_ai_times
+                                   if now - t < 3600] + [now]
+            self._chat_ai_mention_last = now
+            return
+        if not quiet and addressed \
                 and chatai.factual_question(text, self._chat_ai_names) \
                 and not self._asks_about_someone(text) \
                 and self._answer_factual(nick, text):
@@ -2876,6 +2884,11 @@ class TwitchBot:
         q = (argument or "").strip()
         if not q:
             self._say(f"@{nick} ask me anything - a question or a topic.")
+            return
+        # Creative requests (sing a song, write a poem, etc.) get a
+        # multi-line performance drip-fed over several messages.
+        if chatai.creative_request(q, self._chat_ai_names) \
+                and self._do_creative(nick, q):
             return
         # Factual questions get the engine's grounded answer FIRST: the
         # persona guesses on trivia, the engine looks it up. If the engine
