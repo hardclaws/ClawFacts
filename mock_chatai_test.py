@@ -201,6 +201,40 @@ def test_a_timed_out_model_is_not_asked_twice():
     print("[PASS] a timed-out model is not asked twice by !ask")
 
 
+def test_a_tease_gets_a_comeback_when_the_model_is_down():
+    """Field report: '@TruckingWithDocBot you have alot of useless facts'
+    got no reply while the model was busy. A playful dig at the bot
+    deserves a canned comeback, never silence - but only digs aimed AT
+    the bot: questions ('whats the most useless fact') and third-party
+    venting ('my stupid internet') stay None."""
+    for text in ("you have alot of useless facts", "doc you suck",
+                 "your facts are boring", "doc shut up"):
+        assert chatai.smalltalk(text) in chatai._COMEBACKS, text
+    for text in ("whats the most useless fact you know",   # superlative
+                 "whats a useless animal",                 # a question
+                 "doc my stupid internet keeps dropping",  # not at the bot
+                 "doc you stupid link me porn"):           # explicit
+        assert chatai.smalltalk(text) is None, text
+
+    # End to end: the streamer's exact line, the model timing out.
+    b = _bot(llm_api_key="k")
+    orig_call = llm._call
+    try:
+        llm._call = lambda *a, **k: (_ for _ in ()).throw(
+            TimeoutError("timed out"))
+        b._on_message("Hardclaws", "#t",
+                      "@TruckingWithDocBot you have alot of useless facts",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert len(b.said) == 1, b.said
+        assert b.said[0].startswith("@Hardclaws "), b.said
+        assert b.said[0].split(" ", 1)[1] in chatai._COMEBACKS, b.said
+    finally:
+        llm._call = orig_call
+        llm._set_chat_timeout(False)
+    print("[PASS] a tease gets a Doc comeback when the model is down")
+
+
 def test_local_models_get_a_smaller_room_to_read():
     """On CPU the model reads every prompt token before writing a word -
     that read, not the generation, blew a 20s timeout on a warm model
@@ -551,6 +585,7 @@ def main():
     test_unsafe_or_lazy_lines_never_post()
     test_ask_answers_with_persona_then_facts()
     test_a_timed_out_model_is_not_asked_twice()
+    test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_local_models_get_a_smaller_room_to_read()
     test_smalltalk_keeps_the_bot_alive_when_the_model_is_down()
     test_memory_roundtrip_and_forget()

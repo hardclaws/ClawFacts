@@ -202,18 +202,51 @@ _SMALLTALK_LINES = (
 )
 
 
+#: Playful digs at the bot, and the words that aim a dig AT it. A dig
+#: deserves a comeback, not silence - "you have alot of useless facts"
+#: getting nothing (model busy) read as the bot being broken.
+_TEASE = (
+    re.compile(r"\b(?:useless|pointless|stupid|dumb|boring|overrated|"
+               r"trash|garbage|junk|lame|annoying|sucks?|shut up)\b",
+               re.IGNORECASE),
+)
+_AT_BOT = re.compile(r"\b(?:you|your|u|ur)\b|\bshut up\b",
+                     re.IGNORECASE)
+_INTERROGATIVE = re.compile(
+    r"^(?:what|whats|what's|whos|who's|who|when|where|why|how|which|is|"
+    r"are|was|were|do|does|did|can|could|would|should|tell|name)\b",
+    re.IGNORECASE)
+
+_COMEBACKS = (
+    "Useless? Those facts are load-bearing.",
+    "They're not useless, they're highly specialised.",
+    "Somebody's gotta know this stuff. Might as well be me.",
+    "One of those useless facts won me fifty bucks once.",
+    "You say useless, I say conversation insurance.",
+    "I've hauled worse cargo.",
+)
+
+
 def smalltalk(text: str):
     """A canned Doc line for a chatty, non-factual message, or None.
 
     Used when the persona model is unreachable: "doc, hows it going?"
     gets a line instead of silence, and !ask "how are you today?" gets a
-    line instead of a Wikipedia fact about the word "today". Factual
-    questions return None so they take the real paths - a canned line is
-    never posted where a fact is being asked for.
+    line instead of a Wikipedia fact about the word "today". Playful digs
+    at the bot get a comeback - but only digs aimed AT the bot ("you have
+    alot of useless facts"), never a question ("whats the most useless
+    fact") or someone venting about their own day ("my stupid internet").
+    Factual questions return None so they take the real paths - a canned
+    line is never posted where a fact is being asked for.
     """
     text = text or ""
     if funfacts._EXPLICIT.search(text) or funfacts._TASTELESS.search(text):
         return None
     if any(p.search(text) for p in _SMALLTALK):
         return random.choice(_SMALLTALK_LINES)
+    if (any(p.search(text) for p in _TEASE)
+            and _AT_BOT.search(text)
+            and not funfacts._SPECIFIC_Q.search(text)
+            and not _INTERROGATIVE.search(text.strip())):
+        return random.choice(_COMEBACKS)
     return None

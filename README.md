@@ -239,8 +239,11 @@ everything else works without a key.
   model is configured but *unreachable* (a retired model slug, a stopped
   Ollama), the question path degrades instead of dying: superlative
   questions still get the concrete record answer from the records
-  miner, and chatty ones ("how are you today?") get a canned Doc line
-  instead of a Wikipedia fact about the word "today".
+  miner, chatty ones ("how are you today?") get a canned Doc line
+  instead of a Wikipedia fact about the word "today", and playful digs
+  at the bot ("you have alot of useless facts") get a canned comeback —
+  never silence. Questions and third-party venting never get a canned
+  line; only digs aimed at the bot do.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers, at most once per `chat_ai_mention_cooldown` seconds,
   so it cannot be wound up like a toy. The streamer's own lines never

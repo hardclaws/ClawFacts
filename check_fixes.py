@@ -1321,6 +1321,12 @@ def main() -> int:
          _llm_no_think_switch()),
         ("a dead model degrades gracefully: records, quips, loud 404",
          _dead_model_degrades_gracefully()),
+        ("a tease gets a Doc comeback when the model is down",
+         (lambda: (lambda _ch: _ch.smalltalk(
+             "you have alot of useless facts") in _ch._COMEBACKS
+             and _ch.smalltalk("whats the most useless fact") is None
+             and _ch.smalltalk("my stupid internet") is None)(
+             __import__("chatai")))),
         ("a timed-out model is not asked twice (the 2-minute !ask)",
          callable(getattr(_llm2, "chat_timed_out", None))
          and "_skip_llm" in pathlib.Path(
