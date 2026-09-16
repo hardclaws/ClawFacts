@@ -6,13 +6,32 @@ smallest, cheapest cloud VM (256 MB RAM is plenty). This guide gets it running
 
 ## Step 0 — Pick a host
 
-Any Linux VM works. Free/cheap options:
+Any Linux VM works. What the bot needs from a host is small: **outbound**
+network only (Twitch IRC over TLS, HTTPS to Wikipedia and the AI / weather /
+news APIs — no inbound port, no web server), well under 256 MB of RAM, Python
+3.8+, and a disk that **survives restarts** — `config.json`, `tokens.json`,
+`persona.json`, `subgoal.json` and the memory database live next to `bot.py`.
+That last point is what rules out most "free web app" platforms.
+
+Free/cheap options that fit (checked September 2026):
 
 | Host | Cost | Notes |
 |---|---|---|
-| **Oracle Cloud "Always Free"** | $0 forever | 4-core ARM VM, great deal; signup needs a card (not charged); capacity can be flaky. |
-| **Google Cloud `e2-micro`** | $0 forever | Free tier VM in us-west1/us-central1/us-east1; needs a card (not charged). |
+| **Oracle Cloud "Always Free"** | $0 forever | Best free fit. Up to 2 Arm OCPUs / 12 GB total on `VM.Standard.A1.Flex` (halved from 4 / 24 GB in June 2026) **or** two 1 GB AMD `VM.Standard.E2.1.Micro` VMs, 200 GB of storage, public IP included. Always Free only exists in the tenancy's **home region**, which is a permanent choice. Signup needs a card (not charged). Quirks: "Out of host capacity" is common for A1 — ask for 1 OCPU / 6 GB, or take an E2.1.Micro (1 GB is plenty for this bot); a free-only tenancy can have a VM that Oracle deems *idle* for 7 days **stopped** (restart it, or upgrade to Pay As You Go — still $0 inside the Always Free limits, and set a budget alert — which is Oracle's documented way to opt out of reclamation). Pick the **Ubuntu** image (or Oracle Linux 9+): Oracle Linux 8 ships `python3` 3.6, older than the bot's 3.8 minimum. |
+| **Google Cloud `e2-micro`** | VM $0 forever; budget ≈ $3.65/mo for its IPv4 | One `e2-micro` (2 shared vCPU, 1 GB) + 30 GB **standard** persistent disk (`pd-standard`, not the default balanced disk) free forever, but **only** in `us-west1`, `us-central1` or `us-east1` — elsewhere ≈ $7/mo. In late 2025 Google dropped the "external IP is free with the e2-micro" clause; the network price list now gives one free hour a month and $0.005/h after that, and the bot needs a public address to reach Twitch, so check the first invoice. Card needed, and the 90-day trial must be upgraded to a paid billing account or the VM is deleted with it. |
+| **Azure B1s** / **AWS credits** | $0 for 12 / 6 months, then paid | Azure free accounts get 750 h/mo of a B1s VM for 12 months; AWS accounts opened after 15 July 2025 get $100–200 of credits for up to 6 months, after which the account closes unless upgraded. Fine for a trial, not a permanent home. |
 | **Hetzner / DigitalOcean / Vultr** | ~$4–6/mo | Simplest & most reliable if you'd rather not deal with free-tier quirks. |
+| **A Raspberry Pi / old laptop at home** | $0 + power | Not cloud, but the bot is standard-library Python, so anything that runs Linux 24/7 does the job. |
+
+**Free hosts that do *not* work for this bot:** Render's free tier only runs
+web services, spins them down after 15 minutes without inbound traffic and
+wipes local files on every restart (no free background workers or cron);
+Fly.io, Railway, Heroku, Replit and Glitch no longer offer an always-on free
+tier; PythonAnywhere free accounts cannot run always-on tasks and only reach
+whitelisted sites; Google Cloud Shell and GitHub Actions are not meant for a
+24/7 process; serverless free tiers (Cloud Run, Vercel, Cloudflare Workers) bill per
+request and idle their containers in between, so they cannot hold an IRC
+connection open for free.
 
 The rest of this guide is identical on any of them (Ubuntu/Debian assumed).
 

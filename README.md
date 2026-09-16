@@ -199,7 +199,11 @@ always-on (so it answers chat even when your PC is off) is a small free cloud VM
 running it under `systemd`. A complete step-by-step guide (host options,
 GitHub setup, device login over SSH, systemd unit, logs) is in
 **[`deploy/DEPLOY.md`](deploy/DEPLOY.md)**, with ready-made
-`deploy/funfact-bot.service` and `deploy/bot.env.example` files.
+`deploy/funfact-bot.service` and `deploy/bot.env.example` files. Short
+version: Oracle Cloud's Always Free VM is the free host that fits (the bot
+needs a disk that survives restarts and a process that never sleeps, which
+rules out the "free web app" platforms); Google Cloud's `e2-micro` is the
+runner-up; the guide's Step 0 table has the 2026 fine print.
 
 Quick-and-dirty local alternatives:
 
