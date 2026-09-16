@@ -760,3 +760,287 @@ def smalltalk(text: str):
     if _OPINION_ASKED.search(text):
         return random.choice(_OPINION_LINES)
     return None
+
+
+# ---- performances: a song, a poem, a story, over several lines ----------
+#
+# "Docbot sing me a song" and "make me a poem" are asks for a PIECE, not a
+# line. Pushed through the one-line path the model wrote a sentence ABOUT
+# singing ("Sure, here's a little ditty about...") and stopped - it
+# rambled, and never did the thing. A performance is written whole,
+# checked line by line against the same rails as any chat line, and then
+# posted over several messages a few seconds apart, so it reads the way a
+# person would deliver it: the first line at once, the rest as it goes.
+
+#: What kind of piece, and the shape it takes. The shape is what the
+#: model is told and what the validator holds it to - the number of
+#: lines is a range, because a limerick is five and a haiku is three.
+PERFORMANCES = {
+    "song": dict(min_lines=3, max_lines=6, ask=(
+        "a short original song: 4 to 6 lines, sung not spoken - it should "
+        "rhyme or scan like a verse and a chorus. Each line is one lyric.")),
+    "poem": dict(min_lines=3, max_lines=6, ask=(
+        "a short original poem: 4 to 6 lines that rhyme or carry a rhythm. "
+        "Each line is one line of the poem.")),
+    "rap": dict(min_lines=3, max_lines=6, ask=(
+        "a short original rap verse: 4 to 6 bars with rhymes and rhythm. "
+        "Each line is one bar.")),
+    "limerick": dict(min_lines=5, max_lines=5, ask=(
+        "an original limerick: exactly 5 lines, AABBA rhyme, bouncy. "
+        "Each line is one line of the limerick.")),
+    "haiku": dict(min_lines=3, max_lines=3, ask=(
+        "an original haiku: exactly 3 lines, 5-7-5 syllables. Each line is "
+        "one line of the haiku.")),
+    "story": dict(min_lines=3, max_lines=5, ask=(
+        "a very short original story told in 3 to 5 beats: a setup, a turn, "
+        "an ending. Each line is one beat, one or two sentences.")),
+    "toast": dict(min_lines=3, max_lines=4, ask=(
+        "a short toast raised to the subject: 3 or 4 lines, warm, a little "
+        "funny, ending on the raise. Each line is one line of the toast.")),
+}
+
+#: The verbs people use to ask for one, then up to three words of filler
+#: ('me a quick', 'us another little', 'some'), then the kind. The filler
+#: may not be a question or possessive word: 'do you know the song' and
+#: 'tell me your story' are not requests to perform.
+_KIND_WORDS = (
+    r"(?P<kind>song|tune|ditty|jingle|ballad|shanty|anthem|lullaby|serenade|"
+    r"poem|poetry|verse|sonnet|rhyme|rap|bars|freestyle|limerick|haiku|"
+    r"story|tale|bedtime\s+story|toast)")
+_SUBJECT_TAIL = (
+    r"\b[\s,.:!-]*(?:for\s+(?:me|us|him|her|them|chat)\b[\s,]*)?"
+    r"(?P<subject>(?:about|on|for|to|of|called|titled|regarding)\b.*)?")
+_PERFORM = re.compile(
+    r"\b(?:sing|write|make|do|give|tell|drop|spit|recite|compose|perform|"
+    r"read|say|share|bust\s+out|hit\s+us\s+with|hit\s+me\s+with)\s+"
+    r"(?:(?!(?:what|which|that|the|this|those|these|your|my|his|her|their|"
+    r"our|it|know|think|like|remember|heard|hear|wrote|said|about)\b)"
+    r"[\w'-]+\s+){0,3}" + _KIND_WORDS + _SUBJECT_TAIL, re.IGNORECASE)
+#: 'can you sing', 'sing for us', 'rap something', 'serenade us': the verb
+#: IS the kind.
+_PERFORM_BARE_VERB = re.compile(
+    r"^\s*(?:(?:hey|yo|ok|okay|so|please|pls)[\s,]+)*(?:(?:can|could|would|"
+    r"will|won't|wont)\s+(?:you|u|ya)\s+(?:please\s+)?)?(?:please\s+)?"
+    r"(?P<verb>sing|rap|freestyle|serenade)\b(?:\s+(?:me|us|for\s+(?:me|us)|"
+    r"to\s+(?:me|us)|something|anything|a\s+bit|a\s+little|one|please|"
+    r"pls))*[\s,.!?]*(?P<subject>(?:about|on|of)\b.*)?$", re.IGNORECASE)
+#: 'one more song', 'another poem', 'encore', 'poem about Missouri': the
+#: kind with no verb at all, at the start of what was said to the bot.
+_PERFORM_BARE_KIND = re.compile(
+    r"^\s*(?:(?:hey|yo|ok|okay|so|please|pls)[\s,]+)*(?:(?:one\s+more|another|"
+    r"encore|a|an|quick|short|little|new)\s+)*" + _KIND_WORDS
+    + r"(?:\s+(?:please|pls|time|again))?" + _SUBJECT_TAIL + r"$",
+    re.IGNORECASE)
+_ENCORE = re.compile(r"^\s*(?:encore|one more|another one|again|do it again)"
+                     r"[\s!.]*$", re.IGNORECASE)
+_PERFORM_KINDS = {
+    "song": "song", "tune": "song", "ditty": "song", "jingle": "song",
+    "ballad": "song", "shanty": "song", "anthem": "song", "lullaby": "song",
+    "serenade": "song", "poem": "poem", "poetry": "poem", "verse": "poem",
+    "sonnet": "poem", "rhyme": "poem", "rap": "rap", "bars": "rap",
+    "freestyle": "rap", "limerick": "limerick", "haiku": "haiku",
+    "story": "story", "tale": "story", "bedtime story": "story",
+    "toast": "toast",
+}
+_SUBJECT_LEAD = re.compile(
+    r"^(?:about|on|for|to|of|called|titled|regarding)\s+", re.IGNORECASE)
+#: "tell me a story" is a performance; "tell me the story of the Iowa 80"
+#: or "what's the story with the lights" is a question about a real thing
+#: - those keep their grounded paths. Same for "the song that goes..."
+_ABOUT_A_REAL_THING = re.compile(
+    r"\b(?:what(?:'s|s| is| was| are| were)|who(?:'s|s| is| was| wrote| sang|"
+    r" sings| did)|when (?:was|did|is)|where (?:was|is|did)|how (?:did|does|"
+    r"many|much|old|long)|(?:the|that|this|which|your|my|his|her|their|our) "
+    r"(?:song|songs|story|stories|poem|poems|rap|tune|tunes|tale|toast)\b"
+    r"(?! (?:about|of|on) (?:me|us|him|her|them|chat)\b)|(?:real|true|"
+    r"whole|full) story|story (?:behind|with)|lyrics|name of|called what|"
+    r"is playing|was playing|playing now)\b", re.IGNORECASE)
+#: 'I wrote a song', 'we're gonna sing a song later', 'she told me a
+#: story': the speaker is talking, not asking. Only 'you'/'ya' before the
+#: verb ('can you sing', 'you should write a poem') is still a request.
+_NARRATION = re.compile(
+    r"\b(?:i|i'm|im|i've|ive|i'd|id|we|we're|were|we've|he|he's|she|she's|"
+    r"they|they're|someone|somebody|my \w+|the \w+)\s+(?:(?:just|gonna|"
+    r"going to|wanna|want to|will|would|should|might|could|can|used to|"
+    r"always|never|once|already|also|even|still)\s+){0,2}$", re.IGNORECASE)
+
+
+def performance_request(text: str, names=()):
+    """('song', 'the night shift') when the message asks the bot to
+    PERFORM something - sing a song, make a poem, tell a story, rap,
+    a limerick, a haiku, a toast - else None.
+
+    Aimed at what people actually type: 'Docbot sing me a song',
+    'doc make me a poem about kvack', 'can you sing', 'give us a
+    limerick about the load', 'tell us a story', 'one more song'.
+    Never a question about a real piece ('who sang that song', 'what's
+    the story with the lights', 'tell me the story of Route 66') and
+    never narration ('I wrote a song yesterday'): those stay with the
+    fact engine and the one-line persona. The subject is whatever
+    followed 'about'/'on'/'for', trimmed, and may be empty.
+    """
+    t = strip_address(text, names)
+    if not t or funfacts._EXPLICIT.search(t) or funfacts._TASTELESS.search(t):
+        return None
+    if _ABOUT_A_REAL_THING.search(t):
+        return None
+    kind, subject = None, ""
+    m = _PERFORM.search(t)
+    if m and not _NARRATION.search(t[:m.start()]):
+        kind = _PERFORM_KINDS.get(
+            " ".join(m.group("kind").lower().split()), "song")
+        subject = m.group("subject") or ""
+    else:
+        m = _PERFORM_BARE_VERB.match(t)
+        if m:
+            kind = "rap" if m.group("verb").lower() in ("rap", "freestyle") \
+                else "song"
+            subject = m.group("subject") or ""
+        else:
+            m = _PERFORM_BARE_KIND.match(t)
+            if m:
+                kind = _PERFORM_KINDS.get(
+                    " ".join(m.group("kind").lower().split()), "song")
+                subject = m.group("subject") or ""
+    if kind is None:
+        return None
+    subject = _SUBJECT_LEAD.sub("", " ".join(subject.split()))
+    # 'about the truck please' - the courtesy is not the subject.
+    subject = re.sub(r"\s*\b(?:please|pls|plz|thanks|thank you|ty)\b[\s!.]*$",
+                     "", subject, flags=re.IGNORECASE)
+    subject = subject.strip(" .!?,;:\"'").strip()
+    return kind, subject[:120]
+
+
+def encore_request(text: str, names=()) -> bool:
+    """'doc encore', 'doc one more', 'docbot again!' - a repeat of the
+    last performance. The caller knows what that was."""
+    return bool(_ENCORE.match(strip_address(text, names)))
+
+
+#: When there is no model, or it produced nothing usable twice: one
+#: honest line in character, never half a song and never silence.
+_PERFORMANCE_DOWN = {
+    "song": "Voice is shot tonight - the singing will have to wait.",
+    "poem": "The muse is out at the truck stop. No poem in me right now.",
+    "rap": "No bars in the tank tonight. Ask me again later.",
+    "limerick": "There once was a bot who went quiet - that's all I've got.",
+    "haiku": "Three lines, nothing came. Ask me again down the road.",
+    "story": "Story's not coming to me tonight. Catch me later.",
+    "toast": "Glass is empty and so am I. Try me again later.",
+}
+
+
+def performance_unavailable(kind: str) -> str:
+    return _PERFORMANCE_DOWN.get(kind, _PERFORMANCE_DOWN["song"])
+
+
+def performance_prompt(kind: str, subject: str, nick: str,
+                       lines: list = None, max_lines: int = 8) -> str:
+    """What the model is asked for a performance. The persona and the
+    hard rules still come from system_prompt(); this only swaps the
+    'one line' shape for the piece's shape. Every line must stand as a
+    chat message on its own, so the rules are restated per LINE."""
+    shape = PERFORMANCES.get(kind, PERFORMANCES["song"])
+    out = [f"{nick} asked you to perform {shape['ask']}"]
+    if subject:
+        out.append(f"SUBJECT: {subject}. The whole piece is about this - "
+                   f"name it, do not drift to your usual topics.")
+    else:
+        out.append("No subject was given: pick something from this stream "
+                   "or this chat - what is on screen, the load, the run, "
+                   "somebody's news - never yourself as the subject.")
+    if lines:
+        out.append("")
+        out.append("Recent chat, for subject matter and names:")
+        out.extend(f"{n}: {t}" for n, t in lines[-max_lines:])
+    out.append("")
+    out.append(
+        "FORMAT, exactly: one line of the piece per line of output, "
+        f"{shape['min_lines']} to {shape['max_lines']} lines, nothing "
+        "else. No title, no preamble ('Sure', 'Here's'), no numbering, "
+        "no labels like 'Verse 1' or 'Chorus:', no quotes, no markdown, "
+        "no notes after it. Each line under 200 characters and complete "
+        "on its own. Stay in character. Rules that still apply to every "
+        "line: no @mentions, no links, no hashtags, at most one emoji in "
+        "the whole piece, tease topics never people, nothing crude, "
+        "nothing about anyone's health, looks, family or private life. "
+        "This is a performance, not a conversation: do NOT answer, "
+        "comment, or reply NOTHING TO SAY - deliver the piece.")
+    return "\n".join(out)
+
+
+_PERF_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+#: 'Verse 1:', '(Chorus)', '[Bridge]', '**Title**', 'Line 2 -'. A label
+#: needs its punctuation: a lyric that merely STARTS with 'Line' or
+#: 'Part' ('Line number one of the song') is a lyric.
+_PERF_LABEL = re.compile(
+    r"^(?:\(?(?:verse|chorus|bridge|outro|intro|hook|refrain|stanza|line|"
+    r"bar|act|beat|part|title|pre-chorus)\s*\d*\)?\s*[:\-\u2013\u2014.)]+"
+    r"\s*)|^\((?:verse|chorus|bridge|outro|intro|hook|refrain|stanza)\s*\d*\)"
+    r"\s*|^\[[^\]]{1,20}\]\s*|^\*\*?[^*]{1,30}\*\*?\s*$", re.IGNORECASE)
+#: Chatter around the piece: 'Sure! Here's a song:', 'Hope you enjoyed
+#: it!', 'Title: Night Shift'. Only dropped when it is clearly framing
+#: (ends with a colon, or is short and names the piece/act) - 'Sure as
+#: the sun comes up over Reno' is a lyric and stays.
+_PERF_PREAMBLE = re.compile(
+    r"^(?:(?:sure|okay|ok|alright|of course|absolutely|certainly|ahem|"
+    r"well)\b[\s,!.-]*)?(?:here(?:'s| is| you go| goes| we go)|"
+    r"(?:let me|i'll|i will|i'd love to|i'd be happy to|happy to|allow me "
+    r"to)\s+(?:just\s+)?(?:sing|write|give|tell|do|make|try|recite|perform|"
+    r"spit|drop|share|oblige)|a (?:little |quick |short |small )?(?:song|"
+    r"poem|story|rap|limerick|haiku|toast|verse|tune|ditty)\b(?! (?:i|we|"
+    r"you|he|she|they|about|of)\b)|title[d]?|untitled|"
+    r"the end|hope (?:you|that|it)|enjoy|thanks for|that's (?:all|it|my)|"
+    r"there you (?:go|have)|how(?:'s| was) that|note:|for you|"
+    r"as requested|coming right up|clears? (?:my |his |her )?throat|"
+    r"cue the|drumroll|mic drop|end of (?:song|poem|story|verse))\b",
+    re.IGNORECASE)
+_PERF_BULLET = re.compile(r"^(?:[\-\u2022*>]+|\d+[.)]|[a-d][.)])\s+")
+
+
+def clean_performance(raw: str, kind: str, max_lines: int = None) -> list:
+    """The piece, one safe chat line per element - or [] when it cannot
+    be posted. Applies the same rails as clean_line() to every line
+    (no @, no links, no command syntax, nothing explicit) plus the piece
+    as a whole (at most one emoji in total, no labels, no preamble, no
+    quotes). A model that padded with 'Sure! Here's a song:' loses that
+    line, not the piece; one that broke a rail anywhere loses the piece
+    - a song with a slur in the third line is not a song with two good
+    lines. The line count is coerced to the shape: over max_lines is
+    cut at max_lines, under min_lines is rejected."""
+    shape = PERFORMANCES.get(kind, PERFORMANCES["song"])
+    text = (raw or "").strip()
+    if not text:
+        return []
+    if "```" in text:
+        text = _PERF_FENCE.sub("", text).strip()
+    if declined(text) and len(text) < 40:
+        return []
+    out = []
+    for ln in text.splitlines():
+        ln = " ".join(ln.split()).strip().strip('"\u201c\u201d').strip()
+        ln = _PERF_BULLET.sub("", ln)
+        if re.match(r"^\(?(?:title|untitled)\)?\s*[:\-\u2013\u2014]", ln,
+                    re.IGNORECASE):
+            continue                      # a title line, not a lyric
+        ln = _PERF_LABEL.sub("", ln).strip()
+        ln = ln.strip('"\u201c\u201d*_').strip()
+        if not ln:
+            continue                      # blank lines separate stanzas
+        if (ln.endswith(":") and len(ln) < 60) or _PERF_PREAMBLE.match(ln) \
+                or re.fullmatch(r"(?:sure|okay|ok|alright|ahem|well)[\s!.,-]*",
+                                ln, re.IGNORECASE):
+            continue                      # chatter around the piece
+        if len(ln) < 4 or len(ln) > 280:
+            return []
+        if _blocked_output(ln):
+            return []
+        out.append(ln)
+    if len(_EMOJI.findall(" ".join(out))) > 1:
+        return []
+    limit = max_lines or shape["max_lines"]
+    out = out[:limit]
+    if len(out) < shape["min_lines"]:
+        return []
+    return out

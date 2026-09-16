@@ -1444,6 +1444,219 @@ def test_nothing_is_recorded_while_the_feature_is_off():
     print("[PASS] nothing is recorded while the feature is off")
 
 
+_SONG = ("Sure! Here's a little song about the night shift:\n\n"
+         "Verse 1:\nRolling down the I-80 line,\n"
+         "Coffee's cold but the load's on time,\n"
+         "Chorus:\nOh the night shift hums, the night shift glows,\n"
+         "Where the diesel goes, nobody knows.\n\nHope you liked it!")
+_POEM = ("Kvack sleeps on the floor by choice,\n"
+         "He says it makes his spine rejoice.\n"
+         "No mattress, no frame, no pillow, no fuss,\n"
+         "Just a man and a floor and the rest of us.")
+
+
+def _drain_for(b, seconds):
+    """Keep draining while timers fire, the way the worker thread would."""
+    end = time.time() + seconds
+    while time.time() < end:
+        _drain(b)
+        time.sleep(0.02)
+    _drain(b)
+
+
+def test_performance_requests_are_recognised():
+    """'Docbot sing me a song' is an ask for a PIECE. The matcher must
+    catch how people actually phrase it and never a question about a
+    real song or someone narrating their own day."""
+    names = ("doc", "docbot")
+    yes = {
+        "Docbot sing me a song": ("song", ""),
+        "Docbot make me a poem": ("poem", ""),
+        "doc sing me a song about the night shift": ("song", "the night shift"),
+        "docbot, write a poem about kvack please": ("poem", "kvack"),
+        "doc can you sing": ("song", ""),
+        "Doc rap for us": ("rap", ""),
+        "docbot give us a limerick about the load": ("limerick", "the load"),
+        "doc tell us a story": ("story", ""),
+        "@docbot do a haiku on coffee": ("haiku", "coffee"),
+        "doc drop some bars about zwift": ("rap", "zwift"),
+        "docbot make a toast to hollie": ("toast", "hollie"),
+        "doc one more song": ("song", ""),
+        "doc, poem about Missouri": ("poem", "Missouri"),
+        "Doc, can you write us a country song about I-80?": ("song", "I-80"),
+    }
+    for text, want in yes.items():
+        got = chatai.performance_request(text, names)
+        assert got == want, (text, got, want)
+    no = [
+        "doc who sang that song", "doc what's the story with the lights",
+        "doc tell me the story of route 66", "doc tell them",
+        "doc how are you", "doc what is a bongo twist",
+        "doc do you like country songs", "doc I wrote a song yesterday",
+        "doc which song is playing", "doc do you know the song by cash",
+        "doc tell me your story", "doc we're gonna sing a song later",
+        "doc that story about the bear was funny", "doc your rap was bad",
+        "doc, take a mental note the load was late",
+        "hey doc these graphics kind of suck", "doc pick a number 1-100",
+    ]
+    for text in no:
+        got = chatai.performance_request(text, names)
+        assert got is None, (text, got)
+    assert chatai.encore_request("doc encore!", names)
+    assert not chatai.encore_request("doc one more thing", names)
+    print("[PASS] performance requests are recognised; questions and "
+          "narration are not")
+
+
+def test_a_performance_is_cleaned_line_by_line():
+    """The model's padding goes, the piece stays; one broken rail
+    anywhere and the whole piece is refused - never half a song."""
+    lines = chatai.clean_performance(_SONG, "song")
+    assert lines == ["Rolling down the I-80 line,",
+                     "Coffee's cold but the load's on time,",
+                     "Oh the night shift hums, the night shift glows,",
+                     "Where the diesel goes, nobody knows."], lines
+    numbered = "1. Line one is here\n2. Line two is here\n3. Line three"
+    assert chatai.clean_performance(numbered, "song") == [
+        "Line one is here", "Line two is here", "Line three"]
+    fenced = "```\nDiesel dawn breaking\nMile markers count the hours\n" \
+             "Coffee finds the cup\n```"
+    assert len(chatai.clean_performance(fenced, "haiku")) == 3
+    # A lyric that merely starts with 'Sure'/'I'll' is a lyric.
+    lyric = ("Sure as the sun comes up over Reno,\nI'll be there with the "
+             "load by nine-oh,\nCoffee in the cup, eyes on the line,\n"
+             "Sure as the sun, I'll make it on time.")
+    assert len(chatai.clean_performance(lyric, "song")) == 4
+    for bad in ("@kvack is the best,\nbetter than the rest,\nput him to the test.",
+                "Rolling on down to example.com,\nWhere the freight is calm,\n"
+                "And nothing goes wrong.",
+                "Line one is fine \U0001F3B5\nLine two is fine\n"
+                "Line three is fine \U0001F3B6",
+                "Type !funfact for more,\nIt's what the bot is for,\nThe score.",
+                "NOTHING TO SAY", "Just one line.\nAnd a second."):
+        assert chatai.clean_performance(bad, "song") == [], bad
+    long = "\n".join(f"Line number {i} of the never ending song"
+                     for i in range(1, 12))
+    assert len(chatai.clean_performance(long, "song")) == 6
+    print("[PASS] a performance is cleaned line by line; one broken rail "
+          "refuses the piece")
+
+
+def test_sing_me_a_song_gets_a_song_over_several_messages():
+    """Live-fire: 'Docbot sing me a song' got one rambling line ABOUT a
+    song. Now the piece is written whole, the first line goes out at
+    once tagged to the asker, and the rest follow a gap apart - the way
+    a person would deliver it, with room for chat to react between."""
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0.3)
+    stamps = []
+    b._say = lambda text: (b.said.append(text),
+                           stamps.append(time.time()))
+    calls = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c, max_tokens=None: (
+        calls.append((u, max_tokens)) or _SONG)
+    try:
+        b._on_message("kvack", "#t",
+                      "Docbot sing me a song about the night shift",
+                      "kvack", "")
+        _drain_for(b, 0.3 * 3 + 0.6)
+    finally:
+        llm.chat_reply = orig
+    assert b.said == ["@kvack Rolling down the I-80 line,",
+                      "Coffee's cold but the load's on time,",
+                      "Oh the night shift hums, the night shift glows,",
+                      "Where the diesel goes, nobody knows."], b.said
+    gaps = [stamps[i + 1] - stamps[i] for i in range(3)]
+    assert all(g >= 0.2 for g in gaps), gaps         # paced, not a wall
+    # The model was asked for the piece, with its subject, at the bigger
+    # completion budget - under the one-line cap it never got past the
+    # preamble.
+    perf = [(u, m) for u, m in calls if "asked you to perform" in u]
+    assert perf and perf[0][1] == llm.PERFORMANCE_MAX_TOKENS, calls
+    assert "SUBJECT: the night shift" in perf[0][0], perf[0][0]
+    # It counted as the mention reply: the cooldown clock moved.
+    assert b._chat_ai_mention_last > 0
+    print("[PASS] 'sing me a song' gets a song over paced messages, the "
+          "first one tagged")
+
+
+def test_performances_have_a_subject_a_fallback_and_an_encore():
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0)
+    seen = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c, max_tokens=None: (
+        seen.append(u) or _POEM)
+    try:
+        # No subject: the model is pointed at the room, never at itself.
+        b._on_message("kvack", "#t", "I sleep on the floor by choice",
+                      "kvack", "")
+        b._on_message("hollie", "#t", "Docbot make me a poem", "hollie", "")
+        _drain(b)
+        _drain(b)
+        assert len(b.said) == 4 and b.said[0].startswith(
+            "@hollie Kvack sleeps"), b.said
+        prompt = next(u for u in seen if "asked you to perform" in u)
+        assert "No subject was given" in prompt, prompt
+        assert "kvack: I sleep on the floor" in prompt, prompt
+        # 'encore' repeats the last piece for whoever asked for it.
+        b.said.clear()
+        seen.clear()
+        b._chat_ai_mention_last = 0.0
+        b._on_message("kvack", "#t", "doc write a poem about the dog",
+                      "kvack", "")
+        _drain(b)
+        b._chat_ai_mention_last = 0.0
+        b._on_message("hollie", "#t", "doc encore!", "hollie", "")
+        _drain(b)
+        perf = [u for u in seen if "asked you to perform" in u]
+        assert len(perf) == 2 and perf[1].startswith("hollie asked") \
+            and "SUBJECT: the dog" in perf[1], perf
+        assert len(b.said) == 8 and b.said[4].startswith("@hollie "), b.said
+        # '!ask sing me a song' is the same request.
+        b.said.clear()
+        llm.chat_reply = lambda s, u, c, max_tokens=None: _SONG
+        b._reply_ask("kvack", "sing me a song about coffee")
+        _drain(b)
+        assert len(b.said) == 4 and b.said[0].startswith(
+            "@kvack Rolling"), b.said
+    finally:
+        llm.chat_reply = orig
+    # A rail broken twice: one retry, then an honest line in character -
+    # never a poem with the good lines and a hole where the bad one was.
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0)
+    n = []
+    llm.chat_reply = lambda s, u, c, max_tokens=None: (
+        n.append(1) if max_tokens else None) or \
+        "@kvack is the best,\nbetter than the rest,\nput him to the test."
+    try:
+        b._on_message("kvack", "#t", "doc rap for us", "kvack", "")
+        _drain(b)
+    finally:
+        llm.chat_reply = orig
+    assert len(n) == 2, n
+    assert b.said == ["@kvack " + chatai.performance_unavailable("rap")], b.said
+    # No model at all: the same honest line, not a Wikipedia fact about
+    # the word 'song'.
+    b = _bot(chat_ai_perform_delay=0)
+    b._on_message("kvack", "#t", "docbot sing me a song", "kvack", "")
+    _drain(b)
+    assert b.said == ["@kvack " + chatai.performance_unavailable("song")], b.said
+    # An OVERHEARD 'sing me a song' is never a cue: the bot performs only
+    # when asked.
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0)
+    asked = []
+    real = b._perform
+    b._perform = lambda nick, text: asked.append(text) or real(nick, text)
+    llm.chat_reply = lambda s, u, c, max_tokens=None: "NOTHING TO SAY"
+    try:
+        b._do_chime("kvack", "someone should sing me a song")
+    finally:
+        llm.chat_reply = orig
+    assert asked == [] and b.said == [], (asked, b.said)
+    print("[PASS] performances take a subject, fall back honestly, repeat "
+          "on 'encore', and never start unasked")
+
+
 def main():
     test_a_mention_gets_one_bounded_reply()
     test_chime_ins_are_gated()
@@ -1473,6 +1686,10 @@ def main():
     test_quiet_followups_track_real_human_lulls()
     test_ask_is_a_command_not_a_feature()
     test_nothing_is_recorded_while_the_feature_is_off()
+    test_performance_requests_are_recognised()
+    test_a_performance_is_cleaned_line_by_line()
+    test_sing_me_a_song_gets_a_song_over_several_messages()
+    test_performances_have_a_subject_a_fallback_and_an_encore()
     print("\nALL PASSED \u2714")
     return 0
 

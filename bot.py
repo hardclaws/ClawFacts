@@ -238,6 +238,10 @@ DEFAULTS = {
     # so the knob means what it reads. 0 sends the whole story at once,
     # which is a wall nobody reads.
     "beef_act_delay": 4.0,
+    # Seconds between the lines when the chat AI performs - a song, a
+    # poem, a story asked for by name ('docbot sing me a song'). Empty
+    # means the same gap as beef_act_delay; 0 posts the piece at once.
+    "chat_ai_perform_delay": "",
     # Where the beef leaderboard and the !revenge windows live. Local file,
     # local logic: the game runs on what the bot already has even with no LLM
     # anywhere, so there is nothing else to configure.
@@ -480,6 +484,7 @@ class TwitchBot:
         # sub goal; the lock keeps the two writers honest.
         self._subgoal_lock = threading.Lock()
         self._chat_ai_pending = []              # mentions held by cooldown
+        self._last_performance = None           # (kind, subject) for 'encore'
         self._chat_ai_names = set(
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
@@ -1175,16 +1180,39 @@ class TwitchBot:
         config knob behaves exactly as it reads. 0 sends the rest at once
         (the tests rely on that for determinism).
         """
+        self._drip(body, delay, started=started)
+
+    def _drip(self, lines: list, delay: float, head: str = "",
+              started: float = None) -> None:
+        """Post `lines` one message at a time, `delay` seconds apart.
+
+        The shared pacing for anything the bot delivers in parts: a beef
+        story's acts, a song's lines, a poem's verses. Each line still
+        passes through the say queue, so Twitch's rate limit is respected
+        and the reader thread never stops. `head` is prefixed to the
+        FIRST line only (the @-tag of whoever asked); the rest stand
+        alone. 0 sends everything at once.
+
+        With no `started`, the first line goes out now and the rest
+        follow at delay, 2*delay, ... after it. A caller that already
+        posted an opening message (a beef headline) passes the moment it
+        did as `started`, and every line here waits its turn from THAT
+        moment - time spent waiting on a model never stretches the gaps.
+        """
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            return
+        lines = [head + lines[0]] + lines[1:]
         if delay <= 0.0:
-            for line in body:
+            for line in lines:
                 self._queue_say(line)
             return
-        # Gaps are measured from the headline, not from whenever the LLM
-        # finished thinking - waiting on the model must not stretch the
-        # pacing the config promised.
-        base = started if started is not None else time.time()
-        for i, line in enumerate(body, 1):
-            wait = max(0.05, i * delay - (time.time() - base))
+        if started is None:
+            started = time.time()
+            self._queue_say(lines[0])
+            lines = lines[1:]
+        for i, line in enumerate(lines, 1):
+            wait = max(0.05, i * delay - (time.time() - started))
             t = threading.Timer(wait, self._queue_say, args=(line,))
             t.daemon = True
             t.start()
@@ -2506,6 +2534,19 @@ class TwitchBot:
                                    if now - t < 3600] + [now]
             self._chat_ai_mention_last = now
             return
+        # 'Docbot sing me a song' / 'make me a poem' asks for a PIECE, not
+        # a line. Through the one-line path the model wrote a sentence
+        # about singing and stopped - it rambled and never did the thing.
+        # A performance is written whole and delivered over several
+        # messages, a few seconds apart. Only when addressed: the bot
+        # never breaks into song because two viewers discussed karaoke.
+        if not quiet and addressed and self._perform(nick, text):
+            now = time.time()
+            self._chat_ai_times = [t for t in self._chat_ai_times
+                                   if now - t < 3600] + [now]
+            self._chat_ai_mention_last = now
+            self._distill(nick, self._chat_ai_snapshot())
+            return
         snapshot = self._chat_ai_snapshot()
         line = self._chat_ai_line(snapshot, nick or "chat", text, quiet=quiet,
                                   overheard=not (quiet or addressed))
@@ -2589,6 +2630,88 @@ class TwitchBot:
             self._say(self._fit(f"@{nick} ", line))
             self._log(f"chat ai replied to {nick}")
             self._distill(nick, self._chat_ai_snapshot())
+
+    # ---- performances: a song, a poem, a story, over several messages ----
+    def _perform_gap(self) -> float:
+        """Seconds between the lines of a performance - the same knob as
+        the beef acts unless chat_ai_perform_delay says otherwise."""
+        for key in ("chat_ai_perform_delay", "beef_act_delay"):
+            try:
+                value = self.cfg.get(key)
+                if value is not None and value != "":
+                    return max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return 4.0
+
+    def _perform(self, nick: str, text: str) -> bool:
+        """Deliver a song / poem / story / rap / limerick / haiku / toast
+        when `text` asks for one. True when it was handled - including
+        an honest 'can't right now' - False when the message is not a
+        performance request at all (the one-line path takes it).
+
+        The piece is composed off the read loop (this runs on the
+        worker), validated line by line against the same rails as any
+        chat line, and then posted the way a person would deliver it:
+        the first line at once, @-tagged to whoever asked, the rest a
+        few seconds apart through the drip scheduler, so the worker is
+        free again immediately and chat can react between lines. A model
+        that pads with 'Sure, here's a song:' loses that line, not the
+        piece; one that breaks a rail anywhere loses the piece and is
+        asked once more with the miss named; a second miss gets a plain
+        one-line decline rather than half a song.
+        """
+        import llm as llm_mod
+        want = chatai.performance_request(text, self._chat_ai_names)
+        if want is None:
+            if chatai.encore_request(text, self._chat_ai_names) \
+                    and self._last_performance:
+                want = self._last_performance
+            else:
+                return False
+        kind, subject = want
+        if not llm_mod.any_configured(self._opts):
+            # No model anywhere: say so instead of a Wikipedia fact about
+            # the word 'song'. The line is deterministic on purpose.
+            self._say(self._fit(f"@{nick} ",
+                                chatai.performance_unavailable(kind)))
+            return True
+        self._last_performance = (kind, subject)
+        snapshot = self._chat_ai_snapshot()
+        room = chatai.direct_context(
+            snapshot, self._chat_ai_names, self.cfg.get("prefix", "!"),
+            self.nick)
+        system = chatai.system_prompt(self._persona_text())
+        prompt = chatai.performance_prompt(kind, subject, nick, room)
+        piece = []
+        for attempt in range(2):
+            try:
+                raw = llm_mod.chat_reply(
+                    system + ("" if attempt == 0 else
+                              "\nYour previous attempt was unusable - it "
+                              "broke a rule above, or was not the piece "
+                              "itself. Deliver ONLY the lines of the piece."),
+                    prompt, self._opts,
+                    max_tokens=llm_mod.PERFORMANCE_MAX_TOKENS)
+            except Exception as exc:
+                self._log(f"performance error: {exc!r}")
+                raw = None
+            piece = chatai.clean_performance(raw, kind)
+            if piece:
+                break
+            self._log(f"{kind} for {nick} rejected by the cleaner"
+                      f"{' - one retry' if attempt == 0 else ''}: "
+                      f"{(raw or '')[:120]!r}")
+        if not piece:
+            self._say(self._fit(f"@{nick} ",
+                                chatai.performance_unavailable(kind)))
+            return True
+        self._chat_ai_own = (self._chat_ai_own + [piece[-1]])[-3:]
+        self._drip(piece, self._perform_gap(), head=f"@{nick} ")
+        self._log(f"{kind} for {nick}"
+                  + (f" about {subject!r}" if subject else "")
+                  + f": {len(piece)} lines, {self._perform_gap():g}s apart")
+        return True
 
     def _distill(self, nick: str, lines: list) -> None:
         """After talking, remember what is durable about the viewer.
@@ -2835,6 +2958,12 @@ class TwitchBot:
         # has nothing, the persona still gets its chance below.
         if chatai.factual_question(q, self._chat_ai_names) \
                 and self._answer_factual(nick, q):
+            return
+        # '!ask sing me a song' is the same request as saying it to the
+        # bot: a piece over several lines, never a one-line reply about it.
+        if chatai.performance_request(q, self._chat_ai_names) \
+                and self._perform(nick, q):
+            self._distill(nick, self._chat_ai_snapshot())
             return
         if llm_mod.any_configured(self._opts):
             snapshot = self._chat_ai_snapshot()

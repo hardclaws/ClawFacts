@@ -395,6 +395,57 @@ The voice is `bot_personality` in `config.json` — your words, your
 rules — and the built-in default is Doc: a dry-witted old trucker who
 has been everywhere twice.
 
+### "Docbot sing me a song" — performances over several messages
+
+Some asks are for a *piece*, not a line. `Docbot sing me a song`,
+`doc make me a poem about kvack`, `docbot tell us a story`, `doc rap for
+us`, `give us a limerick about the load`, `do a haiku on coffee`, `make a
+toast to hollie` — pushed through the one-line reply path, the model wrote
+a sentence *about* singing ("Sure, here's a little ditty about…") and
+stopped. It rambled and never did the thing.
+
+Now a performance is recognised as one, written whole (the model gets a
+bigger completion budget for it), checked **line by line** against the same
+rails as every other chat line, and posted the way a person would deliver
+it: the first line at once, `@`-tagged to whoever asked, the rest a few
+seconds apart, so chat can react between lines and it reads like a genuine
+exchange rather than a wall. `!ask sing me a song` is the same request.
+
+```
+kvack: docbot sing me a song about the night shift
+Bot:   @kvack Rolling down the I-80 line,
+Bot:   Coffee's cold but the load's on time,           (4 s later)
+Bot:   Oh the night shift hums, the night shift glows, (4 s later)
+Bot:   Where the diesel goes, nobody knows.            (4 s later)
+```
+
+- **What counts.** A song (tune, ditty, ballad, shanty, lullaby…), poem
+  (verse, sonnet, rhyme), rap (bars, freestyle), limerick, haiku, story,
+  or toast — asked for with `sing / write / make / do / give / tell / drop /
+  spit / recite …`, a bare `can you sing` / `rap for us`, or just `one more
+  song` / `another poem`. A subject after `about / on / for / to` is used
+  (`SUBJECT: the night shift` in the prompt); with none, the model is told to
+  draw on what is on screen or in chat — never on itself. `doc encore!`
+  repeats the last piece for whoever asked.
+- **What does not.** Questions about real pieces (`who sang that song`,
+  `what's the story with the lights`, `tell me the story of Route 66`) keep
+  their grounded paths; someone narrating their own day (`I wrote a song
+  yesterday`, `we're gonna sing later`) is not a request. And the bot performs
+  **only when addressed** — two viewers discussing karaoke never make it
+  break into song.
+- **The rails hold per line.** No `@`, no links, no hashtags, no command
+  syntax, nothing explicit, at most one emoji in the whole piece. Padding
+  (`Sure! Here's a song:`, `Verse 1:`, `[Chorus]`, `Hope you liked it!`,
+  numbering, quotes, code fences) is stripped; a broken rail anywhere is a
+  refused piece, retried once with the miss named, and then an honest line in
+  character (`Voice is shot tonight - the singing will have to wait.`) — never
+  half a song. No model configured gets the same honest line, not a Wikipedia
+  fact about the word "song".
+- **Pacing.** `chat_ai_perform_delay` in `config.json` is the gap in seconds
+  between lines. Empty (the default) means the same gap as `beef_act_delay`;
+  `0` posts the whole piece at once. A performance counts as the mention reply,
+  so the usual `chat_ai_mention_cooldown` applies afterwards.
+
 ### Changing the voice
 
 Mods can switch the persona at runtime — it reaches the model

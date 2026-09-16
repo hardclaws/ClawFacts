@@ -65,6 +65,8 @@
   "beef_llm": "auto",
   "beef_llm_timeout": 4,
   "beef_act_delay": 4,
+  "chat_ai_perform_delay": "",
+  "_chat_ai_perform_delay": "Seconds between the lines when the chat AI performs - 'docbot sing me a song', 'make me a poem', 'tell us a story', a rap, a limerick, a haiku, a toast. The piece is written whole, checked line by line, and posted one line at a time so it reads like a delivery, not a wall. Empty = the same gap as beef_act_delay; 0 posts the whole piece at once.",
   "shoutout_enabled": true,
   "shoutout_theme": "auto",
   "custom_commands_enabled": true,

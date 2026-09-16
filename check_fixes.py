@@ -1335,6 +1335,75 @@ def main() -> int:
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def _sing_me_a_song_is_a_song():
+        """'Docbot sing me a song' / 'make me a poem' used to get one
+        rambling line ABOUT a song. A performance ask is recognised,
+        written whole at a bigger completion budget, cleaned line by
+        line under the same rails as any chat line, and delivered over
+        several messages a gap apart - the first tagged to the asker.
+        Questions about real songs and narration are never performances,
+        and an overheard 'sing me a song' never starts one."""
+        import chatai as _ch
+        import llm as _llm
+        names = ("doc", "docbot")
+        if _ch.performance_request("Docbot sing me a song", names) != \
+                ("song", ""):
+            return False
+        if _ch.performance_request("doc make me a poem about kvack",
+                                   names) != ("poem", "kvack"):
+            return False
+        for text in ("doc who sang that song", "doc I wrote a song yesterday",
+                     "doc what's the story with the lights", "doc tell them"):
+            if _ch.performance_request(text, names) is not None:
+                return False
+        song = ("Sure! Here's a song:\nRolling down the I-80 line,\n"
+                "Coffee's cold but the load's on time,\nChorus:\n"
+                "Oh the night shift hums,\nWhere the diesel goes.")
+        if _ch.clean_performance(song, "song") != [
+                "Rolling down the I-80 line,",
+                "Coffee's cold but the load's on time,",
+                "Oh the night shift hums,", "Where the diesel goes."]:
+            return False
+        if _ch.clean_performance("@kvack line\nline two\nline three",
+                                 "song"):
+            return False
+        if getattr(_llm, "PERFORMANCE_MAX_TOKENS", 0) <= getattr(
+                _llm, "CHAT_MAX_TOKENS", 999):
+            return False
+        if "max_tokens" not in _llm.chat_reply.__code__.co_varnames:
+            return False
+        if not hasattr(_bot.TwitchBot, "_perform") \
+                or not hasattr(_bot.TwitchBot, "_drip"):
+            return False
+        # End to end, off the network: four paced messages, first tagged.
+        import os as _os
+        import tempfile as _tf
+        b = _bot.TwitchBot(dict(
+            _bot.DEFAULTS, nick="n", channel="#c", chat_ai_enabled=True,
+            llm_api_key="k", chat_ai_perform_delay=0,
+            beef_state_path=_os.path.join(_tf.mkdtemp(), "bs.json"),
+            memory_db_path=_os.path.join(_tf.mkdtemp(), "m.db"),
+            persona_state_path=_os.path.join(_tf.mkdtemp(), "p.json"),
+            subgoal_state_path=_os.path.join(_tf.mkdtemp(), "sg.json")))
+        said = []
+        b._say = said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        orig = _llm.chat_reply
+        _llm.chat_reply = lambda s, u, c, max_tokens=None: song
+        try:
+            b._on_message("kvack", "#c", "doc sing me a song", "kvack", "")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+                elif command == "say":
+                    b._say(argument)
+        finally:
+            _llm.chat_reply = orig
+        return said[:1] == ["@kvack Rolling down the I-80 line,"] \
+            and len(said) == 4 and not said[1].startswith("@")
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -1976,6 +2045,11 @@ def main() -> int:
          and _last_seen_is_sourced()),
         ("state files are written atomically",
          _state_files_are_written_atomically()),
+        ("'docbot sing me a song' gets a song, over several messages",
+         _sing_me_a_song_is_a_song()
+         and "chat_ai_perform_delay" in _bot_src
+         and "chat_ai_perform_delay" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

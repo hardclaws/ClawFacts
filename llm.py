@@ -476,7 +476,20 @@ def _call(base: str, model: str, key: str, user_prompt: str,
                     timeout=timeout)
 
 
-def chat_reply(system: str, user: str, cfg: dict) -> str | None:
+#: Completion budget for one chat line: <= 280 chars (~60 words). 120
+#: tokens is generous for that, and caps the damage a rambling model can
+#: do - on CPU, 300 tokens of nobody-will-read-this costs the whole
+#: timeout budget.
+CHAT_MAX_TOKENS = 120
+#: ...and for a performance (a song, a poem, a story over several lines):
+#: six lyric lines run 150-250 tokens. Under the chat cap the model got
+#: as far as "Sure, here's a little ditty about the night shift:" and was
+#: cut off - which read as the bot rambling and never doing the thing.
+PERFORMANCE_MAX_TOKENS = 400
+
+
+def chat_reply(system: str, user: str, cfg: dict,
+               max_tokens: int = None) -> str | None:
     """One line of chat personality, or None on any failure.
 
     The persona's own endpoint: same circuit breaker as everything
@@ -485,6 +498,10 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     window. SHORT timeout either way - a chime-in that arrives a minute
     after the moment it was for is worse than silence, and chat will
     not wait for it.
+
+    `max_tokens` lifts the one-line completion cap for the few asks that
+    are legitimately longer (a performance); everything else keeps
+    CHAT_MAX_TOKENS.
     """
     key = (cfg.get("llm_api_key") or "").strip()
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
@@ -510,19 +527,28 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
     except (TypeError, ValueError):
         timeout = default_to
     prompt = _maybe_nothink(user, cfg)
+    try:
+        budget = max(CHAT_MAX_TOKENS, int(max_tokens or CHAT_MAX_TOKENS))
+    except (TypeError, ValueError):
+        budget = CHAT_MAX_TOKENS
+    # A reasoning model's completion budget covers thinking AND answer;
+    # a bigger answer needs proportionally more room (the retry below
+    # already doubles the one-line budget to 600 for the same reason).
+    # Only passed when lifted: the plain call keeps its exact shape.
+    extra = {} if budget == CHAT_MAX_TOKENS else {
+        "reasoning_budget": budget * 3}
     if primary_up:
         if cfg.get("debug"):
             print(f"[llm] POST {base}/chat/completions  model={model} "
                   f"(chat, timeout {timeout}s)", flush=True)
             print(f"[llm] ---- chat prompt ----\n{user}", flush=True)
         try:
-            # One cleaned line is <= 280 chars (~60 words). 120 tokens is
-            # generous for that, and caps the damage a rambling model can
-            # do: on CPU, 300 tokens of nobody-will-read-this costs the
-            # whole timeout budget.
+            # One cleaned line is <= 280 chars (~60 words): CHAT_MAX_TOKENS
+            # is generous for that, and caps the damage a rambling model
+            # can do. A performance asks for more, explicitly.
             text = _call(base, model, key, prompt, system,
-                         timeout=timeout, max_tokens=120,
-                         hard_nothink=_hard_nothink(cfg, base))
+                         timeout=timeout, max_tokens=budget,
+                         hard_nothink=_hard_nothink(cfg, base), **extra)
             if not text or len(text) < 12 \
                     or _DANGLING_TAIL.search(text):
                 # An empty 200 - or a reply cut off before the answer
@@ -538,9 +564,10 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
                       f"one retry with a bigger thinking budget",
                       flush=True)
                 text = _call(base, model, key, prompt, system,
-                             timeout=timeout, max_tokens=120,
+                             timeout=timeout, max_tokens=budget,
                              hard_nothink=_hard_nothink(cfg, base),
-                             reasoning_budget=600)
+                             reasoning_budget=max(
+                                 600, extra.get("reasoning_budget", 0) * 2))
             if text:
                 _note_primary_line()
                 return text
@@ -591,8 +618,8 @@ def chat_reply(system: str, user: str, cfg: dict) -> str | None:
                   f"(chat fallback, timeout {fb_timeout}s)", flush=True)
         try:
             text = _call(fbase, fmodel, fkey, prompt, system,
-                         timeout=fb_timeout, max_tokens=120,
-                         hard_nothink=_hard_nothink(cfg, fbase))
+                         timeout=fb_timeout, max_tokens=budget,
+                         hard_nothink=_hard_nothink(cfg, fbase), **extra)
             _note_fallback_line(model, fmodel)
             return text
         except urllib.error.HTTPError as exc:
