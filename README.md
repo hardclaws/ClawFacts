@@ -275,6 +275,48 @@ cut off mid-sentence ("If they try to slash wages, I'll") — is retried
 once at a doubled thinking budget before the second provider takes the
 line.
 
+**Rate limits are per model, and the chain walks.** Groq's free tier
+meters each model separately (`openai/gpt-oss-120b` gets 200k tokens a
+day, `llama-3.3-70b-versatile` its own 100k, and so on), and a
+`tokens per day (TPD)` 429 means *hours*, not two minutes. Live-fire the
+day's gpt-oss budget was gone before the stream started, the whole
+provider was parked for two minutes at a time, and every line went to a
+slow free model on OpenRouter while a fresh Groq bucket sat unused. Now a
+429 rests **that model** for as long as the error says (a TPD message
+until the quoted reset, capped at six hours; a per-minute limit for two
+minutes) and the line moves on at once: first to the same provider's
+spare (`llama-3.3-70b-versatile` on Groq — same key, same speed, separate
+budget), then down the fallback chain. `llm_fallback_model` accepts a
+**comma-separated list**, tried in order; each model rests on its own
+clock and a resting model is skipped, not waited for. Only when every
+model of a provider is resting does that provider's breaker open. The
+log says which model rested and why (`gpt-oss-120b rate-limited (HTTP
+429): … tokens per day … - resting it for 127 min; other models carry
+on`) and which one took over (`trying nex-agi/nex-n2.5-pro:free instead`).
+
+A recommended free chain, as of September 2026:
+
+```json
+"llm_fallback_key": "sk-or-...",
+"llm_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free, nex-agi/nex-n2.5-pro:free, cohere/north-mini-code:free"
+```
+
+`nemotron-3-super` answers in under a second where the 550b `ultra`
+takes 20–30 s a line; `nex-n2.5-pro` and `north-mini-code` are
+non-reasoning and fast. Nemotron is a hybrid reasoning family, so the
+bot now sends it the same low-effort thinking budget as gpt-oss instead
+of letting it narrate its reasoning at the room. Two caveats worth
+knowing: OpenRouter allows only **50 free requests a day** on an account
+that has never bought credits (a one-time $10 purchase lifts that to
+1,000 a day, permanently, and the credit also covers cheap paid models
+like `nousresearch/hermes-4-70b` as a non-free last resort), and the
+`:free` roster rotates monthly — recheck openrouter.ai/models when
+warm-up says `fallback NOT READY`. Groq's other free buckets
+(`qwen/qwen3-32b`, `meta-llama/llama-4-scout-17b-16e-instruct`,
+`moonshotai/kimi-k2-instruct`) are also separate daily budgets on the
+same key: put them in `llm_model` as a list (`"openai/gpt-oss-120b,
+qwen/qwen3-32b"`) and the primary walks them the same way.
+
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
@@ -314,16 +356,28 @@ line.
   unexpected HTTP code — so `bot.log` always shows which one it was.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers (a factual question in a mention gets the fact
-  engine's grounded answer, same as `!ask`), at most once per
-  `chat_ai_mention_cooldown` seconds. Viewer wording is not run through
+  engine's grounded answer, same as `!ask`), at most once **per viewer**
+  per `chat_ai_mention_cooldown` seconds (60), with a short channel-wide
+  floor of `chat_ai_mention_pace` seconds (8) between any two persona
+  replies. Viewer wording is not run through
   the bot's *output* profanity filter: a directly addressed question with
   rough language is still answered, while the generated reply still has to
   pass every output rail. Unsafe viewer lines are never retained as ambient
   model context, so they cannot be parroted into a later reply. The cooldown
-  keeps the bot from being wound up like a toy. A mention that arrives inside
-  the cooldown is *held*, not dropped — the bot answers it to the right
-  person the moment the cooldown clears (within two minutes; after that
-  the moment has passed and answering would be the non-sequitur). And a
+  keeps the bot from being wound up like a toy — but it is *each person's
+  own* minute. Live-fire, one shared 60-second clock meant four people
+  asking in the same minute got one answer and three holds, and six of ten
+  direct questions in seven minutes were lost; with per-viewer clocks the
+  same seven minutes answer nine of the ten (the tenth was the same person
+  asking again 13 seconds after her reply). A mention that arrives inside
+  the asker's own cooldown is *held*, not dropped — the bot answers it to
+  the right person the moment their clock clears (within two minutes; after
+  that the moment has passed and answering would be the non-sequitur). The
+  held queue keeps one question per person (a repeat replaces the earlier
+  one, so nobody gets two answers) for up to eight people, and whichever
+  asker is clear first is answered first. Nothing leaves the queue quietly:
+  a hold, a full-queue drop and a worker-side drop each write a log line
+  naming the person (`held-question queue full - dropped kvack's …`). And a
   reply that comes back unusable — cut off mid-sentence, too long — is
   re-asked once; a safe overlong answer is then fitted at a complete boundary,
   or the bot posts an honest retry acknowledgement. A direct question is
@@ -598,7 +652,14 @@ after 90 days — raw material, never fed to the model wholesale) and
 distilled per-viewer facts. After the bot talks with someone, the model
 quietly extracts the durable stuff — work, vehicles, pets, hobbies,
 plans, strong preferences — and those facts are injected into its
-prompts from then on. That is what "remembers conversations from any
+prompts from then on. That extraction is **paced**: a viewer is
+distilled on first contact, and after that only when both
+`chat_ai_distill_minutes` (10) have passed *and* they have said
+`chat_ai_distill_lines` (4) new lines since. It used to run after every
+single reply — a second model call re-reading the same twenty lines,
+roughly 40% of the day's token budget spent to learn that someone said
+"lol" — which is a large part of how Groq's daily allowance ran out before
+the stream began. Same memory, a fraction of the calls. That is what "remembers conversations from any
 point in time" actually looks like at channel scale: not recall of every
 line, but the handful of facts that make a reply feel personal. Facts
 stay attached to their person: the prompt lists them by name with the

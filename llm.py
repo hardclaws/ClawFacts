@@ -71,8 +71,12 @@ _DANGLING_TAIL = re.compile(
 
 # Reasoning models (o1/o3/gpt-oss/deepseek-r1/…) reject `temperature` and want
 # `max_completion_tokens` instead of `max_tokens`. Detect them by name.
+# Nemotron 3 (nano/super/ultra) is a hybrid reasoning family that thinks
+# by default: live-fire the 550b ultra took 24-34 s a line and twice
+# narrated its reasoning instead of answering. Sending it the reasoning
+# budget + low effort like the others keeps the answer inside the cap.
 _REASONING = re.compile(
-    r"(^|[/.])(o1|o3|o4|gpt-oss|gpt-5|deepseek-r1|deepseek-reasoner)\b",
+    r"(^|[/.])(o1|o3|o4|gpt-oss|gpt-5|deepseek-r1|deepseek-reasoner|nemotron)\b",
     re.IGNORECASE,
 )
 
@@ -84,6 +88,46 @@ _DISABLED_UNTIL = 0.0
 
 def _unavailable() -> bool:
     return time.time() < _DISABLED_UNTIL
+
+
+#: Per-MODEL rate-limit windows on the primary provider. Groq's limits
+#: are per model (gpt-oss-120b: 200k tokens/day; llama-3.3-70b: its own
+#: 100k), so a 429 on one model says nothing about the other. Live-fire
+#: the day's gpt-oss budget was gone before the stream began, and one
+#: provider-wide breaker sent every line to OpenRouter's slow free tier
+#: while a fresh Groq bucket sat unused.
+_MODEL_DISABLED_UNTIL = {}
+
+
+def _model_unavailable(base: str, model: str) -> bool:
+    return time.time() < _MODEL_DISABLED_UNTIL.get(
+        (base or "", model or ""), 0.0)
+
+
+def _disable_model(base: str, model: str, seconds: float,
+                   detail: str = "") -> None:
+    key = (base or "", model or "")
+    if time.time() < _MODEL_DISABLED_UNTIL.get(key, 0.0):
+        return
+    _MODEL_DISABLED_UNTIL[key] = time.time() + seconds
+    print(f"[llm] {model} rate-limited (HTTP 429){': ' + detail if detail else ''}"
+          f" - resting it for {seconds / 60:.0f} min; other models carry on",
+          flush=True)
+
+
+def _rate_limit_window(detail: str) -> float:
+    """How long to rest a 429'd model. Groq says which limit was hit:
+    tokens per DAY is gone until the reset ("Please try again in
+    4h12m"), tokens per minute clears in a minute. Default 2 min."""
+    d = (detail or "").lower()
+    if "per day" in d or "(tpd)" in d or "(rpd)" in d:
+        m = re.search(r"try again in\s*(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", d)
+        if m and any(m.groups()):
+            h, mi, sec = m.groups()
+            secs = int(h or 0) * 3600 + int(mi or 0) * 60 + float(sec or 0)
+            return max(120.0, min(secs + 30.0, 6 * 3600.0))
+        return 3600.0
+    return 120.0
 
 
 def _disable(code: int) -> None:
@@ -146,6 +190,32 @@ def _disable_fallback(code: int) -> None:
               "2 minutes.", flush=True)
 
 
+def _model_list(value) -> list:
+    """'a, b' or ['a', 'b'] -> ['a', 'b']: llm_fallback_model (and
+    llm_model) accept a chain, tried in order."""
+    if isinstance(value, (list, tuple)):
+        items = [str(v).strip() for v in value]
+    else:
+        items = [v.strip() for v in str(value or "").split(",")]
+    out = []
+    for m in items:
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
+def _first_model(value) -> str:
+    items = _model_list(value)
+    return items[0] if items else ""
+
+
+def fallback_models(cfg: dict) -> list:
+    """The fallback chain, in order. The first is what fallback_endpoint
+    returns; the rest are tried when it 429s or errors."""
+    return _model_list(cfg.get("llm_fallback_model")
+                       or cfg.get("llm_fallback_model_name"))
+
+
 def fallback_endpoint(cfg: dict):
     """(base, key, model) for the second provider, or None when there
     is none.
@@ -157,8 +227,8 @@ def fallback_endpoint(cfg: dict):
     just the primary again (same base and model) is rejected - it would
     fail identically.
     """
-    model = (cfg.get("llm_fallback_model")
-             or cfg.get("llm_fallback_model_name") or "").strip()
+    model = _first_model(cfg.get("llm_fallback_model")
+                         or cfg.get("llm_fallback_model_name"))
     if not model:
         return None
     base = ((cfg.get("llm_fallback_base_url")
@@ -180,8 +250,8 @@ def fallback_endpoint(cfg: dict):
 
 def fallback_problem(cfg: dict) -> str:
     """Why no second endpoint can be used, or an empty string when usable."""
-    model = (cfg.get("llm_fallback_model")
-             or cfg.get("llm_fallback_model_name") or "").strip()
+    model = _first_model(cfg.get("llm_fallback_model")
+                         or cfg.get("llm_fallback_model_name"))
     if not model:
         return "llm_fallback_model is empty"
     base = ((cfg.get("llm_fallback_base_url")
@@ -276,6 +346,7 @@ def reset_disable_state() -> None:
     _FALLBACK_DISABLED_UNTIL = 0.0
     _ON_FALLBACK = False
     _NO_FALLBACK_WARNED_UNTIL = 0.0
+    _MODEL_DISABLED_UNTIL.clear()
 
 SYSTEM_PROMPT = (
     "You write fun facts about places for a trucker's Twitch stream watched by "
@@ -488,6 +559,41 @@ CHAT_MAX_TOKENS = 120
 PERFORMANCE_MAX_TOKENS = 400
 
 
+def _chat_call_chain(base: str, models: list, key: str, prompt: str,
+                     system: str, timeout: float, budget: int, cfg: dict,
+                     extra: dict, fallback: bool = False) -> str:
+    """One chat completion from the first model in `models` that is not
+    rate-limited. A 429 rests that model (for as long as the error says)
+    and moves to the next one at once; the last model's 429 is re-raised
+    so the caller's provider breaker logic still runs. Other errors are
+    the caller's to handle, as before."""
+    last_exc = None
+    for i, m in enumerate(models):
+        if _model_unavailable(base, m):
+            continue
+        try:
+            return _call(base, m, key, prompt, system, timeout=timeout,
+                         max_tokens=budget,
+                         hard_nothink=_hard_nothink(cfg, base), **extra)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429:
+                raise
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace").strip()
+            except Exception:
+                pass
+            _disable_model(base, m, _rate_limit_window(detail), detail[:90])
+            last_exc = urllib.error.HTTPError(
+                exc.url, 429, exc.msg, exc.hdrs, io.BytesIO(detail.encode()))
+            if i < len(models) - 1:
+                print(f"[llm] trying {models[i + 1]} instead", flush=True)
+    if last_exc is not None:
+        raise last_exc
+    raise urllib.error.HTTPError(base, 429, "all models resting", {},
+                                 io.BytesIO(b""))
+
+
 def chat_reply(system: str, user: str, cfg: dict,
                max_tokens: int = None) -> str | None:
     """One line of chat personality, or None on any failure.
@@ -537,7 +643,22 @@ def chat_reply(system: str, user: str, cfg: dict,
     # Only passed when lifted: the plain call keeps its exact shape.
     extra = {} if budget == CHAT_MAX_TOKENS else {
         "reasoning_budget": budget * 3}
+    # The primary's models, in order: the configured one (or chain), then
+    # the provider's spare. A model resting after its own 429 is skipped,
+    # so a spent gpt-oss day-budget sends chat to llama-3.3-70b's separate
+    # bucket on the same fast provider - not straight to a slow free tier.
+    primary_models = [m for m in _model_list(model)
+                      if not _model_unavailable(base, m)]
+    spare = _fallback_model(base, _first_model(model))
+    if spare and spare not in _model_list(model) \
+            and not _model_unavailable(base, spare):
+        primary_models.append(spare)
+    if primary_up and not primary_models:
+        primary_up = False              # every model is resting
+        if not (fb and not _fallback_unavailable()):
+            return None
     if primary_up:
+        model = primary_models[0]
         if cfg.get("debug"):
             print(f"[llm] POST {base}/chat/completions  model={model} "
                   f"(chat, timeout {timeout}s)", flush=True)
@@ -546,9 +667,8 @@ def chat_reply(system: str, user: str, cfg: dict,
             # One cleaned line is <= 280 chars (~60 words): CHAT_MAX_TOKENS
             # is generous for that, and caps the damage a rambling model
             # can do. A performance asks for more, explicitly.
-            text = _call(base, model, key, prompt, system,
-                         timeout=timeout, max_tokens=budget,
-                         hard_nothink=_hard_nothink(cfg, base), **extra)
+            text = _chat_call_chain(base, primary_models, key, prompt,
+                                    system, timeout, budget, cfg, extra)
             if not text or len(text) < 12 \
                     or _DANGLING_TAIL.search(text):
                 # An empty 200 - or a reply cut off before the answer
@@ -563,11 +683,10 @@ def chat_reply(system: str, user: str, cfg: dict,
                 print(f"[llm] {model} returned an empty chat reply - "
                       f"one retry with a bigger thinking budget",
                       flush=True)
-                text = _call(base, model, key, prompt, system,
-                             timeout=timeout, max_tokens=budget,
-                             hard_nothink=_hard_nothink(cfg, base),
-                             reasoning_budget=max(
-                                 600, extra.get("reasoning_budget", 0) * 2))
+                text = _chat_call_chain(
+                    base, primary_models, key, prompt, system, timeout,
+                    budget, cfg, {"reasoning_budget": max(
+                        600, extra.get("reasoning_budget", 0) * 2)})
             if text:
                 _note_primary_line()
                 return text
@@ -578,7 +697,14 @@ def chat_reply(system: str, user: str, cfg: dict,
                 print(f"[llm] {model} returned nothing twice - the "
                       f"fallback takes this one", flush=True)
         except urllib.error.HTTPError as exc:
-            _disable(exc.code)
+            if exc.code == 429:
+                # Every primary model is now resting on its own clock;
+                # the provider breaker only opens if that is true, so a
+                # fresh bucket is never locked out by a spent one.
+                if all(_model_unavailable(base, m) for m in primary_models):
+                    _disable(429)
+            else:
+                _disable(exc.code)
             if exc.code == 404:
                 _model_404_hint()
             elif exc.code not in (401, 402, 403, 429):
@@ -617,13 +743,23 @@ def chat_reply(system: str, user: str, cfg: dict,
             print(f"[llm] POST {fbase}/chat/completions  model={fmodel} "
                   f"(chat fallback, timeout {fb_timeout}s)", flush=True)
         try:
-            text = _call(fbase, fmodel, fkey, prompt, system,
-                         timeout=fb_timeout, max_tokens=budget,
-                         hard_nothink=_hard_nothink(cfg, fbase), **extra)
-            _note_fallback_line(model, fmodel)
+            chain = [m for m in (fallback_models(cfg) or [fmodel])
+                     if not _model_unavailable(fbase, m)]
+            if not chain:
+                _disable_fallback(429)  # every fallback model is resting
+                return None
+            text = _chat_call_chain(fbase, chain, fkey, prompt, system,
+                                    fb_timeout, budget, cfg, extra,
+                                    fallback=True)
+            _note_fallback_line(model, chain[0])
             return text
         except urllib.error.HTTPError as exc:
-            _disable_fallback(exc.code)
+            if exc.code == 429:
+                if all(_model_unavailable(fbase, m)
+                       for m in (fallback_models(cfg) or [fmodel])):
+                    _disable_fallback(429)
+            else:
+                _disable_fallback(exc.code)
             if exc.code == 404:
                 _model_404_hint()
             elif exc.code not in (401, 402, 403, 429):
@@ -673,7 +809,11 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
             detail = exc.read().decode("utf-8", "replace").strip()[:300]
         except Exception:
             pass
-        if exc.code in (401, 402, 403, 429) or (fallback and exc.code == 404):
+        if exc.code == 429:
+            # Per model: the next model of this provider may be fine.
+            _disable_model(base, model, _rate_limit_window(detail),
+                           detail[:90])
+        elif exc.code in (401, 402, 403) or (fallback and exc.code == 404):
             (_disable_fallback if fallback else _disable)(exc.code)
         readiness = " - fallback NOT READY" if fallback else ""
         print(f"[llm] warm-up of {model} failed (HTTP {exc.code})"
@@ -702,7 +842,10 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
                     "utf-8", "replace").strip()[:300]
             except Exception:
                 pass
-            if exc.code in (401, 402, 403, 429) or \
+            if exc.code == 429:
+                _disable_model(base, model, _rate_limit_window(detail),
+                               detail[:90])
+            elif exc.code in (401, 402, 403) or \
                     (fallback and exc.code == 404):
                 (_disable_fallback if fallback else _disable)(exc.code)
             readiness = " - fallback NOT READY" if fallback else ""
@@ -746,18 +889,45 @@ def warm_up(cfg: dict) -> bool:
     base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
     key = (cfg.get("llm_api_key") or "").strip()
     if (key or _is_local(base)) and not _unavailable():
-        model = cfg.get("llm_model") or (
-            OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
-        ok = bool(_warm_probe(base, model, key, cfg))
+        models = _model_list(cfg.get("llm_model")) or [
+            OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL]
+        spare = _fallback_model(base, models[0])
+        if spare and spare not in models:
+            models.append(spare)
+        ok = _warm_chain(base, models, key, cfg)
     fb = fallback_endpoint(cfg)
     if fb and not _fallback_unavailable():
         fbase, fkey, fmodel = fb
-        fok = bool(_warm_probe(fbase, fmodel, fkey, cfg, fallback=True))
+        fok = _warm_chain(fbase, fallback_models(cfg) or [fmodel], fkey,
+                          cfg, fallback=True)
         if fok and not ok:
             print("[llm] the primary could not be warmed - chat will "
                   "run on the fallback", flush=True)
         ok = ok or fok
     return ok
+
+
+def _warm_chain(base: str, models: list, key: str, cfg: dict,
+                fallback: bool = False) -> bool:
+    """Warm the first model of a provider that is not rate-limited.
+
+    A model whose day-budget is already spent (live-fire: gpt-oss-120b
+    at 199,706 of 200,000 tokens before the stream) rests on its own
+    clock and the next model on the same key is probed instead; the
+    provider's breaker opens only when every model is resting."""
+    for i, m in enumerate(models):
+        if _model_unavailable(base, m):
+            continue
+        if _warm_probe(base, m, key, cfg, fallback=fallback):
+            return True
+        if (fallback and _fallback_unavailable()) or \
+                (not fallback and _unavailable()):
+            return False                # key/credit problem: stop here
+        if _model_unavailable(base, m) and i < len(models) - 1:
+            print(f"[llm] warming {models[i + 1]} instead", flush=True)
+    if models and all(_model_unavailable(base, m) for m in models):
+        (_disable_fallback if fallback else _disable)(429)
+    return False
 
 
 def summarize(fact: str, max_chars: int, cfg: dict) -> str | None:
@@ -867,15 +1037,19 @@ def _complete_provider(base: str, model: str, key: str, user: str,
     fallback must never disable the primary, and a primary 429 must never stop
     the configured second provider from taking the same request.
     """
-    candidates = [model]
-    # The explicitly configured second-provider model is the last resort; do
+    candidates = _model_list(model)
+    # The explicitly configured second-provider chain is the last resort; do
     # not silently spend money on that provider's generic spare slug.
-    spare = None if fallback else _fallback_model(base, model)
-    if spare:
+    spare = None if fallback else _fallback_model(base, candidates[0])
+    if spare and spare not in candidates:
         candidates.append(spare)
 
     last_detail = ""
+    rested = 0
     for m in candidates:
+        if _model_unavailable(base, m):
+            rested += 1
+            continue                    # resting after its own 429
         try:
             call_options = {
                 "timeout": timeout if timeout is not None else 60.0,
@@ -898,10 +1072,22 @@ def _complete_provider(base: str, model: str, key: str, user: str,
             except Exception:
                 detail = ""
             last_detail = detail
-            if exc.code in (401, 403, 402, 429):
-                # Auth / billing / rate-limit: another model on THIS provider
-                # fails the same way. Open only this provider's breaker; the
-                # outer wrapper can immediately try the other provider.
+            if exc.code == 429:
+                # A rate limit is PER MODEL on Groq (and per upstream on
+                # OpenRouter's free tier): rest this model for as long
+                # as the error says and try the next one now. Only when
+                # every model on the provider is resting does the
+                # provider breaker open and the other provider take over.
+                _disable_model(base, m, _rate_limit_window(detail), detail[:90])
+                if m != candidates[-1]:
+                    continue
+                if all(_model_unavailable(base, c) for c in candidates):
+                    (_disable_fallback if fallback else _disable)(429)
+                return None
+            if exc.code in (401, 403, 402):
+                # Auth / billing: another model on THIS provider fails the
+                # same way. Open only this provider's breaker; the outer
+                # wrapper can immediately try the other provider.
                 (_disable_fallback if fallback else _disable)(exc.code)
                 return None
             if fallback and exc.code == 404:
@@ -930,6 +1116,11 @@ def _complete_provider(base: str, model: str, key: str, user: str,
             label = "fallback " if fallback else ""
             print(f"[llm] {label}error: {exc!r}", flush=True)
             return None
+    if rested == len(candidates):
+        # Everything on this provider is resting: say so once via the
+        # provider breaker, so the other provider takes the line.
+        (_disable_fallback if fallback else _disable)(429)
+        return None
     print(f"[llm] all models failed: {last_detail}", flush=True)
     return None
 
@@ -958,8 +1149,9 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
     fb = fallback_endpoint(cfg)
     if fb and not _fallback_unavailable():
         fbase, fkey, fmodel = fb
+        chain = ", ".join(fallback_models(cfg)) or fmodel
         text = _complete_provider(
-            fbase, fmodel, fkey, user, cfg, tag, system=system,
+            fbase, chain, fkey, user, cfg, tag, system=system,
             timeout=timeout, fallback=True, max_tokens=max_tokens,
             reasoning_budget=reasoning_budget, temperature=temperature)
         if text:

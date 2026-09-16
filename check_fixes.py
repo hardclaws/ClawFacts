@@ -8,6 +8,7 @@ False (or `_EXTRACT_PAGE_CAP` is not 4), the copy you are running is older than
 the fix it names — no need to guess from chat behaviour.
 """
 import pathlib
+import time
 import sys
 
 import funfacts
@@ -905,7 +906,10 @@ def main() -> int:
         try:
             _llm2.reset_disable_state()
             got = _llm2.chat_reply("s", "u" * 20, cfg)
+            # Groq's spare model (its own daily bucket) is tried before
+            # the second provider; both 429 here, so OpenRouter answers.
             ok1 = got == "Line." and hits == [
+                "https://api.groq.com/openai/v1/chat/completions",
                 "https://api.groq.com/openai/v1/chat/completions",
                 "https://openrouter.ai/api/v1/chat/completions"]
             hits.clear()
@@ -1081,6 +1085,7 @@ def main() -> int:
         b._access.helix = SimpleNamespace(follow_total=lambda: 1372)
         b._follows_start = 1368
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._do_chime("Hardclaws",
                     "docbot how many follows have we received this stream")
         return (len(said) == 1 and "1,372 followers" in said[0]
@@ -1550,6 +1555,207 @@ def main() -> int:
         return said == ["@Hardclaws Copy that, hon - still here.",
                         "Hardclaws, it is currently Partly cloudy in "
                         "Brewster, New York. 65°F (18°C). 55% humidity."]
+
+    def _mention_cooldown_is_per_viewer():
+        """Live-fire 14:07-14:14: ten direct questions from four people,
+        four answered. One 60s mention clock for the whole channel held
+        everyone behind the last person's reply, the held queue kept
+        three and dropped the oldest silently, and the worker dropped a
+        released question without a word. Now the cooldown is per viewer
+        with an 8s channel pace, the queue holds eight (one per person)
+        and every drop is logged."""
+        import llm as _llm
+        import bot as _bot_mod
+        if not hasattr(_bot_mod.TwitchBot, "_mention_wait") \
+                or _bot_mod.DEFAULTS.get("chat_ai_mention_pace") != 8:
+            return False
+        src = pathlib.Path("bot.py").read_text(encoding="utf-8")
+        if "dropped at the worker" not in src:
+            return False
+        saved = _llm.chat_reply
+        answers = iter(["Forty-two, final answer.",
+                        "Seventeen, no refunds on that one."])
+        _llm.chat_reply = lambda s, u, c, **k: next(answers)
+        said, logs = [], []
+        try:
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+            b._log = logs.append
+            t0 = time.time()
+            b._mark_mention_reply("yeyeboi", t0 - 30)   # his reply 30s ago
+            b._on_message("Yeyeboi", "#c", "docbot pick a number", "yeyeboi",
+                          "")
+            held = b._jobs.empty() and len(b._chat_ai_pending) == 1
+            # Another viewer inside Yeyeboi's minute: her own clock is
+            # clear, so she is answered now.
+            b._on_message("Dani", "#c", "docbot pick one for me", "dani", "")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+            ok_dani = said == ["@Dani Forty-two, final answer."]
+            ok_log = any("their own cooldown" in l for l in logs)
+            # Nine people asking: the queue holds eight and names the drop.
+            b2 = _scratch_bot(llm_api_key="k")
+            logs2 = []
+            b2._log = logs2.append
+            names = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8", "i9"]
+            for n in names:
+                b2._mark_mention_reply(n, t0 - 30)
+            for n in names:
+                b2._on_message(n, "#c", "docbot pick a number", n, "")
+            ok_queue = len(b2._chat_ai_pending) == 8 and any(
+                "queue full - dropped a1" in l for l in logs2)
+            return held and ok_dani and ok_log and ok_queue
+        finally:
+            _llm.chat_reply = saved
+
+    def _distilling_is_paced():
+        """Every persona reply used to spend a second model call (~400
+        prompt tokens) distilling the same twenty lines into memory -
+        that is how the day's Groq budget was gone before the stream.
+        A viewer is distilled on first contact, then only after ten
+        minutes AND four new lines of theirs."""
+        import llm as _llm
+        import bot as _bot_mod
+        if _bot_mod.DEFAULTS.get("chat_ai_distill_lines") != 4 \
+                or _bot_mod.DEFAULTS.get("chat_ai_distill_minutes") != 10:
+            return False
+        saved = _llm.chat_reply
+        calls = {"distill": 0}
+        words = ("diesel chrome sunrise kansas coffee weigh station polka "
+                 "windshield cruise showers payday moon fuel cargo snacks "
+                 "gravel thunder ledger biscuit canyon lantern harbor velvet "
+                 "pepper walnut saddle meadow copper anchor ribbon tundra "
+                 "orbit falcon marble cactus timber glacier pickle trumpet "
+                 "quartz badger nickel willow comet dagger fossil helmet"
+                 ).split()
+        n = len(words) // 4
+        state = {"i": 0}
+
+        def _model(s, u, c, **k):
+            if "extract durable facts" in s:
+                calls["distill"] += 1
+                return "NOTHING WORTH KEEPING"
+            i = state["i"]
+            state["i"] += 1
+            group = words[(i % 4) * n:(i % 4 + 1) * n]
+            return " ".join(group[(i // 4 + j) % n]
+                            for j in range(5)).capitalize() + "."
+
+        _llm.chat_reply = _model
+        try:
+            b = _scratch_bot(llm_api_key="k", chat_ai_mention_cooldown=0,
+                             chat_ai_mention_pace=0)
+            b._say = lambda _l: None
+
+            def pump():
+                while not b._jobs.empty():
+                    nick, login, badges, command, argument = b._jobs.get()
+                    if command == "chime":
+                        b._do_chime(nick, argument)
+
+            for i in range(8):
+                b._on_message("kvack", "#c", f"docbot thing {i} about my rig",
+                              "kvack", "")
+                pump()
+            first_only = calls["distill"] == 1
+            last_t, seen = b._distilled["kvack"]
+            b._distilled["kvack"] = (last_t - 601, seen)   # 10 min pass
+            b._on_message("kvack", "#c", "docbot and my dog", "kvack", "")
+            pump()
+            again = calls["distill"] == 2
+            last_t, seen = b._distilled["kvack"]
+            b._distilled["kvack"] = (last_t - 601, seen)   # 10 more min,
+            b._on_message("kvack", "#c", "docbot lol", "kvack", "")  # 1 line
+            pump()
+            return first_only and again and calls["distill"] == 2
+        finally:
+            _llm.chat_reply = saved
+
+    def _rate_limits_walk_the_chain():
+        """Groq's 429 is per MODEL (gpt-oss-120b's 200k/day is not
+        llama-3.3-70b's 100k/day), and 'tokens per day' means hours, not
+        two minutes. A 429 now rests THAT model for as long as the error
+        says and the line moves on: the same-provider spare first, then
+        each model of the fallback chain (llm_fallback_model takes a
+        comma-separated list)."""
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+        if not hasattr(_llm2, "_rate_limit_window") \
+                or not hasattr(_llm2, "fallback_models"):
+            return False
+        tpd = (b'{"error":{"message":"Rate limit reached for model '
+               b'openai/gpt-oss-120b on tokens per day (TPD): Limit 200000, '
+               b'Used 199706, Requested 392. Please try again in '
+               b'2h7m3.5s."}}')
+        if not 7000 < _llm2._rate_limit_window(tpd.decode()) < 8000:
+            return False
+        if _llm2._rate_limit_window("tokens per minute (TPM) ... 3s") != 120:
+            return False
+        cfg = {"llm_api_key": "gsk",
+               "llm_base_url": "https://api.groq.com/openai/v1",
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_key": "or",
+               "llm_fallback_base_url": "https://openrouter.ai/api/v1",
+               "llm_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free,"
+                                     " nex-agi/nex-n2.5-pro:free"}
+        if _llm2.fallback_models(cfg) != [
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "nex-agi/nex-n2.5-pro:free"]:
+            return False
+        models = []
+
+        def _fake(req, timeout=60):
+            model = _json.loads(req.data.decode("utf-8"))["model"]
+            models.append(model)
+            if model in ("openai/gpt-oss-120b",
+                         "nvidia/nemotron-3-super-120b-a12b:free"):
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(tpd))
+            if model == "llama-3.3-70b-versatile":
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b'{"error":{"message":'
+                                                b'"tokens per minute (TPM)'
+                                                b' try again in 4s"}}'))
+            return _io.BytesIO(_json.dumps(
+                {"choices": [{"message": {"content": "Line from " + model}}]}
+            ).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fake
+        try:
+            _llm2.reset_disable_state()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok1 = got == "Line from nex-agi/nex-n2.5-pro:free" and models == [
+                "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "nex-agi/nex-n2.5-pro:free"]
+            # The spent models rest on their own clocks; the next line
+            # goes straight to the one that answered - one request.
+            models.clear()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok2 = got == "Line from nex-agi/nex-n2.5-pro:free" and models == [
+                "nex-agi/nex-n2.5-pro:free"]
+            # llama's TPM rest (2 min) is shorter than gpt-oss's TPD rest:
+            # when it clears, chat comes back to Groq's fast lane first.
+            _llm2._MODEL_DISABLED_UNTIL[
+                ("https://api.groq.com/openai/v1",
+                 "llama-3.3-70b-versatile")] = 0.0
+            _llm2._DISABLED_UNTIL = 0.0
+            models.clear()
+            _llm2.urllib.request.urlopen = lambda req, timeout=60: (
+                models.append(_json.loads(req.data.decode())["model"])
+                or _io.BytesIO(_json.dumps({"choices": [{"message": {
+                    "content": "Back on Groq."}}]}).encode()))
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok3 = got == "Back on Groq." and models == [
+                "llama-3.3-70b-versatile"]
+            return ok1 and ok2 and ok3
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
 
     def _a_notice_answers_the_confused_room():
         """A mod had the bot announce 'Doc is on the phone, radio silence';
@@ -2124,11 +2330,9 @@ def main() -> int:
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
-         and "will answer when" in pathlib.Path(
-             "bot.py").read_text(encoding="utf-8")
          and "answering" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
-         and "del self._chat_ai_pending[:-3]" in pathlib.Path(
+         and "held-question queue full - dropped" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
         ("the bot cannot repeat itself or redirect to commands",
          _ch2.too_similar("Midnight snacks and that endless horizon",
@@ -2265,6 +2469,15 @@ def main() -> int:
              "config.example.json").read_text(encoding="utf-8")),
         ("weather/sunrise questions are answered at once, ahead of the "
          "chat AI's cooldown", _live_data_takes_the_fast_lane()),
+        ("the mention cooldown is per viewer; held questions are not "
+         "dropped silently", _mention_cooldown_is_per_viewer()),
+        ("memory distilling is paced, not run after every reply",
+         _distilling_is_paced()),
+        ("a rate-limited model rests alone; chat walks the fallback chain",
+         _rate_limits_walk_the_chain()
+         and "nemotron" in _llm2._REASONING.pattern
+         and "llm_fallback_model" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

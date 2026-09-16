@@ -173,7 +173,21 @@ DEFAULTS = {
     # rare accents in LIGHT conversation, never a second voice in a flowing
     # room. 0.10 roll + a 10-minute cooldown + a 6/hour cap.
     "chat_ai_cooldown": 600,
+    # The mention cooldown is PER VIEWER: each person gets one persona
+    # reply per this many seconds; different people never block each
+    # other. Live-fire, one channel-wide clock lost 6 of 10 direct
+    # questions in six minutes with four people talking to the bot.
+    # chat_ai_mention_pace is the channel-wide floor between any two
+    # persona replies - just enough that the bot cannot be made to flood.
     "chat_ai_mention_cooldown": 60,
+    "chat_ai_mention_pace": 8,
+    # Memory distills (the model call that turns a viewer's lines into
+    # remembered facts) run for a viewer only after they have said this
+    # many new lines since their last distill, and at most once per this
+    # many minutes. It was every reply; that was a third of the token
+    # budget spent on 'NOTHING WORTH KEEPING'.
+    "chat_ai_distill_lines": 4,
+    "chat_ai_distill_minutes": 10,
     "chat_ai_chance": 0.10,
     "chat_ai_max_hour": 6,
     "chat_ai_min_chat": 5,
@@ -479,6 +493,12 @@ class TwitchBot:
         self._chat_lock = threading.Lock()
         self._chat_ai_last = 0.0                   # last unprompted attempt
         self._chat_ai_mention_last = 0.0           # last mention reply
+        self._chat_ai_mention_by = {}              # {login: last reply t}
+        # Memory distills are paced per viewer: {login: (last t, their
+        # last line then)}. A distill costs a third of a mention's tokens and
+        # used to run after EVERY reply - on a day Groq's budget was
+        # gone before the stream began.
+        self._distilled = {}
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
         # A standing notice: what a mod asked the bot to tell the room
@@ -2266,6 +2286,10 @@ class TwitchBot:
         # mentions still pass straight through this gate.
         if kind == chatai.CHIME and busy:
             return
+        # should_speak's mention gate is fed the PER-VIEWER wait: the
+        # last reply to this person and the channel pace, never another
+        # viewer's clock.
+        mention_wait = self._mention_wait(login or nick, now)
         if not chatai.should_speak(
                 enabled=bool(self.cfg.get("chat_ai_enabled", False)),
                 paused=self.paused,
@@ -2273,9 +2297,8 @@ class TwitchBot:
                 kind=kind, roll=random.random(),
                 chance=float(self.cfg.get("chat_ai_chance", 0.10)),
                 now=now, last=self._chat_ai_last,
-                mention_last=self._chat_ai_mention_last,
-                mention_cd=float(self.cfg.get(
-                    "chat_ai_mention_cooldown", 60)),
+                mention_last=now - 1.0 if mention_wait > 0 else 0.0,
+                mention_cd=1.5 if mention_wait > 0 else 0.0,
                 chime_cd=float(self.cfg.get("chat_ai_cooldown", 600)),
                 times=self._chat_ai_times,
                 max_hour=int(self.cfg.get("chat_ai_max_hour", 6)),
@@ -2289,13 +2312,23 @@ class TwitchBot:
                 # Left dangling, a chime answers it to whoever spoke
                 # next: live-fire, 'pick a number 1-100' was answered to
                 # someone else entirely. A QUEUE, not a slot: several
-                # people can ask inside one cooldown window, and each
-                # gets their answer - oldest first, capped at three so a
-                # spammer cannot build one.
-                self._chat_ai_pending.append((nick, message, time.time()))
-                del self._chat_ai_pending[:-3]
-                self._log(f"mention from {nick} held - will answer when "
-                          f"the cooldown clears (a rail, not a bug)")
+                # people can ask inside one window, and each gets their
+                # answer - oldest first. One entry per person (their
+                # latest question replaces their earlier one, so a
+                # repeat is not two answers), eight people deep; a
+                # queue that overflows says who it dropped.
+                who = (login or nick or "").lower()
+                self._chat_ai_pending = [
+                    p for p in self._chat_ai_pending
+                    if (p[3] if len(p) > 3 else (p[0] or "").lower()) != who]
+                self._chat_ai_pending.append((nick, message, time.time(),
+                                              who))
+                if len(self._chat_ai_pending) > 8:
+                    dropped = self._chat_ai_pending.pop(0)
+                    self._log(f"held-question queue full - dropped "
+                              f"{dropped[0]}'s {dropped[1][:40]!r}")
+                self._log(f"mention from {nick} held {mention_wait:.0f}s - "
+                          f"their own cooldown (a rail, not a bug)")
             return
         if kind == chatai.CHIME:
             # Mark an autonomous ATTEMPT at enqueue, not after the model call.
@@ -2323,6 +2356,40 @@ class TwitchBot:
             self._log(f"live data answered for {nick}: {question[:60]!r}")
         except Exception as exc:
             self._log(f"live data failed for {nick}: {exc!r}")
+
+    def _mention_wait(self, nick: str, now: float = None) -> float:
+        """Seconds until THIS viewer may get a persona reply: 0 = now.
+
+        Two clocks. The viewer's own (chat_ai_mention_cooldown, 60s):
+        one reply per person per minute, so nobody can wind the bot up
+        like a toy. And the channel pace (chat_ai_mention_pace, 8s): a
+        floor between any two persona replies, so four people asking at
+        once is four answers a few seconds apart - not one answer and
+        three questions held for a minute each, which is what one shared
+        60s clock did live (6 of 10 direct questions lost)."""
+        now = time.time() if now is None else now
+        try:
+            own_cd = float(self.cfg.get("chat_ai_mention_cooldown", 60))
+        except (TypeError, ValueError):
+            own_cd = 60.0
+        try:
+            pace = float(self.cfg.get("chat_ai_mention_pace", 8))
+        except (TypeError, ValueError):
+            pace = 8.0
+        who = (nick or "").lower()
+        own = own_cd - (now - self._chat_ai_mention_by.get(who, 0.0))
+        shared = pace - (now - self._chat_ai_mention_last)
+        return max(0.0, own, shared)
+
+    def _mark_mention_reply(self, nick: str, now: float = None) -> None:
+        """A persona reply went to this viewer: start both clocks."""
+        now = time.time() if now is None else now
+        self._chat_ai_mention_last = now
+        self._chat_ai_mention_by[(nick or "").lower()] = now
+        if len(self._chat_ai_mention_by) > 500:
+            self._chat_ai_mention_by = {
+                k: v for k, v in self._chat_ai_mention_by.items()
+                if now - v < 3600}
 
     def _notice_minutes(self) -> float:
         try:
@@ -2526,16 +2593,17 @@ class TwitchBot:
         while self._chat_ai_pending \
                 and now - self._chat_ai_pending[0][2] > 120:
             self._chat_ai_pending.pop(0)     # stale; the next may be live
-        if self._chat_ai_pending:
-            p = self._chat_ai_pending[0]
-            if now - self._chat_ai_mention_last >= float(
-                    self.cfg.get("chat_ai_mention_cooldown", 60)):
+        # The first held question whose asker is clear to be answered -
+        # not necessarily the oldest: with per-viewer clocks, Dani's
+        # question does not wait for Yeyeboi's cooldown.
+        for i, p in enumerate(self._chat_ai_pending):
+            who = p[3] if len(p) > 3 else (p[0] or "").lower()
+            if self._mention_wait(who, now) <= 0:
                 # Direct questions are not ambient chatter and therefore are
                 # never stranded behind the autonomous hourly cap.
-                self._chat_ai_pending.pop(0)
+                self._chat_ai_pending.pop(i)
                 self._log(f"answering {p[0]}'s held message")
-                self._jobs.put((p[0], (p[0] or "").lower(), "",
-                                "chime", p[1]))
+                self._jobs.put((p[0], who, "", "chime", p[1]))
                 return True
         # !cb off controls only the bot's own initiative. Check it after the
         # direct queue so the autonomous switch cannot strand a real question.
@@ -2659,9 +2727,19 @@ class TwitchBot:
             if quiet_seconds <= 0 or now - self._last_chat < quiet_seconds:
                 return
         elif addressed:
-            if now - self._chat_ai_mention_last < float(self.cfg.get(
-                    "chat_ai_mention_cooldown", 60)):
-                return                  # another direct answer won the queue
+            # Re-checked at execution time: this job may have waited
+            # behind slower work. Only THIS viewer's clock and the short
+            # channel pace count - and a drop is never silent (live-fire:
+            # two held questions vanished here with no line at all).
+            wait = self._mention_wait(nick, now)
+            if wait > 0:
+                if wait <= 20:
+                    time.sleep(wait)    # the pace gap: wait it out
+                else:
+                    self._log(f"{nick}'s question dropped at the worker - "
+                              f"answered them {wait:.0f}s inside their own "
+                              f"cooldown already")
+                    return
         else:
             # The room can accelerate after an ambient job is queued. Direct
             # asks continue; unsolicited work is canceled before paying the
@@ -2687,7 +2765,7 @@ class TwitchBot:
             now = time.time()
             self._chat_ai_times = [t for t in self._chat_ai_times
                                    if now - t < 3600] + [now]
-            self._chat_ai_mention_last = now
+            self._mark_mention_reply(nick, now)
             return
         if not quiet and addressed \
                 and chatai.factual_question(text, self._chat_ai_names) \
@@ -2696,7 +2774,7 @@ class TwitchBot:
             now = time.time()
             self._chat_ai_times = [t for t in self._chat_ai_times
                                    if now - t < 3600] + [now]
-            self._chat_ai_mention_last = now
+            self._mark_mention_reply(nick, now)
             return
         # 'Docbot sing me a song' / 'make me a poem' asks for a PIECE, not
         # a line. Through the one-line path the model wrote a sentence
@@ -2708,7 +2786,7 @@ class TwitchBot:
             now = time.time()
             self._chat_ai_times = [t for t in self._chat_ai_times
                                    if now - t < 3600] + [now]
-            self._chat_ai_mention_last = now
+            self._mark_mention_reply(nick, now)
             self._distill(nick, self._chat_ai_snapshot())
             return
         snapshot = self._chat_ai_snapshot()
@@ -2722,7 +2800,7 @@ class TwitchBot:
         if quiet or not addressed:
             self._chat_ai_last = now
         else:
-            self._chat_ai_mention_last = now
+            self._mark_mention_reply(nick, now)
         if not line:
             # The model is down or declined. A chatty direct address still
             # gets a canned Doc line - the bot never goes fully mute on
@@ -2893,6 +2971,40 @@ class TwitchBot:
                   == (nick or "").lower()]
         if not theirs:
             return
+        # Pace it. The old code distilled after every reply: ~500
+        # tokens of bookkeeping per ~1,100-token exchange, a third of
+        # the day's budget spent on a call that mostly returns NOTHING
+        # WORTH KEEPING for a viewer who said 'lol' since last time.
+        # Now a viewer is distilled again only when they have said at
+        # least chat_ai_distill_lines NEW lines since their last
+        # distill, and at most once per chat_ai_distill_minutes. More
+        # material per call, far fewer calls, same memory.
+        who = (nick or "").lower()
+        now = time.time()
+        try:
+            min_lines = max(1, int(self.cfg.get("chat_ai_distill_lines", 4)))
+        except (TypeError, ValueError):
+            min_lines = 4
+        try:
+            min_gap = max(0.0, float(
+                self.cfg.get("chat_ai_distill_minutes", 10))) * 60
+        except (TypeError, ValueError):
+            min_gap = 600.0
+        # 'Seen' is the viewer's LAST line at the previous distill: the
+        # room buffer rolls, so counting is done from that line forward,
+        # not by comparing lengths.
+        last_t, seen_last = self._distilled.get(who, (0.0, None))
+        fresh = [t for _, t in theirs]
+        if seen_last in fresh:
+            new_lines = len(fresh) - fresh.index(seen_last) - 1
+        else:
+            new_lines = len(fresh)
+        if last_t and (now - last_t < min_gap or new_lines < min_lines):
+            return
+        self._distilled[who] = (now, fresh[-1])
+        if len(self._distilled) > 500:
+            self._distilled = {k: v for k, v in self._distilled.items()
+                               if now - v[0] < 7200}
         try:
             raw = llm_mod.chat_reply(
                 memory_mod.DISTILL_RULES,

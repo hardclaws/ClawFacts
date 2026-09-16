@@ -7,6 +7,7 @@ fallback is monkeypatched at bot.py's own imported name. Everything is
 deterministic - the chime-in roll is injected, not drawn.
 """
 
+import itertools
 import os
 import tempfile
 import time
@@ -63,6 +64,24 @@ def _make_room_light(b, count=6):
         b._chat_human_times = [now - 40 * (i + 1) for i in range(count)]
 
 
+_LINE_WORDS = ("diesel chrome sunrise kansas coffee weigh station polka "
+               "windshield cruise showers payday moon fuel cargo snacks "
+               "gravel thunder ledger biscuit canyon lantern harbor velvet "
+               "pepper walnut saddle meadow copper anchor ribbon tundra "
+               "orbit falcon marble cactus timber glacier pickle trumpet "
+               "quartz badger nickel willow comet dagger fossil helmet").split()
+
+
+def _distinct_line(i: int) -> str:
+    """A reply with no content word in common with the previous few:
+    the cleaner refuses a line that recycles the bot's recent wording,
+    so a stub that varies only a number posts once and then fails."""
+    n = len(_LINE_WORDS) // 4                   # 4 disjoint word groups
+    group = _LINE_WORDS[(i % 4) * n:(i % 4 + 1) * n]
+    picked = [group[(i // 4 + j) % n] for j in range(5)]
+    return " ".join(picked).capitalize() + "."
+
+
 def test_a_mention_gets_one_bounded_reply():
     b = _bot(llm_api_key="k")
     orig = llm.chat_reply
@@ -82,6 +101,7 @@ def test_a_mention_gets_one_bounded_reply():
         # gets the bot's safe acknowledgement instead of disappearing.
         llm.chat_reply = lambda s, u, c: "@kvack you would not believe it"
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc honestly", "kvack", "")
         _drain(b)
         assert b.said[-1] == "@kvack " + chatai.DIRECT_FAILURE_LINE, b.said
@@ -139,6 +159,7 @@ def test_chime_ins_are_gated():
         # chatter, so it must not turn a direct question into silence.
         b._chat_ai_times = []
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b.paused = True
         b._on_message("kvack", "#t", "doc tell them", "kvack", "")
         assert b._jobs.empty(), "spoke while paused"
@@ -378,62 +399,214 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
     42...'). A direct question never dangles: it is held, and the keeper
     answers it to the right person the moment the cooldown clears - or
     drops it after two minutes, when answering would be the
-    non-sequitur."""
+    non-sequitur.
+
+    Second live-fire (14:07-14:14): ten direct questions from four
+    people, four answered. The 60s cooldown was one clock for the whole
+    channel, so everyone waited for the last person's reply; the held
+    queue held three and dropped the oldest without a word. The cooldown
+    is now PER VIEWER (Yeyeboi's minute is not Dani's), with an 8s
+    channel pace between any two replies; the queue holds eight people
+    (one entry each) and every drop is logged."""
     b = _bot(llm_api_key="k")
     logs = []
     b._log = logs.append
     orig = llm.chat_reply
-    llm.chat_reply = lambda s, u, c: "Forty-two. Obviously."
+    # Distinct lines per call: the cleaner (rightly) refuses to post the
+    # same sentence twice in a row.
+    answers = iter(["Forty-two. Obviously.", "Seventeen, and no refunds.",
+                    "Eighty-eight, like the keys on a piano."])
+    llm.chat_reply = lambda s, u, c: next(answers)
     try:
         T0 = time.time()
-        b._chat_ai_mention_last = T0 - 30      # a reply 30s ago: held
+        b._mark_mention_reply("yeyeboi", T0 - 30)   # HIS reply 30s ago: held
         b._on_message("Yeyeboi", "#t",
                       "pick a number 1-100 @truckingwithdocbot",
                       "yeyeboi", "")
         assert b._jobs.empty(), "should be held, not enqueued"
         assert len(b._chat_ai_pending) == 1
-        assert any("held" in l for l in logs), logs
-        # A second viewer asks inside the same window: QUEUED, not
-        # overwritten - the single-slot version lost their question.
+        assert any("held" in l and "their own cooldown" in l
+                   for l in logs), logs
+        # Another viewer asks inside Yeyeboi's window: THEIR clock is
+        # clear (only the 8s channel pace applies, and that has passed),
+        # so Dani is answered now, not held behind Yeyeboi's minute.
         b._on_message("DaniLikesDonuts", "#t", "doc pick one for me too",
                       "danilikesdonuts", "")
-        assert len(b._chat_ai_pending) == 2
-        # The cooldown clears: answered, oldest first, to Yeyeboi.
+        assert not b._jobs.empty(), "Dani's own clock is clear - answer now"
+        _drain(b)
+        assert b.said == ["@DaniLikesDonuts Forty-two. Obviously."], b.said
+        assert len(b._chat_ai_pending) == 1       # Yeyeboi still held
+        # (a distill runs after that first reply and takes a line too)
+        answers = iter(["Seventeen, and no refunds."])
+        # Yeyeboi's cooldown clears: the keeper answers him, to him.
         assert b._chat_ai_tick(now=T0 + 40) is True
-        # _do_chime re-checks the cooldown against real time; the tick
-        # above ran at synthetic T0+40, so move the last-reply timestamp
-        # with it, exactly as the wall clock would have.
+        # _do_chime re-checks the clocks against real time; the tick
+        # above ran at synthetic T0+40, so move the timestamps with it,
+        # exactly as the wall clock would have.
+        b._chat_ai_mention_by["yeyeboi"] = T0 - 200
         b._chat_ai_mention_last = T0 - 200
         _drain(b)
-        assert b.said == ["@Yeyeboi Forty-two. Obviously."], b.said
-        assert len(b._chat_ai_pending) == 1      # Dani still queued
+        assert b.said[-1] == "@Yeyeboi Seventeen, and no refunds.", b.said
+        assert b._chat_ai_pending == []
     finally:
         llm.chat_reply = orig
-    # A spammer cannot build a queue: the cap is three, and overflow
-    # drops the OLDEST - the freshest questions are the ones still live.
+    # One entry per person: a repeat inside the cooldown REPLACES the
+    # earlier question (one answer, the latest one), and eight different
+    # people fit; the ninth pushes the oldest out - and the log says who.
     b4 = _bot(llm_api_key="k")
+    logs4 = []
+    b4._log = logs4.append
     T4 = time.time()
-    b4._chat_ai_mention_last = T4 - 30
-    for who in ("Yeyeboi", "DaniLikesDonuts", "kvack", "tayfta"):
+    names = ["Yeyeboi", "DaniLikesDonuts", "kvack", "tayfta", "Etched",
+             "Roadrunner", "Bobby", "Marge", "Ninth"]
+    for who in names:
+        b4._mark_mention_reply(who.lower(), T4 - 30)
+    b4._on_message("Yeyeboi", "#t", "doc pick a number", "yeyeboi", "")
+    b4._on_message("Yeyeboi", "#t", "doc pick a BIG number", "yeyeboi", "")
+    assert len(b4._chat_ai_pending) == 1, b4._chat_ai_pending
+    assert b4._chat_ai_pending[0][1] == "doc pick a BIG number"
+    for who in names[1:]:
         b4._on_message(who, "#t", "doc pick a number", who.lower(), "")
-    assert len(b4._chat_ai_pending) == 3, b4._chat_ai_pending
+    assert len(b4._chat_ai_pending) == 8, len(b4._chat_ai_pending)
     assert b4._chat_ai_pending[0][0] == "DaniLikesDonuts"
+    assert any("queue full - dropped Yeyoboi".replace("Yeyoboi", "Yeyeboi")
+               in l for l in logs4), logs4
+    # The keeper answers whoever is CLEAR first, not the oldest: with
+    # per-viewer clocks kvack's minute ending early frees kvack.
+    b4._chat_ai_mention_by["kvack"] = T4 - 200
+    b4._chat_ai_mention_last = T4 - 200
+    assert b4._chat_ai_tick(now=T4) is True
+    nick, login, badges, cmd, arg = b4._jobs.get()
+    assert (nick, cmd) == ("kvack", "chime"), (nick, cmd)
     # Stale pendings (over two minutes) are dropped, not answered.
     b2 = _bot(llm_api_key="k")
     b2._last_chat = time.time()            # quiet gate closed
     b2._chat_ai_pending = [("kvack", "doc hello there",
-                            time.time() - 300)]
+                            time.time() - 300, "kvack")]
     assert b2._chat_ai_tick() is False
     assert b2._chat_ai_pending == []
     # The autonomous hourly cap never strands a direct pending question.
     b3 = _bot(llm_api_key="k")
     b3._last_chat = time.time()
-    b3._chat_ai_pending = [("kvack", "doc hello there", time.time())]
+    b3._chat_ai_pending = [("kvack", "doc hello there", time.time(), "kvack")]
     b3._chat_ai_times = [time.time()] * bot_mod.DEFAULTS["chat_ai_max_hour"]
     assert b3._chat_ai_tick() is True
     assert b3._chat_ai_pending == []
     print("[PASS] held mentions queue up and are answered late, each to "
           "the right person")
+
+
+def test_four_people_asking_at_once_all_get_answers():
+    """The 14:07-14:14 live-fire, replayed: four viewers, ten direct
+    questions in seven minutes. The old channel-wide 60s clock answered
+    four. With per-viewer cooldowns + an 8s pace, nine are answered
+    (the tenth was tayfta asking again 13s after her own reply - her
+    minute holds it, and her next question replaces it: one entry per
+    person). Nothing is dropped silently: every held or dropped question
+    leaves a log line."""
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    orig = llm.chat_reply
+    orig_time = time.time
+    counter = itertools.count()
+
+    def model(s, u, c=None, **k):
+        if "extract durable facts" in s:
+            return "NOTHING WORTH KEEPING"
+        return _distinct_line(next(counter))
+
+    llm.chat_reply = model
+    T0 = orig_time()
+    script = [  # (seconds, nick, message) - the real timeline, condensed
+        (0, "Yeyeboi", "docbot pick a number 1-100"),
+        (5, "tayfta", "doc what's your favorite truck stop"),
+        (13, "tayfta", "doc no really, favorite one"),
+        (30, "DaniLikesDonuts", "docbot do you like donuts"),
+        (48, "kvack", "doc where are we headed"),
+        (86, "tayfta", "docbot are you ignoring me"),
+        (140, "Yeyeboi", "doc pick another number"),
+        (200, "kvack", "docbot how far to the next stop"),
+        (260, "DaniLikesDonuts", "doc tell dani a fact about donuts"),
+        (330, "Yeyeboi", "doc one more number please"),
+    ]
+    try:
+        for at, nick, msg in script:
+            now = T0 + at
+            time.time = lambda now=now: now
+            b._on_message(nick, "#t", msg, nick.lower(), "")
+            _drain(b)
+            b._chat_ai_tick(now=now)
+            _drain(b)
+        # a last keeper pass well after the script, for anything held
+        for at in (345, 360, 400):
+            now = T0 + at
+            time.time = lambda now=now: now
+            b._chat_ai_tick(now=now)
+            _drain(b)
+    finally:
+        time.time = orig_time
+        llm.chat_reply = orig
+    answered = [l for l in b.said if l.startswith("@")]
+    assert len(answered) == 9, (len(answered), b.said, logs)
+    by = {}
+    for l in answered:
+        by[l.split()[0]] = by.get(l.split()[0], 0) + 1
+    assert by == {"@Yeyeboi": 3, "@tayfta": 2, "@DaniLikesDonuts": 2,
+                  "@kvack": 2}, by
+    assert any("held" in l for l in logs), logs
+    assert not any("dropped" in l for l in logs), logs
+    print("[PASS] four people asking at once: nine of ten answered, "
+          "the tenth held with a log line (was four of ten)")
+
+
+def test_distilling_is_paced_per_viewer():
+    """Every persona reply used to run a second model call to distil
+    the room into memory - ~400 tokens of prompt each time, ~40% of the
+    daily token budget on a busy night, mostly re-reading the same
+    twenty lines. Now a viewer is distilled on first contact and then
+    only when BOTH ten minutes have passed AND they have said four new
+    lines since; the first exchange still lands in memory at once."""
+    b = _bot(llm_api_key="k", chat_ai_mention_cooldown=0,
+             chat_ai_mention_pace=0)
+    orig = llm.chat_reply
+    counter = itertools.count()
+    calls = {"distill": 0}
+
+    def model(s, u, c=None, **k):
+        if "extract durable facts" in s:
+            calls["distill"] += 1
+            return "NOTHING WORTH KEEPING"
+        return _distinct_line(next(counter))
+
+    llm.chat_reply = model
+    try:
+        for i in range(10):
+            b._on_message("kvack", "#t", f"docbot thing {i} about my truck",
+                          "kvack", "")
+            _drain(b)
+        assert len(b.said) == 10, b.said
+        assert calls["distill"] == 1, calls      # first contact only
+        # Ten minutes pass with plenty of new lines: distilled again.
+        last_t, seen = b._distilled["kvack"]
+        b._distilled["kvack"] = (last_t - 601, seen)
+        b._on_message("kvack", "#t", "docbot and my dog", "kvack", "")
+        _drain(b)
+        assert calls["distill"] == 2, calls
+        # Ten more minutes but ONE new line: not worth a model call.
+        last_t, seen = b._distilled["kvack"]
+        b._distilled["kvack"] = (last_t - 601, seen)
+        b._on_message("kvack", "#t", "docbot lol", "kvack", "")
+        _drain(b)
+        assert calls["distill"] == 2, calls
+        # A different viewer is their own clock: first contact distils.
+        b._on_message("tayfta", "#t", "docbot hi from tayfta", "tayfta", "")
+        _drain(b)
+        assert calls["distill"] == 3, calls
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] the room is distilled on first contact, then every "
+          "10 min and 4 new lines - not after every reply")
 
 
 def test_overheard_questions_never_get_funfacts():
@@ -469,6 +642,7 @@ def test_overheard_questions_never_get_funfacts():
         # A factual question ADDRESSED to the bot still gets the engine,
         # with the address stripped from the query and the header.
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc what is a bongo twist",
                       "kvack", "")
         _drain(b)
@@ -589,6 +763,7 @@ def test_factual_questions_get_the_engine_first():
             "place": "Vandalia, Illinois", "kind": "Sunrise",
             "fact": "Sunrise is expected around 6:38 AM local time today."}
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "Docbot what time we expecting sunrise today in "
                       "Vandalia, IL ?", "hardclaws", "broadcaster/1")
@@ -603,6 +778,7 @@ def test_factual_questions_get_the_engine_first():
             "fact": ("Currently 68°F with partly cloudy skies; feels like "
                      "66°F; humidity 59%; wind WSW at 12 mph.")}
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "Docbot what is the weather in Marshall, IL",
                       "hardclaws", "broadcaster/1")
@@ -830,6 +1006,7 @@ def test_a_direct_ask_gets_one_redemption():
                                           (bad if len(calls) == 1
                                            else good))
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "docbot what do we think of people who ride zwift "
                       "with 0% trainer difficulty", "hardclaws",
@@ -914,6 +1091,7 @@ def test_rough_direct_ask_is_answered_and_cannot_go_stale():
         with b._chat_lock:
             b._chat_buf.append(("Hardclaws", "docbot old zwift question"))
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t", "Docbot you ok?", "hardclaws",
                       "broadcaster/1")
         _drain(b)
@@ -971,6 +1149,7 @@ def test_mention_notes_are_remembered_and_recalled():
     bot_mod.get_funfact = lambda q, o: (engine.append(q) or None)
     try:
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "docbot when and where did @TruckingWithDoc last "
                       "take a piss?", "hardclaws", "broadcaster/1")
@@ -1022,6 +1201,7 @@ def test_no_failed_chat_attempt_is_silent():
         logs.clear()
         llm.chat_reply = lambda s, u, c: "x" * 400
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc hello there friend", "kvack", "")
         _drain(b)
         assert b.said[-1] == "@kvack " + chatai.DIRECT_FAILURE_LINE, b.said
@@ -1242,6 +1422,7 @@ def test_the_bot_remembers_and_forgets():
         assert ("kvack", "sleeps on the floor by choice") in got, got
         # The next time the bot speaks, it remembers.
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc you know what im saying",
                       "kvack", "")
         _drain(b)
@@ -1603,10 +1784,12 @@ def test_performances_have_a_subject_a_fallback_and_an_encore():
         b.said.clear()
         seen.clear()
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc write a poem about the dog",
                       "kvack", "")
         _drain(b)
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("hollie", "#t", "doc encore!", "hollie", "")
         _drain(b)
         perf = [u for u in seen if "asked you to perform" in u]
@@ -1716,7 +1899,8 @@ def test_a_mods_announcement_answers_the_confused_room():
             "@kvack", "@newguy"], b.said
         assert all(m.endswith("in radio silence") for m in b.said[2:])
         # The persona is told the notice in every prompt while it stands.
-        b._chat_ai_mention_last = 0
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         prompts.clear()
         b._on_message("kvack", "#t", "docbot hows your night going",
                       "kvack", "")
@@ -1725,7 +1909,8 @@ def test_a_mods_announcement_answers_the_confused_room():
             and "on the phone so we are in radio silence" in prompts[0], \
             prompts[0][:300]
         # 'doc is back' ends it: 'hello?' is ordinary chatter again.
-        b._chat_ai_mention_last = 0
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t", "docbot tell everyone doc is back",
                       "hardclaws", "moderator/1")
         _drain(b)
@@ -1904,6 +2089,8 @@ def main():
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
     test_a_held_mention_is_answered_late_to_the_right_person()
+    test_four_people_asking_at_once_all_get_answers()
+    test_distilling_is_paced_per_viewer()
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()

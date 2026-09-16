@@ -359,9 +359,10 @@ def main():
 
     # The fallback provider: Groq's free tier 429s mid-stream and the
     # chat voice used to go dark for the two-minute breaker window. A
-    # configured second provider (OpenRouter here) carries the line
-    # instead - and when the primary's breaker is open, it is not even
-    # asked again.
+    # 429 is per MODEL on Groq, so the same-provider spare (its own
+    # daily bucket) is tried first; only when that 429s too does a
+    # configured second provider (OpenRouter here) carry the line -
+    # and while every Groq model is resting, Groq is not even asked.
     def _groq_429_openrouter_ok(req, timeout=60):
         captured.append({"url": req.full_url, "headers": req.headers,
                          "body": req.data.decode("utf-8"),
@@ -413,12 +414,15 @@ def main():
         assert got == "Fallback line.", got
         assert [c["url"] for c in captured] == [
             "https://api.groq.com/openai/v1/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
-        auth = captured[1]["headers"]["Authorization"]
+        assert [json.loads(c["body"])["model"] for c in captured] == [
+            "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+            "mistralai/mistral-nemo"], captured
+        auth = captured[2]["headers"]["Authorization"]
         assert auth == "Bearer or-test", auth
-        assert json.loads(captured[1]["body"])["model"] == \
-            "mistralai/mistral-nemo"
-        assert llm._unavailable(), "the 429 must open Groq's window"
+        assert llm._unavailable(), \
+            "every Groq model 429'd, so Groq's window must open"
         # Inside the window the primary is not asked again - the next
         # line goes straight to the fallback.
         captured.clear()
@@ -491,7 +495,11 @@ def main():
         assert got == "Fallback line.", got
         assert [c["url"] for c in captured] == [
             "https://api.groq.com/openai/v1/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
+        assert [json.loads(c["body"])["model"] for c in captured] == [
+            "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+            "mistralai/mistral-nemo"], captured
         # The primary breaker is now open; a fact rewrite goes straight to the
         # second provider instead of returning None before _complete can run.
         captured.clear()
