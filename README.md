@@ -584,6 +584,43 @@ weather, not news), opinions aimed at the bot ("who's the best QB today")
 stay with the persona, and plain trivia ("who won the 1998 World Cup") stays
 with the encyclopedia.
 
+### "How long does it take to run 5k" — the kind of answer a question wants
+
+Live-fire, two rounds:
+
+- *"Docbot whats the avg time for someone to run 5k"* → `FunFact | …: Whats
+  a good average time to do 5K? : r/C25K.` — a Reddit thread title. The same
+  question, asked back, with the subreddit glued on after the question mark
+  (which is exactly why the "is it a question?" check missed it).
+- *"Docbot how long it take to run 5k home boy?"* → `FunFact | …: The 5K
+  run is a long-distance road running competition over a distance of five
+  kilometres (3.107 mi).` — a how-long question answered with a distance.
+  The line has a figure in it, so the "specific answer" check was satisfied.
+
+Two rules now:
+
+1. **A question is never a source and never an answer**, wherever its `?`
+   sits. Forum furniture (`r/C25K`, `| Reddit`, `Posted by u/…`, Quora) is
+   dropped before the model ever sees it.
+2. **The answer must be the kind of figure the question asked for.** A
+   question that asks *how long does it take / average time / how fast* wants
+   a **duration** ("30 to 40 minutes", "13:10", "half an hour"); *how far /
+   how many miles* wants a **distance**; *how much does it cost* a **price**;
+   *how hot / how cold* a **temperature**; *how heavy* a **weight**. A line
+   of the wrong kind is rejected on every path — the model answer, the
+   Wikipedia records miner and the article-facts path — judged on the trimmed
+   line that would actually post. The model's retry is told which kind it
+   needs, and when the sources cover the subject but none carries the figure
+   the bot says **`I couldn't find a straight duration for that in my
+   sources.`** rather than posting a fact of the wrong shape. That shrug is
+   earned, not automatic: when the engine never found the subject at all
+   (no article, no sources, the network down) it returns nothing, exactly as
+   before — which is what lets the persona take *"how far to the next
+   stop"*, a question for the streamer that merely looks encyclopedic. "How
+   long *is* the bridge" and "how long *ago*" are not duration questions and
+   are untouched; "what temperature does condensation stop" keeps its
+   standing exemption (its honest answer is "the dew point").
+
 ### A thinking model narrating instead of answering
 
 Live-fire 15:30:09–15:30:53: "docbot who is your favorite NFL team" got,

@@ -1862,6 +1862,57 @@ def main() -> int:
         finally:
             _llm.chat_reply = saved
 
+    def _answers_are_the_kind_asked_for():
+        """'whats the avg time to run 5k' -> a Reddit thread title (the
+        same question, asked back); 'how long it take to run 5k' -> the
+        race's DISTANCE. A question is never a source or an answer, and
+        a how-long / how-far / how-much question is answered only by a
+        line carrying that kind of figure - or an honest 'no figure'."""
+        import llm as _llm
+        if not hasattr(funfacts, "answer_kind") \
+                or not hasattr(funfacts, "_is_forum_title"):
+            return False
+        if not funfacts._is_forum_title(
+                "Whats a good average time to do 5K? : r/C25K."):
+            return False
+        Q = "how long it take to run 5k home boy?"
+        defn = ("The 5K run is a long-distance road running competition "
+                "over a distance of five kilometres (3.107 mi).")
+        if funfacts.answers_kind(defn, Q) or not funfacts.answers_kind(
+                "Most runners finish a 5K in 30 to 40 minutes.", Q):
+            return False
+        if funfacts.answer_kind("what temperature does condensation stop"):
+            return False                    # 'the dew point' stays legal
+        wiki = defn + (" The 5 km road distance was introduced by IAAF as "
+                       "a world record event in November 2017.")
+
+        def serve(url, params, timeout=8.0):
+            if "wikipedia.org" in url:
+                if params.get("list") == "search":
+                    return {"query": {"search": [{"title": "5K run"}]}}
+                return {"query": {"pages": [{"title": "5K run",
+                                             "extract": wiki}]}}
+            return {"AbstractText": "", "RelatedTopics": [
+                {"Text": "Whats a good average time to do 5K? : r/C25K."}]}
+
+        saved = (funfacts._http_get_json, _llm.is_configured,
+                 _llm.any_configured, _llm.answer_question)
+        funfacts._http_get_json = serve
+        _llm.is_configured = _llm.any_configured = lambda o: True
+        _llm.answer_question = lambda q, src, cfg: defn
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            got = funfacts.get_funfact(Q, {"llm_api_key": "k",
+                                           "max_fact_chars": 200})
+            return bool(got) and got["fact"].startswith(
+                "I couldn't find a straight duration")
+        finally:
+            (funfacts._http_get_json, _llm.is_configured,
+             _llm.any_configured, _llm.answer_question) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+
     def _a_notice_answers_the_confused_room():
         """A mod had the bot announce 'Doc is on the phone, radio silence';
         two lines later 'Your mic is muted' got nothing - not addressed,
@@ -2582,6 +2633,8 @@ def main() -> int:
          _news_questions_get_headlines()
          and "GOOGLE_NEWS_RSS" in pathlib.Path(
              "funfacts.py").read_text(encoding="utf-8")),
+        ("a how-long question gets a duration, never a distance or a "
+         "question", _answers_are_the_kind_asked_for()),
         ("a model narrating its reasoning is caught, retried and never posted",
          _leaked_reasoning_is_caught()
          and "Never narrate, plan or explain" in __import__(

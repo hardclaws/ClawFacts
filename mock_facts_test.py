@@ -1877,6 +1877,179 @@ def test_the_question_path_also_searches_wikipedia():
     print("[PASS] the question path searches Wikipedia by its subject")
 
 
+_WIKI_5K = (
+    "The 5K run is a long-distance road running competition over a distance "
+    "of five kilometres (3.107 mi). Also referred to as the 5K road race, 5 "
+    "km, or simply 5K, it is the shortest of the most common road running "
+    "distances. The 5 km road distance was introduced by IAAF as a world "
+    "record event in November 2017, with the inaugural record to be "
+    "recognised after 1 January 2018 if the performances were equal to or "
+    "better than 13:10 for men and 14:45 for women.")
+
+
+def _serve_5k(ddg_text=""):
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "5K run"}]}}
+            return {"query": {"pages": [{"title": "5K run",
+                                         "extract": _WIKI_5K}]}}
+        return {"AbstractText": ddg_text, "RelatedTopics": [
+            {"Text": "Whats a good average time to do 5K? : r/C25K. "
+                     "Posted by u/runner"}]}
+    return serve
+
+
+def test_a_question_is_never_an_answer():
+    """Live-fire: 'Docbot whats the avg time for someone to run 5k' ->
+    'FunFact | ...: Whats a good average time to do 5K? : r/C25K.' A
+    Reddit thread title - the same question, asked back, with the
+    subreddit glued on after the question mark so the '?' check missed
+    it. A question is never a fact and never a source."""
+    import llm
+    for t in ("Whats a good average time to do 5K? : r/C25K.",
+              "How long does a 5K take? - Runner's World.",
+              "Is 30 minutes a good 5K time? | Reddit.",
+              "Posted by u/runner.",
+              "What is the dew point? It is the temperature at which air "
+              "becomes saturated."):
+        assert funfacts._is_forum_title(t), t
+        assert funfacts._is_fragment(t), t
+    for t in ("Most runners finish a 5K in 30 to 40 minutes.",
+              "The Roman Forum was the centre of public life in ancient Rome.",
+              "Wondering how fast you should run? Beginners average 12 "
+              "minutes per mile."):
+        assert not funfacts._is_forum_title(t), t
+    fed = []
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+            llm.any_configured)
+    funfacts._http_get_json = _serve_5k()
+    llm.is_configured = llm.any_configured = lambda o: True
+
+    def model(q, src, cfg):
+        fed.append(list(src))
+        return "Whats a good average time to do 5K? : r/C25K."
+
+    llm.answer_question = model
+    try:
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("whats the avg time for someone to run 5k",
+                                   {"llm_api_key": "k", "max_fact_chars": 200})
+        assert not any("r/C25K" in s or "Posted by" in s for s in fed[0]), \
+            fed[0]
+        assert not (got and "r/C25K" in got["fact"]), got
+    finally:
+        (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+         llm.any_configured) = orig
+        funfacts._cache.clear()
+    print("[PASS] a forum thread title is neither a source nor an answer")
+
+
+def test_the_answer_is_the_kind_of_figure_asked_for():
+    """Live-fire: 'Docbot how long it take to run 5k home boy?' ->
+    'FunFact | ...: The 5K run is a long-distance road running
+    competition over a distance of five kilometres (3.107 mi).' A
+    how-long question answered with a distance: the line has a figure,
+    so the specific-answer check passed it. Now a question that asks for
+    a duration / distance / cost / temperature / weight is answered only
+    by a line carrying that kind of figure - through the model path, the
+    records miner and the article-facts path alike - and when no source
+    has one, the bot says that instead of posting a fact of the wrong
+    kind."""
+    import llm
+    Q = "how long it take to run 5k home boy?"
+    assert funfacts.answer_kind(Q)[0] == "duration"
+    assert funfacts.answer_kind("whats the avg time for someone to run 5k")[0] \
+        == "duration"
+    assert funfacts.answer_kind("how far is a 5k")[0] == "distance"
+    assert funfacts.answer_kind("how much does a peterbilt 389 cost")[0] \
+        == "cost"
+    assert funfacts.answer_kind("how heavy is a loaded semi")[0] == "weight"
+    for q in ("what is a bongo twist", "how long is the golden gate bridge",
+              "how long ago was the eiffel tower built",
+              "who won the 1998 world cup",
+              "what temperature does condensation stop"):   # 'dew point'
+        assert funfacts.answer_kind(q) is None, q
+    defn = ("The 5K run is a long-distance road running competition over a "
+            "distance of five kilometres (3.107 mi).")
+    assert not funfacts.answers_kind(defn, Q)
+    for ok in ("Most runners finish a 5K in 30 to 40 minutes.",
+               "Elite men run it in under 13:10.",
+               "It takes about half an hour for most people."):
+        assert funfacts.answers_kind(ok, Q), ok
+    assert funfacts.answers_kind(defn, "how far is a 5k")
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+            llm.any_configured)
+    llm.is_configured = llm.any_configured = lambda o: True
+    try:
+        # the model restates the definition (as it did live): rejected,
+        # retried with the kind named, and with nothing better in any
+        # source the bot says so
+        funfacts._http_get_json = _serve_5k()
+        asked = []
+
+        def restate(q, src, cfg):
+            asked.append(q)
+            return defn if len(asked) == 1 else "NOTHING RELIABLE"
+
+        llm.answer_question = restate
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(Q, {"llm_api_key": "k",
+                                       "max_fact_chars": 200})
+        assert got["fact"] == ("I couldn't find a straight duration for that "
+                               "in my sources."), got
+        assert len(asked) == 2 and "Answer with the duration" in asked[1], asked
+        # with no model at all, the article path must not post it either:
+        # the engine has no duration and no proof the subject was found,
+        # so it stays out of it (None) - never the distance
+        llm.is_configured = llm.any_configured = lambda o: False
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(Q, {"max_fact_chars": 200})
+        assert got is None, got
+        # the shrug is EARNED: 'how far to the next stop' is a question
+        # for the streamer that merely looks encyclopedic. With nothing
+        # on the subject (a film that happens to share the words, and a
+        # model that declines) the engine returns None so the persona
+        # can take it - the live-fire replay in mock_chatai_test depends
+        # on exactly that.
+        llm.is_configured = llm.any_configured = lambda o: True
+        llm.answer_question = lambda q, src, cfg: "NOTHING RELIABLE"
+        funfacts._http_get_json = lambda url, params, timeout=8.0: (
+            {"query": {"search": [{"title": "Next Stop (film)"}]}}
+            if params.get("list") == "search" else
+            {"query": {"pages": [{"title": "Next Stop (film)", "extract":
+                "Next Stop is a 2007 Canadian drama film directed by "
+                "Alain Desrochers."}]}} if "wikipedia" in url else
+            {"AbstractText": "", "RelatedTopics": []})
+        funfacts._cache.clear()
+        assert funfacts.get_funfact("how far to the next stop",
+                                    {"llm_api_key": "k",
+                                     "max_fact_chars": 200}) is None
+        funfacts._http_get_json = _serve_5k()
+        # a distance question IS answered by the distance line
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("how far is a 5k", {"max_fact_chars": 200})
+        assert got and funfacts.answers_kind(got["fact"], "how far is a 5k"), got
+        # and when a source carries the duration, it goes straight through
+        llm.is_configured = llm.any_configured = lambda o: True
+        funfacts._http_get_json = _serve_5k(
+            "Most recreational runners finish a 5K in 30 to 40 minutes, with "
+            "an overall average around 34 minutes.")
+        llm.answer_question = lambda q, src, cfg: (
+            "Most recreational runners finish a 5K in 30 to 40 minutes, "
+            "around 34 minutes on average.")
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(Q, {"llm_api_key": "k",
+                                       "max_fact_chars": 200})
+        assert got and "30 to 40 minutes" in got["fact"], got
+    finally:
+        (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+         llm.any_configured) = orig
+        funfacts._cache.clear()
+    print("[PASS] how-long/how-far/how-much questions get that kind of "
+          "figure, or an honest 'no figure found'")
+
+
 def test_skip_llm_declines_without_touching_the_model():
     """opts['_skip_llm'] (set by !ask when the chat call just timed out)
     must decline instantly - no model call, straight to the records."""
@@ -3394,6 +3567,8 @@ def main():
     test_a_question_is_answered_from_what_a_search_returned()
     test_a_one_typo_query_still_finds_the_article()
     test_the_question_path_also_searches_wikipedia()
+    test_a_question_is_never_an_answer()
+    test_the_answer_is_the_kind_of_figure_asked_for()
     test_skip_llm_declines_without_touching_the_model()
     test_a_dead_model_still_gets_the_records()
     test_a_misspelled_dish_still_gets_its_facts()

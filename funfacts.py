@@ -422,6 +422,33 @@ def _is_dangling(sentence: str) -> bool:
     return bool(_DANGLE_START.match(sentence) or _ANAPHOR.search(sentence))
 
 
+_FORUM_TAG = re.compile(
+    r"(?:^|[\s:|(\-])r/[A-Za-z0-9_]+\b|\b(?:reddit|quora|yahoo answers|"
+    r"stack ?exchange|answers\.com|(?:forum|community)\s+(?:thread|post|"
+    r"discussion))\b|\bposted by\b|\bu/[A-Za-z0-9_-]+\b", re.IGNORECASE)
+_QUESTION_OPEN = re.compile(
+    r"^(?:what|whats|what's|who|whos|who's|how|why|when|where|which|is|are|"
+    r"do|does|did|can|could|should|would|will|has|have|was|were|any(?:one|"
+    r"body)?)\b", re.IGNORECASE)
+
+
+def _is_forum_title(sentence: str) -> bool:
+    """A forum thread title, or a question with something glued after it:
+    'Whats a good average time to do 5K? : r/C25K.' Live-fire it was
+    posted as the ANSWER to 'whats the avg time to run 5k' - a question,
+    answered with the same question from Reddit. A question is never a
+    fact and never a source: it carries no figure the asker lacks."""
+    t = " ".join((sentence or "").split())
+    if not t:
+        return False
+    if _FORUM_TAG.search(t):
+        return True
+    if "?" in t and (re.search(r"\?\s*[:|\-\u2013\u2014]", t)
+                     or _QUESTION_OPEN.match(t)):
+        return True
+    return False
+
+
 def _is_fragment(sentence: str) -> bool:
     """True for a heading, a list item or a question - none of which is a fact.
 
@@ -435,6 +462,12 @@ def _is_fragment(sentence: str) -> bool:
         # A list item cut out of a bulleted list. Never a sentence.
         return True
     if t.endswith("?"):
+        return True
+    # 'Whats a good average time to do 5K? : r/C25K.' - a forum thread
+    # title with the subreddit glued on after the question mark, posted
+    # as the ANSWER to 'whats the avg time to run 5k'. A question is a
+    # question wherever its '?' sits.
+    if _is_forum_title(t):
         return True
     # "meet the world's longest truck \u2026 a 175-foot road train" - a
     # scraped teaser. Prose starts with a capital (brands like eBay keep an
@@ -3109,6 +3142,82 @@ _SPECIFIC_Q = re.compile(
 _CAP_MID = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _DIGIT = re.compile(r"\d")
 
+#: The KIND of answer a question wants, when it wants a particular kind.
+#: 'how long does it take to run 5k' wants a DURATION; the encyclopedia's
+#: 'The 5K run is a long-distance road running competition over a
+#: distance of five kilometres (3.107 mi)' has a figure in it (so it
+#: passed the specific-answer check) but the figure is a distance. Two
+#: rounds of that question live got a Reddit thread title and a
+#: definition of the race. Each kind is (question pattern, answer
+#: pattern): a question that matches the first must be answered by a
+#: line that matches the second, or the line is not the answer.
+_ANSWER_KINDS = (
+    # duration: 'how long does it take', 'avg/average/typical time to',
+    # 'how many minutes/hours', 'what time does X take'
+    (re.compile(r"\bhow\s+long\s+(?:does|do|did|will|would|should|it|"
+                r"to)\b(?!.*\b(?:ago|since)\b)|\b(?:avg|average|typical|"
+                r"normal|usual|good|decent|fast|slow)\s+(?:\w+\s+){0,2}"
+                r"(?:time|pace)\b|\bhow\s+many\s+(?:minutes|hours|days|"
+                r"weeks|months|years|seconds)\b|\bhow\s+(?:fast|quick(?:ly)?"
+                r"|slow)\b|\btime\s+(?:does|do|did|will)\s+it\s+take\b|"
+                r"\btakes?\s+to\b", re.IGNORECASE),
+     re.compile(r"\b\d+(?:\.\d+)?\s*(?:-|\u2013|to)?\s*\d*\s*(?:min(?:ute)?s?"
+                r"|hours?|hrs?|h|days?|weeks?|months?|years?|yrs?|sec(?:ond)?s?)"
+                r"\b|\b\d{1,2}:\d{2}(?::\d{2})?\b|\b(?:half|quarter)\s+"
+                r"an?\s+hour\b|\b(?:an?|one|two|three|four|five|six|seven|"
+                r"eight|nine|ten|fifteen|twenty|thirty|forty|forty-five|sixty|"
+                r"ninety)\s+(?:to\s+\w+\s+)?(?:minutes?|hours?|days?|weeks?|"
+                r"months?|years?|seconds?)\b", re.IGNORECASE)),
+    # distance: 'how far is', 'how many miles/km', 'what distance'
+    (re.compile(r"\bhow\s+far\b|\bhow\s+many\s+(?:miles|km|kilomet(?:er|re)s?|"
+                r"feet|meters|metres)\b|\bwhat\s+distance\b", re.IGNORECASE),
+     re.compile(r"\b\d[\d,.]*\s*(?:miles?|mi|km|kilomet(?:er|re)s?|feet|ft|"
+                r"meters?|metres?|m)\b|\b(?:one|two|three|four|five|six|seven|"
+                r"eight|nine|ten|twenty|hundred|thousand)\s+(?:miles?|"
+                r"kilomet(?:er|re)s?|feet|meters?|metres?)\b", re.IGNORECASE)),
+    # cost: 'how much does X cost', 'what does X cost', 'price of'
+    (re.compile(r"\bhow\s+much\s+(?:does|do|did|is|are|would|will)\b.*"
+                r"\b(?:cost|pay|paid|charge|worth|price)\b|\bwhat\s+(?:does|"
+                r"do|did)\b.*\bcost\b|\bprice\s+of\b|\bhow\s+expensive\b",
+                re.IGNORECASE),
+     re.compile(r"[$\u20ac\u00a3\u00a5]\s*\d|\b\d[\d,.]*\s*(?:dollars?|bucks|"
+                r"cents|euros?|pounds?|usd|eur|gbp)\b|\b(?:free of charge|"
+                r"for free)\b", re.IGNORECASE)),
+    # temperature: 'how hot/cold'. NOT 'what temperature does X': that
+    # question's honest answer can be a concept ('the dew point'), which
+    # is the standing decision behind _SPECIFIC_Q too.
+    (re.compile(r"\bhow\s+(?:hot|cold|warm)\s+(?:is|was|does|do|did|are|"
+                r"were|will|would|it|the)\b", re.IGNORECASE),
+     re.compile(r"\b-?\d+(?:\.\d+)?\s*(?:\u00b0|degrees?)\s*[cf]?\b|"
+                r"\b\d+\s*[cf]\b|\bbelow\s+(?:zero|freezing)\b", re.IGNORECASE)),
+    # weight: 'how heavy', 'how much does X weigh'
+    (re.compile(r"\bhow\s+heavy\b|\bhow\s+much\s+(?:does|do|did)\b.*"
+                r"\bweigh", re.IGNORECASE),
+     re.compile(r"\b\d[\d,.]*\s*(?:lbs?|pounds?|kg|kilos?|kilograms?|tons?|"
+                r"tonnes?|ounces?|oz|grams?|g)\b", re.IGNORECASE)),
+)
+
+
+def answer_kind(question: str):
+    """(name, answer_pattern) for a question that wants a particular
+    kind of figure - a duration, a distance, a cost, a temperature, a
+    weight - else None. Weather and news never come here."""
+    q = " ".join((question or "").split())
+    names = ("duration", "distance", "cost", "temperature", "weight")
+    for name, (ask, ans) in zip(names, _ANSWER_KINDS):
+        if ask.search(q):
+            return name, ans
+    return None
+
+
+def answers_kind(line: str, question: str) -> bool:
+    """True when the line carries the kind of figure the question asked
+    for - or the question did not ask for a particular kind."""
+    kind = answer_kind(question)
+    if not kind:
+        return True
+    return bool(kind[1].search(line or ""))
+
 
 def _question_subject(question: str) -> str:
     """The searchable core of a free-form question.
@@ -3800,7 +3909,7 @@ def _question_sources(question: str, options: dict) -> list:
                 # numbers in it disappear from under a grounded answer.
                 if (len(sentence) < 12 or not re.search(r"[.!]$", sentence)
                         or _is_junk_seed(sentence) or _is_dangling(sentence)
-                        or _is_boring(sentence)):
+                        or _is_boring(sentence) or _is_forum_title(sentence)):
                     continue
                 seen.add(sentence.lower())
                 out.append(sentence)
@@ -3906,7 +4015,8 @@ def _question_sources(question: str, options: dict) -> list:
     return out[:8]
 
 
-def _answer_question(question: str, opts: dict, limit: int):
+def _answer_question(question: str, opts: dict, limit: int,
+                     subject_found: bool = False):
     """Answer a question from what a search actually returned.
 
     The model path returns None for many reasons - no model, a dead model
@@ -3916,29 +4026,67 @@ def _answer_question(question: str, opts: dict, limit: int):
     the model: the records miner needs only Wikipedia, so it runs
     whenever the model path has nothing. A broken model must not turn an
     answerable question into a decline.
+
+    None means 'the engine does not know' - and the bot relies on that:
+    it is what lets the persona take 'how far to the next stop', a
+    question for the streamer that merely LOOKS encyclopedic. So the
+    'no figure of that kind' shrug below is only earned when the engine
+    demonstrably had the subject in hand but not the figure: the fact
+    path accepted an article for it (subject_found), or the model
+    answered about it with the wrong kind of figure. The records miner's
+    hit does not count - its on-topic test is word overlap, and 'next
+    stop' overlaps 'Next Stop (film)'. Nothing found at all stays None,
+    as it always did.
     """
-    result = _answer_question_llm(question, opts, limit)
+    state = {}
+    result = _answer_question_llm(question, opts, limit, state)
     if result:
         return result
     if _SPECIFIC_Q.search(question):
         facts, src = _mine_records(_question_subject(question) or question)
+        # The kind check runs on what would actually POST: the trimmed
+        # line. '...introduced by IAAF as a world record event in
+        # November 2017, with ... 13:10 for men' carries a time deep in
+        # its tail, and the trim cuts it to the date - a duration
+        # question answered with a year.
+        facts = [f for f in facts if answers_kind(_trim(f, limit) or f,
+                                                  question)]
         if facts:
             print(f"[funfacts] answered from the record lines of {src} "
                   f"(the model path had nothing)", flush=True)
             wplace, kind = _weather_header(question)
             return {"place": wplace or _question_place(question),
                     "facts": facts[:4], "kind": kind}
+    kind = answer_kind(question)
+    if kind and (subject_found or state.get("wrong_kind")):
+        # A how-long / how-far / how-much question about a subject the
+        # sources DO cover, with no figure of that kind in any of them:
+        # say so. 'couldn't find any fun facts' is the wrong shrug for a
+        # question that never asked for one, and a fact of the wrong
+        # kind is worse than either.
+        print(f"[funfacts] no {kind[0]} for the question in any source - "
+              f"saying so rather than posting a fact of the wrong kind",
+              flush=True)
+        return {"place": _question_place(question), "_ttl": _MISS_TTL,
+                "facts": [f"I couldn't find a straight {kind[0]} for that "
+                          f"in my sources."]}
     return None
 
 
-def _answer_question_llm(question: str, opts: dict, limit: int):
+def _answer_question_llm(question: str, opts: dict, limit: int,
+                         state: dict = None):
     """The model's attempt: sources in, one grounded answer out, or None.
 
     opts["_skip_llm"] is set by !ask when the chat call just timed out on
     this same model: stacking the question call (a BIGGER prompt - it
     carries the sources) on a model that just proved too slow is a
     guaranteed extra timeout. Declining here falls straight through to
-    the records miner."""
+    the records miner.
+
+    state, when given, is filled in for the caller: state["wrong_kind"]
+    is set when the model answered about the subject but with the wrong
+    kind of figure (a distance for a how-long question) - the signal
+    that the sources cover the subject and simply lack the figure."""
     if opts.get("_skip_llm"):
         return None
     try:
@@ -3967,8 +4115,13 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
     # with none of those, ask once more with the demand made explicit; if
     # the model still has nothing concrete, decline rather than post it.
     specific = bool(_SPECIFIC_Q.search(question))
+    kind = answer_kind(question)
     attempts = [question]
-    if specific:
+    if kind:
+        attempts.append(question + f" Answer with the {kind[0]} the sources "
+                        f"give (a figure with its unit), or NOTHING RELIABLE "
+                        f"if they give none.")
+    elif specific:
         attempts.append(question + " Answer with the specific name, number "
                         "or date the sources give - not a statement that "
                         "the answer exists.")
@@ -4020,7 +4173,16 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
             # answer.
             if specific and not _has_specific(ln):
                 continue
+            # 'how long does it take to run 5k' -> a line with a DURATION
+            # in it, not the race's distance. The right kind of figure,
+            # or it is not the answer to this question.
             fact = _trim(ln, limit)
+            if fact and not answers_kind(fact, question):
+                print(f"[funfacts] answer is not a "
+                      f"{answer_kind(question)[0]}: {fact[:80]!r}", flush=True)
+                if state is not None:
+                    state["wrong_kind"] = True
+                continue
             if fact:
                 lines.append(fact)
         if lines:
@@ -4109,6 +4271,27 @@ def get_funfact(location: str, options=None):
                   "for a specific question - answering it properly",
                   flush=True)
             result = None
+        # 'how long it take to run 5k' found the 5K run ARTICLE and posted
+        # its first line - a distance - as the answer to a how-long
+        # question. An article's facts answer a question only when one
+        # of them is the kind of figure asked for.
+        subject_found = False
+        if (result and result.get("facts") and not result.get("kind")
+                and answer_kind(location)):
+            # Judged on what would POST (the trimmed line): a figure in
+            # the tail that the trim cuts off is not an answer.
+            fitting = [f for f in result["facts"]
+                       if answers_kind(_trim(f, limit) or f, location)]
+            if fitting:
+                result = dict(result, facts=fitting)
+            else:
+                print(f"[funfacts] the fact path's lines carry no "
+                      f"{answer_kind(location)[0]} for the question - "
+                      f"answering it properly", flush=True)
+                # The article IS about the thing asked - the question
+                # path may say 'no such figure' rather than stay silent.
+                subject_found = True
+                result = None
         # 4. Not a place and not a thing with an article - a question. Answer
         #    it from the search results, grounded in them, rather than saying
         #    nothing. Skipped in spicy mode, which has its own path.
@@ -4120,7 +4303,8 @@ def get_funfact(location: str, options=None):
         # _lookup_all found nothing there is nothing to flavour anyway.
         if (opts.get("answer_questions", True)
                 and (result is None or not result.get("facts"))):
-            answered = _answer_question(location.strip(), opts, limit)
+            answered = _answer_question(location.strip(), opts, limit,
+                                        subject_found=subject_found)
             if answered:
                 result = answered
         with _cache_lock:
