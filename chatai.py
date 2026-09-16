@@ -87,7 +87,16 @@ _RULES = (
     "- If nothing is worth saying, reply with exactly: NOTHING TO SAY\n"
 )
 
-_EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+#: One emoji as a PERSON sees it: a base pictograph with any skin-tone
+#: modifier, variation selector, and zero-width-joiner sequence glued on
+#: (a shrug with a gender sign is 🤷 + ZWJ + ♂ + VS16 - one emoji, four
+#: code points), or a two-letter flag. Live-fire the cleaner counted
+#: '🤷\u200d♂️' as two and threw away a perfectly good line - twice.
+_EMOJI = re.compile(
+    "(?:[\U0001F1E6-\U0001F1FF]{2}"                        # a flag
+    "|[\U0001F000-\U0001FAFF\u2600-\u27BF]"               # a pictograph
+    "(?:[\U0001F3FB-\U0001F3FF\ufe0f\u20e3]"              # + tone/VS/keycap
+    "|\u200d[\U0001F000-\U0001FAFF\u2600-\u27BF]\ufe0f?)*)")  # + ZWJ parts
 
 # Last-resort acknowledgement after both model attempts violate the output
 # rails. This is intentionally not a guessed answer: it tells the viewer the

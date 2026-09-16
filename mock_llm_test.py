@@ -57,7 +57,7 @@ def main():
         print("[PASS] Groq URL + bearer auth + reasoning-model payload (no temperature)")
 
         # Non-reasoning model should get temperature + max_tokens.
-        cfg2 = dict(cfg, llm_model="llama-3.3-70b-versatile")
+        cfg2 = dict(cfg, llm_model="qwen/qwen3.8-27b")
         captured.clear()
         llm.rewrite_fact("X", "X", ["f"], cfg2)
         b2 = json.loads(captured[0]["body"])
@@ -417,7 +417,7 @@ def main():
             "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
         assert [json.loads(c["body"])["model"] for c in captured] == [
-            "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b",
             "mistralai/mistral-nemo"], captured
         auth = captured[2]["headers"]["Authorization"]
         assert auth == "Bearer or-test", auth
@@ -498,7 +498,7 @@ def main():
             "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
         assert [json.loads(c["body"])["model"] for c in captured] == [
-            "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b",
             "mistralai/mistral-nemo"], captured
         # The primary breaker is now open; a fact rewrite goes straight to the
         # second provider instead of returning None before _complete can run.
@@ -709,6 +709,122 @@ def main():
 
     print("[PASS] an empty chat reply is retried once at a doubled "
           "budget, then the fallback takes it")
+
+    # A retired model is retired for the SESSION. Live-fire: Groq shut
+    # down llama-3.3-70b-versatile (16 Aug 2026), the bot's same-provider
+    # spare; after every gpt-oss-120b 429 the spare was tried again,
+    # 404'd again, fired the 'check your llm_model slug' hint (for a
+    # model the config never named) and only then went to the slow free
+    # fallback. Now: gpt-oss-20b is the spare; a 404 / Groq's 400
+    # model_decommissioned on any primary-chain model rests it for six
+    # hours with one line naming the replacement; the llm_model hint
+    # fires only for the configured model; a config naming a retired
+    # slug is told at startup.
+    assert llm.DEFAULT_GROQ_FALLBACK == "openai/gpt-oss-20b"
+    assert "llama-3.3-70b-versatile" in llm.GROQ_RETIRED
+    tpm = (b'{"error":{"message":"Rate limit reached for model '
+           b'`openai/gpt-oss-120b` in organization `o` on tokens per minute '
+           b'(TPM): Limit 8000. Please try again in 7m"}}')
+    dead = (b'{"error":{"message":"The model `openai/gpt-oss-20b` does not '
+            b'exist or you do not have access to it.","type":'
+            b'"invalid_request_error","code":"model_not_found"}}')
+    models = []
+
+    def _spare_dead(req, timeout=60):
+        m = json.loads(req.data.decode("utf-8"))["model"]
+        models.append(m)
+        if m == "openai/gpt-oss-120b":
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(tpm))
+        if m == "openai/gpt-oss-20b":
+            raise _ue.HTTPError(req.full_url, 404, "nf", {},
+                                io.BytesIO(dead))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "Line from " + m}}]}
+        ).encode("utf-8"))
+
+    llm.reset_disable_state()
+    llm._warned_404 = False
+    llm.urllib.request.urlopen = _spare_dead
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = llm.chat_reply("s", "u" * 20, fbcfg)
+            assert got == "Line from mistralai/mistral-nemo", got
+            assert models == ["openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                              "mistralai/mistral-nemo"], models
+            # the next line: the dead spare is NOT tried again
+            models.clear()
+            got = llm.chat_reply("s", "u" * 20, fbcfg)
+            assert got == "Line from mistralai/mistral-nemo", got
+            assert models == ["mistralai/mistral-nemo"], models
+            # ...nor by the fact/question path
+            models.clear()
+            llm._DISABLED_UNTIL = 0.0       # the provider breaker aside
+            llm._MODEL_DISABLED_UNTIL[
+                ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b")] = 0.0
+            got = llm._complete("https://api.groq.com/openai/v1",
+                                "openai/gpt-oss-120b", "gsk-test", "u",
+                                fbcfg, tag="t")
+            assert got == "Line from mistralai/mistral-nemo", got
+            assert "openai/gpt-oss-20b" not in models, models
+    finally:
+        llm.urllib.request.urlopen = orig
+    log = out.getvalue()
+    assert log.count("openai/gpt-oss-20b does not exist on this provider "
+                     "(HTTP 404)") == 1, log
+    assert "Skipping it for the rest of the session" in log, log
+    assert not llm._warned_404, \
+        "the llm_model hint fired for a spare the config never named"
+    assert "model not found (HTTP 404) - the llm_model slug" not in log, log
+    # Groq's other shape for a retired slug: 400 model_decommissioned
+    llm.reset_disable_state()
+    models.clear()
+    decom = (b'{"error":{"message":"The model `openai/gpt-oss-20b` has been '
+             b'decommissioned and is no longer supported.","type":'
+             b'"invalid_request_error","code":"model_decommissioned"}}')
+
+    def _spare_decom(req, timeout=60):
+        m = json.loads(req.data.decode("utf-8"))["model"]
+        models.append(m)
+        if m == "openai/gpt-oss-120b":
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(tpm))
+        if m == "openai/gpt-oss-20b":
+            raise _ue.HTTPError(req.full_url, 400, "bad", {},
+                                io.BytesIO(decom))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "Line from " + m}}]}
+        ).encode("utf-8"))
+
+    llm.urllib.request.urlopen = _spare_decom
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = llm.chat_reply("s", "u" * 20, fbcfg)
+            assert got == "Line from mistralai/mistral-nemo", got
+            models.clear()
+            llm.chat_reply("s", "u" * 20, fbcfg)
+            assert models == ["mistralai/mistral-nemo"], models
+    finally:
+        llm.urllib.request.urlopen = orig
+    assert "does not exist on this provider (HTTP 400)" in out.getvalue(), \
+        out.getvalue()
+    # the configured model itself retired: the loud hint, with the fix
+    llm.reset_disable_state()
+    llm._warned_404 = False
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        llm.check_models({"llm_api_key": "k",
+                          "llm_model": "llama-3.3-70b-versatile"})
+        llm.check_models(fbcfg)
+    assert ("llm_model names llama-3.3-70b-versatile, which Groq retired - "
+            "use openai/gpt-oss-120b instead") in out.getvalue(), \
+        out.getvalue()
+    assert out.getvalue().count("which Groq retired") == 1, out.getvalue()
+    llm.reset_disable_state()
+    print("[PASS] a retired Groq slug is skipped for the session, named "
+          "once with its replacement; the spare is gpt-oss-20b")
 
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1

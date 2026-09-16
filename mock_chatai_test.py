@@ -996,6 +996,24 @@ def test_the_bot_cannot_repeat_itself():
     assert chatai.clean_line("check the funfact command for more pal") is None
     assert chatai.clean_line("one emoji is fine \U0001f69b") is not None
     assert chatai.clean_line("two emoji not \U0001f69b\U0001f3dc") is None
+    # ONE emoji as a person sees it. Live-fire the cleaner counted the
+    # code points of a shrug-with-gender-sign (🤷 ZWJ ♂ VS16) as two
+    # emoji and threw away 'Clueless is my default setting, hon - keeps
+    # the warranty valid. 🤷\u200d♂️' - a good line, rejected twice.
+    assert chatai.clean_line("Clueless is my default setting, hon \u2014 "
+                             "keeps the warranty valid. \U0001f937\u200d"
+                             "\u2642\ufe0f") is not None
+    assert chatai.clean_line("Easy does it now, hon. "
+                             "\U0001f937\U0001f3fb\u200d\u2640\ufe0f") \
+        is not None                             # skin tone + ZWJ + sign
+    assert chatai.clean_line("Fine by me, that works. \U0001f44d\U0001f3fd") \
+        is not None                             # skin-tone modifier
+    assert chatai.clean_line("Road trip then, pal \U0001f1fa\U0001f1f8") \
+        is not None                             # a flag is one emoji
+    assert chatai.clean_line("Family time on the road "
+                             "\U0001f468\u200d\U0001f469\u200d\U0001f467") \
+        is not None                             # a ZWJ family
+    assert chatai.clean_line("Two here \U0001f600 and \U0001f60e") is None
     assert "Your own last lines" in chatai.user_prompt(
         [("a", "hi")], "a", "hello", own=own[:1])
 

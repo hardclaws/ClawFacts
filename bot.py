@@ -1936,6 +1936,10 @@ class TwitchBot:
         keeper and the read loop must not spend."""
         import llm as llm_mod
         try:
+            # A config still naming a slug the provider shut down gets a
+            # plain line here, with the replacement - not a 404 an hour
+            # into the stream.
+            llm_mod.check_models(self._opts)
             llm_mod.warm_up(self._opts)
         except Exception as exc:
             self._log(f"chat ai warm-up error: {exc!r}")

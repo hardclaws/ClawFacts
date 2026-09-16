@@ -276,17 +276,31 @@ once at a doubled thinking budget before the second provider takes the
 line.
 
 **Rate limits are per model, and the chain walks.** Groq's free tier
-meters each model separately (`openai/gpt-oss-120b` gets 200k tokens a
-day, `llama-3.3-70b-versatile` its own 100k, and so on), and a
-`tokens per day (TPD)` 429 means *hours*, not two minutes. Live-fire the
-day's gpt-oss budget was gone before the stream started, the whole
-provider was parked for two minutes at a time, and every line went to a
-slow free model on OpenRouter while a fresh Groq bucket sat unused. Now a
-429 rests **that model** for as long as the error says (a TPD message
-until the quoted reset, capped at six hours; a per-minute limit for two
-minutes) and the line moves on at once: first to the same provider's
-spare (`llama-3.3-70b-versatile` on Groq — same key, same speed, separate
-budget), then down the fallback chain. `llm_fallback_model` accepts a
+meters each model separately (`openai/gpt-oss-120b` and
+`openai/gpt-oss-20b` each get their own 8k tokens a minute and 200k a
+day), and a `tokens per day (TPD)` 429 means *hours*, not two minutes.
+Live-fire the day's gpt-oss budget was gone before the stream started,
+the whole provider was parked for two minutes at a time, and every line
+went to a slow free model on OpenRouter while a fresh Groq bucket sat
+unused. Now a 429 rests **that model** for as long as the error says (a
+TPD message until the quoted reset, capped at six hours; a per-minute
+limit for two minutes) and the line moves on at once: first to the same
+provider's spare (`openai/gpt-oss-20b` on Groq — same key, faster,
+separate budget), then down the fallback chain.
+
+**Retired slugs are retired for the session.** Groq shut down
+`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` for free/developer
+keys on 16 Aug 2026 (`qwen/qwen3-32b` and Llama 4 Scout a month earlier).
+Live-fire the bot's spare was still the 70B: after every gpt-oss 429 it was
+tried again, 404'd again, fired the *"check your llm_model slug"* hint for
+a model the config never named, and only then went to the 30-second free
+fallback. Now a 404 — or Groq's `400 model_decommissioned` — on any
+primary-chain model rests it for six hours with one line naming the
+replacement (`… does not exist on this provider (HTTP 404) - Groq retired
+it; its replacement is openai/gpt-oss-120b. Skipping it for the rest of
+the session`), the `llm_model` hint fires only when the *configured* model
+is the dead one, and a `config.json` still naming a retired slug is told
+so at startup, with the replacement. `llm_fallback_model` accepts a
 **comma-separated list**, tried in order; each model rests on its own
 clock and a resting model is skipped, not waited for. Only when every
 model of a provider is resting does that provider's breaker open. The
@@ -439,7 +453,11 @@ about a viewer, or post links,
 tells viewers to go use `!funfact` — it answers itself or says nothing).
 It also cannot repeat itself: its own recent lines are named in the
 prompt, and an answer that recycles a phrase, distinctive signature or
-most of a recent line is declined. Ordinary topic words are exempt when
+most of a recent line is declined. "One emoji" is counted the way a
+person sees it: a shrug with a skin tone and a gender sign
+(`🤷🏻‍♂️`, four code points) or a flag is *one* — live-fire the cleaner
+counted the code points, called a good line a two-emoji violation and
+threw it away. Ordinary topic words are exempt when
 the viewer just used them — mentioning `cadence` again while answering a
 cadence question is not repetition. A directly addressed answer gets one
 "say something completely different" retry before a deterministic
@@ -656,8 +674,8 @@ ONLY the line itself, spoken in character. Never narrate, plan or explain").
 Three leaks from one model in an hour earn a single console line naming the
 model — because the durable fix is a config change: put a non-reasoning
 model ahead of it in `llm_model` / `llm_fallback_model` (the nemotron
-family is the usual culprit; `llama-3.3-70b-versatile` on Groq and
-`nex-agi/nex-n2.5-pro:free` on OpenRouter do not think out loud).
+family is the usual culprit; `nex-agi/nex-n2.5-pro:free` on OpenRouter
+does not think out loud, and `qwen/qwen3.8-27b` on Groq can be told not to).
 
 ### "Your mic is muted" — a mod's announcement stands as a notice
 
@@ -1791,7 +1809,9 @@ don't mind the tamer tone:
 
 - Get a Groq key at <https://console.groq.com/keys> (free).
 - The default model `openai/gpt-oss-120b` is free on Groq; the bot
-  automatically falls back to `llama-3.3-70b-versatile` if it's unavailable.
+  automatically falls back to `openai/gpt-oss-20b` (same key, its own
+  rate-limit bucket) when it's rate-limited. Groq retired the Llama 3.x
+  slugs in Aug 2026 — a config still naming one is told at startup.
   The bot also handles the model's reasoning-mode quirks for you
   (`max_completion_tokens`, no `temperature`).
 - **Already run another AI app with these vars?** Just start the bot in that

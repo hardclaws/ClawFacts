@@ -1675,7 +1675,7 @@ def main() -> int:
 
     def _rate_limits_walk_the_chain():
         """Groq's 429 is per MODEL (gpt-oss-120b's 200k/day is not
-        llama-3.3-70b's 100k/day), and 'tokens per day' means hours, not
+        gpt-oss-20b's own bucket), and 'tokens per day' means hours, not
         two minutes. A 429 now rests THAT model for as long as the error
         says and the line moves on: the same-provider spare first, then
         each model of the fallback chain (llm_fallback_model takes a
@@ -1714,7 +1714,7 @@ def main() -> int:
                          "nvidia/nemotron-3-super-120b-a12b:free"):
                 raise _ue.HTTPError(req.full_url, 429, "rate", {},
                                     _io.BytesIO(tpd))
-            if model == "llama-3.3-70b-versatile":
+            if model == "openai/gpt-oss-20b":
                 raise _ue.HTTPError(req.full_url, 429, "rate", {},
                                     _io.BytesIO(b'{"error":{"message":'
                                                 b'"tokens per minute (TPM)'
@@ -1729,7 +1729,7 @@ def main() -> int:
             _llm2.reset_disable_state()
             got = _llm2.chat_reply("s", "u" * 20, cfg)
             ok1 = got == "Line from nex-agi/nex-n2.5-pro:free" and models == [
-                "openai/gpt-oss-120b", "llama-3.3-70b-versatile",
+                "openai/gpt-oss-120b", "openai/gpt-oss-20b",
                 "nvidia/nemotron-3-super-120b-a12b:free",
                 "nex-agi/nex-n2.5-pro:free"]
             # The spent models rest on their own clocks; the next line
@@ -1742,7 +1742,7 @@ def main() -> int:
             # when it clears, chat comes back to Groq's fast lane first.
             _llm2._MODEL_DISABLED_UNTIL[
                 ("https://api.groq.com/openai/v1",
-                 "llama-3.3-70b-versatile")] = 0.0
+                 "openai/gpt-oss-20b")] = 0.0
             _llm2._DISABLED_UNTIL = 0.0
             models.clear()
             _llm2.urllib.request.urlopen = lambda req, timeout=60: (
@@ -1751,7 +1751,7 @@ def main() -> int:
                     "content": "Back on Groq."}}]}).encode()))
             got = _llm2.chat_reply("s", "u" * 20, cfg)
             ok3 = got == "Back on Groq." and models == [
-                "llama-3.3-70b-versatile"]
+                "openai/gpt-oss-20b"]
             return ok1 and ok2 and ok3
         finally:
             _llm2.urllib.request.urlopen = _orig
@@ -2686,6 +2686,21 @@ def main() -> int:
          "question", _answers_are_the_kind_asked_for()),
         ("general knowledge ('how long to run 5k') is the chat model's "
          "question, not the fact engine's", _general_knowledge_goes_to_the_model()),
+        ("a retired Groq slug is skipped for the session; the spare is "
+         "gpt-oss-20b",
+         getattr(_llm2, "DEFAULT_GROQ_FALLBACK", "") == "openai/gpt-oss-20b"
+         and callable(getattr(_llm2, "_retire_model", None))
+         and callable(getattr(_llm2, "check_models", None))
+         and "llama-3.3-70b-versatile" in getattr(_llm2, "GROQ_RETIRED", {})
+         and "check_models" in pathlib.Path("bot.py").read_text(
+             encoding="utf-8")),
+        ("one emoji with a skin tone or a ZWJ sequence counts as one",
+         _ch2.clean_line("Clueless is my default setting, hon - keeps the "
+                         "warranty valid. \U0001f937\u200d\u2642\ufe0f")
+         is not None
+         and _ch2.clean_line("Road trip then, pal \U0001f1fa\U0001f1f8")
+         is not None
+         and _ch2.clean_line("Two here \U0001f600 and \U0001f60e") is None),
         ("a model narrating its reasoning is caught, retried and never posted",
          _leaked_reasoning_is_caught()
          and "Never narrate, plan or explain" in __import__(

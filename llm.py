@@ -36,7 +36,26 @@ import urllib.request
 
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_MODEL = "openai/gpt-oss-120b"          # Groq-hosted OpenAI open model
-DEFAULT_GROQ_FALLBACK = "llama-3.3-70b-versatile"      # free on Groq
+# The same-provider spare on Groq. llama-3.3-70b-versatile was retired for
+# free/developer keys on 16 Aug 2026 (with llama-3.1-8b-instant); live-fire
+# the bot kept trying it after every gpt-oss 429, got a 404 and a misleading
+# 'model not found' hint, and fell through to a 30-second free model. Groq's
+# documented replacement is gpt-oss-20b: same key, faster, its own per-model
+# minute bucket. A 404 on the spare now retires it for the session quietly.
+DEFAULT_GROQ_FALLBACK = "openai/gpt-oss-20b"
+#: Slugs Groq has shut down (console.groq.com/docs/deprecations). A config
+#: still naming one gets a plain line at startup instead of a 404 an hour in.
+GROQ_RETIRED = {
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+    "qwen/qwen3-32b": "openai/gpt-oss-120b",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "openai/gpt-oss-120b",
+    "meta-llama/llama-4-maverick-17b-128e-instruct": "openai/gpt-oss-120b",
+    "moonshotai/kimi-k2-instruct-0905": "openai/gpt-oss-120b",
+    "llama3-70b-8192": "openai/gpt-oss-120b",
+    "llama3-8b-8192": "openai/gpt-oss-20b",
+    "gemma2-9b-it": "openai/gpt-oss-20b",
+}
 
 # OpenRouter default: a cheap, low-refusal model. NOTE: OpenRouter's ":free"
 # tier no longer carries uncensored models (Hermes/Dolphin :free were
@@ -91,11 +110,11 @@ def _unavailable() -> bool:
 
 
 #: Per-MODEL rate-limit windows on the primary provider. Groq's limits
-#: are per model (gpt-oss-120b: 200k tokens/day; llama-3.3-70b: its own
-#: 100k), so a 429 on one model says nothing about the other. Live-fire
-#: the day's gpt-oss budget was gone before the stream began, and one
-#: provider-wide breaker sent every line to OpenRouter's slow free tier
-#: while a fresh Groq bucket sat unused.
+#: are per model (gpt-oss-120b and gpt-oss-20b each get their own 8k
+#: tokens/minute and 200k/day), so a 429 on one model says nothing about
+#: the other. Live-fire the day's gpt-oss budget was gone before the
+#: stream began, and one provider-wide breaker sent every line to
+#: OpenRouter's slow free tier while a fresh Groq bucket sat unused.
 _MODEL_DISABLED_UNTIL = {}
 
 
@@ -285,6 +304,9 @@ def _note_primary_line() -> None:
 
 #: Which model last answered a chat line - so a leak can be pinned on it.
 _LAST_CHAT_MODEL = ""
+#: The model the chat chain most recently sent a request to (answered or
+#: not) - so a 404 can be pinned on the slug that produced it.
+_LAST_TRIED_MODEL = ""
 _NARRATED = {}      # model -> [timestamps of leaked-reasoning replies]
 
 
@@ -302,7 +324,7 @@ def note_narration(cfg: dict = None) -> None:
               f"answering 3 times this hour ('The user is asking me...'). "
               f"It is a thinking model leaking its think block into the "
               f"answer. Put a non-reasoning model ahead of it in llm_model / "
-              f"llm_fallback_model (e.g. llama-3.3-70b-versatile on Groq, "
+              f"llm_fallback_model (e.g. openai/gpt-oss-20b on Groq, "
               f"nex-agi/nex-n2.5-pro:free on OpenRouter).", flush=True)
 
 
@@ -359,6 +381,63 @@ def _model_404_hint() -> None:
           "point llm_base_url at your local Ollama. Until then every "
           "LLM-backed feature uses its fallback. This message prints once.",
           flush=True)
+
+
+def _retire_model(base: str, model: str, code: int) -> None:
+    """A model the provider says does not exist (404, or Groq's 400
+    model_decommissioned) is not coming back this session: rest it for
+    six hours, say so once, and never mention it again. Live-fire the
+    retired Groq spare was retried after every gpt-oss 429 - a 404 each
+    time, and each time the 'check your llm_model' hint fired for a
+    model the config never named."""
+    key = (base or "", model or "")
+    if time.time() < _MODEL_DISABLED_UNTIL.get(key, 0.0):
+        return
+    _MODEL_DISABLED_UNTIL[key] = time.time() + 21600
+    hint = GROQ_RETIRED.get(model) if "groq" in (base or "") else None
+    print(f"[llm] {model} does not exist on this provider (HTTP {code})"
+          + (f" - Groq retired it; its replacement is {hint}" if hint else
+             " - the slug has been retired or renamed")
+          + ". Skipping it for the rest of the session; the other models "
+            "carry on.", flush=True)
+
+
+def _is_retired_error(exc) -> bool:
+    """True for 'no such model': a 404, or Groq's 400 with code
+    model_decommissioned / model_not_found in the body."""
+    if getattr(exc, "code", None) == 404:
+        return True
+    if getattr(exc, "code", None) != 400:
+        return False
+    try:
+        body = exc.read().decode("utf-8", "replace")
+    except Exception:
+        return False
+    # .read() consumes the body; hand back a fresh reader so whoever logs
+    # the error next (the 400 detail line) still sees it.
+    try:
+        exc.read = io.BytesIO(body.encode("utf-8")).read
+    except Exception:
+        pass
+    return "model_decommissioned" in body or "model_not_found" in body
+
+
+def check_models(cfg: dict) -> None:
+    """Startup: name any configured Groq slug that Groq has shut down,
+    with its replacement, before the first mention finds out."""
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    if "groq" in base:
+        for m in _model_list(cfg.get("llm_model")):
+            if m in GROQ_RETIRED:
+                print(f"[llm] llm_model names {m}, which Groq retired - "
+                      f"use {GROQ_RETIRED[m]} instead (console.groq.com/"
+                      f"docs/deprecations)", flush=True)
+    fb = fallback_endpoint(cfg)
+    if fb and "groq" in fb[0]:
+        for m in fallback_models(cfg):
+            if m in GROQ_RETIRED:
+                print(f"[llm] llm_fallback_model names {m}, which Groq "
+                      f"retired - use {GROQ_RETIRED[m]} instead", flush=True)
 
 
 def reset_disable_state() -> None:
@@ -591,19 +670,28 @@ def _chat_call_chain(base: str, models: list, key: str, prompt: str,
     and moves to the next one at once; the last model's 429 is re-raised
     so the caller's provider breaker logic still runs. Other errors are
     the caller's to handle, as before."""
+    global _LAST_CHAT_MODEL, _LAST_TRIED_MODEL
     last_exc = None
     for i, m in enumerate(models):
         if _model_unavailable(base, m):
             continue
+        _LAST_TRIED_MODEL = m
         try:
             text = _call(base, m, key, prompt, system, timeout=timeout,
                          max_tokens=budget,
                          hard_nothink=_hard_nothink(cfg, base), **extra)
-            global _LAST_CHAT_MODEL
             _LAST_CHAT_MODEL = m
             return text
         except urllib.error.HTTPError as exc:
             if exc.code != 429:
+                if _is_retired_error(exc) and (i < len(models) - 1 or
+                                               last_exc is not None):
+                    # A retired slug mid-chain (live-fire: the old Groq
+                    # spare, 404 after every gpt-oss 429) is skipped like
+                    # a resting one - for good. If a 429 came before it,
+                    # that is the error the caller's breaker logic wants.
+                    _retire_model(base, m, exc.code)
+                    continue
                 raise
             detail = ""
             try:
@@ -672,8 +760,8 @@ def chat_reply(system: str, user: str, cfg: dict,
         "reasoning_budget": budget * 3}
     # The primary's models, in order: the configured one (or chain), then
     # the provider's spare. A model resting after its own 429 is skipped,
-    # so a spent gpt-oss day-budget sends chat to llama-3.3-70b's separate
-    # bucket on the same fast provider - not straight to a slow free tier.
+    # so a spent gpt-oss-120b minute-budget sends chat to gpt-oss-20b's
+    # separate bucket on the same fast provider - not to a slow free tier.
     primary_models = [m for m in _model_list(model)
                       if not _model_unavailable(base, m)]
     spare = _fallback_model(base, _first_model(model))
@@ -732,8 +820,14 @@ def chat_reply(system: str, user: str, cfg: dict,
                     _disable(429)
             else:
                 _disable(exc.code)
-            if exc.code == 404:
-                _model_404_hint()
+            if _is_retired_error(exc):
+                # The last model standing does not exist. The configured
+                # model gets the loud hint; a dead SPARE is retired
+                # quietly - nothing in config.json names it.
+                dead = _LAST_TRIED_MODEL or model
+                if dead in _model_list(cfg.get("llm_model") or ""):
+                    _model_404_hint()
+                _retire_model(base, dead, exc.code)
             elif exc.code not in (401, 402, 403, 429):
                 # 400 (a parameter this Ollama build rejects?) and 5xx used
                 # to vanish without a line - the single worst way to debug a
@@ -842,6 +936,8 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
                            detail[:90])
         elif exc.code in (401, 402, 403) or (fallback and exc.code == 404):
             (_disable_fallback if fallback else _disable)(exc.code)
+        elif not fallback and _is_retired_error(exc):
+            _retire_model(base, model, exc.code)
         readiness = " - fallback NOT READY" if fallback else ""
         print(f"[llm] warm-up of {model} failed (HTTP {exc.code})"
               f"{': ' + detail if detail else ''}{readiness}", flush=True)
@@ -1119,6 +1215,15 @@ def _complete_provider(base: str, model: str, key: str, user: str,
                 return None
             if fallback and exc.code == 404:
                 _disable_fallback(404)
+                return None
+            if _is_retired_error(exc) and not fallback:
+                # Gone for the session, not just for this request: the
+                # spare was retried (and 404'd) after every 429 live.
+                _retire_model(base, m, exc.code)
+                if m in _model_list(model) and m == candidates[0]:
+                    _model_404_hint()
+                if m != candidates[-1]:
+                    continue
                 return None
             if exc.code in (400, 404, 422) and m != candidates[-1]:
                 print(f"[llm] model '{m}' failed (HTTP {exc.code}); trying "
