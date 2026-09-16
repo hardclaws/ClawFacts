@@ -2535,14 +2535,33 @@ class TwitchBot:
             # unusable ('...a solid rhythm, not a') and the question
             # got SILENCE - then the next mention ('you ok?') was
             # answered with the stale zwift take.
-            self._log(f"chat line rejected by the cleaner - one retry: "
-                      f"{raw[:120]!r}")
+            leaked = chatai.is_narration(raw)
+            if leaked:
+                # The model's THINKING came back as the content ('The
+                # user is asking me who my favorite NFL team is. I need
+                # to answer as the Commentator persona...'). Live-fire
+                # that happened three times in a row on one question,
+                # 44 s, no answer. Name it in the log and in the retry:
+                # 'too long' is not what was wrong.
+                self._log(f"model narrated its reasoning instead of "
+                          f"answering - one retry: {raw[:120]!r}")
+                llm_mod.note_narration(self._opts)
+            else:
+                self._log(f"chat line rejected by the cleaner - one retry: "
+                          f"{raw[:120]!r}")
             try:
                 raw = llm_mod.chat_reply(
-                    system + "\nYour previous reply was unusable - too "
-                    "long, cut off mid-sentence, or not allowed. Write "
-                    "ONE complete line of plain text, under 200 "
-                    "characters.",
+                    system + ("\nYour previous reply described what you "
+                              "were going to say ('The user is asking "
+                              "me...', 'I need to answer as...') instead "
+                              "of saying it. Do not narrate, plan or "
+                              "explain. Output ONLY the line itself, "
+                              "spoken in character, under 200 characters."
+                              if leaked else
+                              "\nYour previous reply was unusable - too "
+                              "long, cut off mid-sentence, or not allowed. "
+                              "Write ONE complete line of plain text, "
+                              "under 200 characters."),
                     chatai.user_prompt(prompt_lines, nick, text, memories,
                                        quiet=quiet,
                                        max_lines=8 if local else 15,
@@ -2557,6 +2576,9 @@ class TwitchBot:
             if not raw or chatai.declined(raw):
                 return None
             line = chatai.clean_line(raw)
+            if line is None and chatai.is_narration(raw):
+                self._log(f"model narrated its reasoning AGAIN: "
+                          f"{raw[:120]!r}")
         if line is None:
             # The rails stay the rails (no @, no links, no explicit output),
             # but an otherwise-safe paragraph can be fitted after both model
@@ -3432,6 +3454,15 @@ class TwitchBot:
             return
         name = result.get('kind') \
             or self.cfg.get('fact_prefix', 'FunFact')
+        if result.get("news"):
+            # A headline is quoted, not filed: 'News | helicopter crash
+            # California: NBC4 helicopter crashes in Chatsworth, killing
+            # 3 (Los Angeles Times, 3h ago)' - the outlet and the age
+            # are the answer's credentials, so they are never trimmed off.
+            prefix = f"{name} | {place}: "
+            self._say(prefix + trim_to_fit(fact, max(60, limit - len(prefix))))
+            self._log(f"replied with a headline for {argument!r}")
+            return
         prefix = f"{name} | {place}: "
         # Fit the fact to what is left of the message budget, ending on a
         # sentence boundary rather than chopping one in half.

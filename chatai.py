@@ -76,6 +76,9 @@ _RULES = (
     "- When asked your opinion of a person or their news, give your take "
     "on the SITUATION - never pivot to a different subject.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
+    "- Output ONLY the line itself, spoken in character. Never narrate, "
+    "plan or explain what you are about to say ('The user is asking...', "
+    "'I need to answer as...') - that is not a reply.\n"
     "- If nothing is worth saying, reply with exactly: NOTHING TO SAY\n"
 )
 
@@ -250,10 +253,60 @@ def _blocked_output(line: str) -> bool:
                 or funfacts._TASTELESS.search(line))
 
 
+#: A reasoning model's THINKING, delivered as the answer. Live-fire
+#: (15:30:09-15:30:53): 'The user is asking me (Docbot) who my favorite
+#: NFL team is. I need to answer as the Commentator character - a
+#: British sp...' - three times in a row, 44 seconds, and the length
+#: recovery nearly posted a trimmed slice of it. Narration about the
+#: user, the persona or the answer is never the answer.
+_LEAKED_THINKING = re.compile(
+    r"^\W*(?:(?:okay|ok|so|alright|first|hmm|right|well),?\s+)*"
+    # 'The user (Hardclaws) is asking me ...' / 'the user wants a number'
+    r"(?:the\s+user(?:\s+\w+)?\s+(?:is\s+)?(?:asks?|asking|wants|said|says|"
+    r"saying|mentioned|greeted|asked)\b"
+    # 'I need to answer/respond/reply AS the X persona' / 'in character'
+    r"|i\s+(?:need|have|should|must|will|'ll|want)\s+to\s+(?:answer|respond|"
+    r"reply|write|craft|stay|keep|be)\b[^.!?]{0,60}?\b(?:persona|character|"
+    r"in\s+character|as\s+(?:doc|docbot|the\s+\w+)\b)"
+    # 'Let me craft/think of a reply/response/line'
+    r"|(?:let\s+me|let's)\s+(?:think|craft|write|come\s+up\s+with|figure)"
+    r"\b[^.!?]{0,40}?\b(?:reply|response|answer|line|something\s+funny|"
+    r"something\s+witty)\b"
+    # 'As the Commentator persona' / 'my persona is' / 'the character should'
+    r"|as\s+(?:the\s+)?\w+\s+(?:persona|character)\b"
+    r"|(?:the|my)\s+(?:persona|character)\s+(?:is|should|must|needs)\b"
+    # 'We need to keep it under 200 characters' - the rules, recited
+    r"|we\s+(?:need|have|should|must)\s+to\s+(?:keep|stay|respond|reply|"
+    r"answer|avoid|include|write|make\s+sure)\b[^.!?]{0,60}?\b(?:characters|"
+    r"character|persona|line|reply|response|rules?|tone|voice|short)\b"
+    # 'The answer/reply should be ...'
+    r"|(?:the\s+)?(?:answer|reply|response)\s+(?:should|must|needs\s+to)\s+be\b)",
+    re.IGNORECASE)
+
+
+def is_narration(line: str) -> bool:
+    """True when the text is the model talking to ITSELF about the reply
+    (reasoning leaked into the content) rather than the reply."""
+    t = " ".join((line or "").split())
+    if _LEAKED_THINKING.match(t):
+        return True
+    # Mid-text tells: 'I need to answer as the Commentator persona',
+    # 'The user Hardclaws is asking' - a real chat line does not refer
+    # to its own persona or to 'the user' in the third person.
+    return bool(re.search(
+        r"\b(?:as\s+the\s+\w+\s+(?:persona|character)|the\s+user\s+\w*\s*"
+        r"is\s+(?:asking|saying)|in\s+character\s+as|my\s+persona\s+is|"
+        r"(?:stay|respond|reply|answer)\s+(?:\w+\s+)?in\s+character|"
+        r"answer\s+as\s+(?:the|a)\s+\w+\s+(?:persona|character))\b",
+        t, re.IGNORECASE))
+
+
 def clean_line(line: str) -> str | None:
     """One safe line of chat, or None. The output gate."""
     line = " ".join((line or "").split()).strip('"\u201c\u201d')
     if not line or len(line) < 12 or len(line) > 280:
+        return None
+    if is_narration(line):
         return None
     return None if _blocked_output(line) else line
 
@@ -269,8 +322,8 @@ def recover_direct_line(line: str, limit: int = 240) -> str | None:
     Ambient chimes never use this -- silence is fine when nobody asked us.
     """
     raw = " ".join((line or "").split()).strip('"\u201c\u201d')
-    if len(raw) <= 280 or _blocked_output(raw):
-        return None
+    if len(raw) <= 280 or _blocked_output(raw) or is_narration(raw):
+        return None                 # leaked reasoning is not recoverable
     candidate = funfacts.trim_to_fit(raw, max(80, min(int(limit), 280)))
     # A pathological token wall ("xxxx..."), base64, etc. is not prose and
     # trim_to_fit cannot invent a boundary for it.
@@ -843,6 +896,11 @@ def live_data_question(text: str, names=()) -> bool:
     t = strip_address(text, names).strip()
     if weather_question(t):
         return True
+    if funfacts.news_question(t) and not _OPINION_Q.match(t):
+        # 'who got into a helicopter crash today in California' is a
+        # headline lookup, not trivia and not a persona take: same fast
+        # lane as weather - no model, no mention clock.
+        return True
     if not funfacts._SOLAR_Q.search(t):
         return False
     place = funfacts._SOLAR_PLACE.search(t)
@@ -861,6 +919,8 @@ def factual_question(text: str, names=()) -> bool:
     a live reading is the one answer worse than none."""
     t = strip_address(text, names)
     if weather_question(t):
+        return True
+    if funfacts.news_question(t) and not _OPINION_Q.match(t):
         return True
     if not _FACTUAL_Q.match(t) or _OPINION_Q.match(t):
         return False

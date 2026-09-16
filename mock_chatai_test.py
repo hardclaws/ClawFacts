@@ -609,6 +609,215 @@ def test_distilling_is_paced_per_viewer():
           "10 min and 4 new lines - not after every reply")
 
 
+def test_news_questions_get_headlines_not_encyclopedia():
+    """Live-fire: 'Docbot who got into a helicopter crash today 15th
+    September 2026 in California' was answered 'FunFact | ...: The
+    Interstate Aviation Committee (MAK) investigation found out that the
+    Certificate of Airworthiness of the aircraft had expired in 2012.' -
+    a Wikipedia line about a different crash on a different continent.
+    What HAPPENED lately is news: a keyless headline feed (or Tavily's
+    news topic when a key is set), quoted with outlet and age, on the
+    same fast lane as weather. No model, no encyclopedia, no mention
+    clock - and an empty feed is an honest 'nothing', never a 2012 fact."""
+    import threading
+    import urllib.request
+    rss = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>x</title>'
+           b"<item><title>NBC4 helicopter crashes in Chatsworth, killing 3 - "
+           b"Los Angeles Times</title><pubDate>Wed, 16 Sep 2026 05:07:49 GMT"
+           b'</pubDate><source url="https://www.latimes.com">Los Angeles Times'
+           b"</source></item><item><title>Three dead in Los Angeles helicopter "
+           b"crash - BBC</title><pubDate>Wed, 16 Sep 2026 03:20:20 GMT</pubDate>"
+           b'<source url="https://www.bbc.com">BBC</source></item>'
+           b"</channel></rss>")
+    empty = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>x'
+             b"</title></channel></rss>")
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    urls = []
+    feed = {"body": rss}
+
+    def fake_open(req, timeout=8):
+        urls.append(req.full_url)
+        if "news.google.com/rss" in req.full_url:
+            return _Resp(feed["body"])
+        raise AssertionError("unexpected fetch: " + req.full_url)
+
+    # the classifier: recency + an event word; weather/sunrise/opinion
+    # and plain trivia stay on their own paths
+    for q in ("who got into a helicopter crash today 15th September 2026 "
+              "in California", "what happened in the news today",
+              "who won the game last night", "any news on the LA bus crash",
+              "was there an earthquake this morning in LA"):
+        assert funfacts.news_question(q), q
+    for q in ("whats the weather today in scranton", "who is the best QB today",
+              "what is a bongo twist", "when was the eiffel tower built",
+              "who won the 1998 world cup", "did you sleep last night",
+              "what time is sunrise today in vandalia"):
+        assert not funfacts.news_question(q), q
+    assert funfacts._news_query("who got into a helicopter crash today 15th "
+                                "September 2026 in California") == \
+        "helicopter crash California"
+    orig_open, orig_reply = urllib.request.urlopen, llm.chat_reply
+    urllib.request.urlopen = fake_open
+
+    def no_model(*a, **k):
+        raise AssertionError("a news question must never reach the model")
+
+    llm.chat_reply = no_model
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        b = _bot(llm_api_key="k")
+        logs = []
+        b._log = logs.append
+        b._on_message("Hardclaws", "#t", "Docbot who got into a helicopter "
+                      "crash today 15th September 2026 in California",
+                      "hardclaws", "moderator/1")
+        for th in threading.enumerate():
+            if th.name == "live-data":
+                th.join(5)
+        _drain(b)
+        assert b.said == ["News | helicopter crash California: NBC4 helicopter "
+                          "crashes in Chatsworth, killing 3 (Los Angeles Times, "
+                          + funfacts._age("Wed, 16 Sep 2026 05:07:49 GMT")
+                          + ")"], b.said
+        assert "when%3A2d" in urls[0], urls      # a named date: two days
+        assert b._mention_wait("hardclaws") == 0, "not a persona reply"
+        assert any("live data answered" in l for l in logs), logs
+        # a repeat rotates to the next headline, like any fact pool
+        again = funfacts.get_funfact("who got into a helicopter crash today "
+                                     "15th September 2026 in California",
+                                     b._opts)
+        assert again["fact"].startswith("Three dead in Los Angeles helicopter "
+                                        "crash (BBC, "), again
+        # !ask takes the same path
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        b.said.clear()
+        b._on_message("kvack", "#t", "!ask who died in the LA helicopter "
+                      "crash today", "kvack", "")
+        _drain(b)
+        assert b.said and b.said[0].startswith("News | "), b.said
+        # an empty feed: honest, dated, and never an encyclopedia line
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        feed["body"] = empty
+        got = funfacts.get_funfact("who got arrested yesterday in Scranton",
+                                   b._opts)
+        assert got["fact"] == ("Nothing in the headlines about that in the "
+                               "last 2 days."), got
+    finally:
+        urllib.request.urlopen = orig_open
+        llm.chat_reply = orig_reply
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] what-happened questions are answered from today's "
+          "headlines, never the encyclopedia")
+
+
+def test_leaked_reasoning_is_never_posted():
+    """Live-fire 15:30:09-15:30:53: 'docbot who is your favorite NFL
+    team' got, three times, 'The user is asking me (Docbot) who my
+    favorite NFL team is. I need to answer as the Commentator persona -
+    a British sp...' - the thinking model's reasoning delivered as the
+    reply. The cleaner threw it out for LENGTH, the length recovery
+    nearly posted a trimmed slice of it, and the retry was told 'too
+    long' - which was not what was wrong. Narration is recognised as
+    narration: named in the log, the retry is told not to narrate, the
+    recovery refuses it, and three leaks in an hour name the model."""
+    import contextlib
+    import io
+    leak = ("The user Hardclaws is asking me (Docbot) who my favorite NFL "
+            "team is. I need to answer as the Commentator persona - a "
+            "veteran British sports broadcaster. I should pick a team and "
+            "be witty about it. Let me craft something about the Bills. " * 2)
+    for line in (leak, "The user is asking me who my favorite team is.",
+                 "Okay, the user wants a number between 1 and 100. Let me "
+                 "think of something funny.",
+                 "I need to respond as Doc, the trucker. Keep it short.",
+                 "We need to keep it under 200 characters and mention the road.",
+                 "The user tayfta is saying she likes donuts. I should respond "
+                 "warmly in character."):
+        assert chatai.is_narration(line), line
+        assert chatai.clean_line(line) is None, line
+    for line in ("Chiefs, and I will not be taking questions at this time.",
+                 "I need to answer the CB before the dispatcher loses her mind.",
+                 "The user manual for this rig is thicker than a phone book.",
+                 "As the sun comes up over Kansas, the coffee finally kicks in.",
+                 "They want me to pick a team? Fine, Packers, and I regret "
+                 "nothing.", "Let me see... forty-two, final answer.",
+                 "We need to keep the coffee hot and the tires cold, kvack."):
+        assert not chatai.is_narration(line), line
+    assert chatai.recover_direct_line(leak) is None, "no slice of reasoning"
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    prompts = []
+    replies = iter([leak, "Buffalo Bills, and I say that with the confidence "
+                          "of a man who has never been to Buffalo."])
+    orig = llm.chat_reply
+
+    def model(s, u, c=None, **k):
+        if "extract durable facts" in s:
+            return "NOTHING WORTH KEEPING"
+        prompts.append(s)
+        return next(replies)
+
+    llm.chat_reply = model
+    out = io.StringIO()
+    try:
+        llm.reset_disable_state()
+        llm._LAST_CHAT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        b._on_message("Hardclaws", "#t", "docbot who is your favorite NFL "
+                      "team", "hardclaws", "moderator/1")
+        _drain(b)
+        assert b.said == ["@Hardclaws Buffalo Bills, and I say that with the "
+                          "confidence of a man who has never been to "
+                          "Buffalo."], b.said
+        assert any("narrated its reasoning instead of answering - one retry"
+                   in l for l in logs), logs
+        assert "Do not narrate, plan or explain" in prompts[1], prompts[1]
+        assert not any("recovered at a complete boundary" in l for l in logs)
+        # both attempts leak: the honest failure line, never the leak
+        b2 = _bot(llm_api_key="k")
+        logs2 = []
+        b2._log = logs2.append
+        llm.chat_reply = lambda s, u, c=None, **k: (
+            "NOTHING WORTH KEEPING" if "extract durable facts" in s else leak)
+        with contextlib.redirect_stdout(out):
+            b2._on_message("Hardclaws", "#t", "docbot who is your favorite "
+                           "NFL team", "hardclaws", "moderator/1")
+            _drain(b2)
+            b2._chat_ai_mention_by.clear()
+            b2._chat_ai_mention_last = 0.0
+            b2._on_message("kvack", "#t", "docbot pick a number", "kvack", "")
+            _drain(b2)
+        assert all(x.endswith(chatai.DIRECT_FAILURE_LINE) for x in b2.said), \
+            b2.said
+        assert any("narrated its reasoning AGAIN" in l for l in logs2), logs2
+        assert "narrated its reasoning instead of answering 3 times this " \
+            "hour" in out.getvalue(), out.getvalue()
+        assert "nvidia/nemotron-3-ultra-550b-a55b:free" in out.getvalue()
+        assert "Never narrate, plan or explain" in chatai.system_prompt("")
+    finally:
+        llm.chat_reply = orig
+        llm.reset_disable_state()
+    print("[PASS] a model that narrates its reasoning is retried with the "
+          "right instruction, never posted, and named after three leaks")
+
+
 def test_overheard_questions_never_get_funfacts():
     """Live-fire: 'Where ya cuttin thru with Illinois?' was asked of the
     ROOM - and the chime path answered it with a FunFact about traffic
@@ -2091,6 +2300,8 @@ def main():
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_four_people_asking_at_once_all_get_answers()
     test_distilling_is_paced_per_viewer()
+    test_news_questions_get_headlines_not_encyclopedia()
+    test_leaked_reasoning_is_never_posted()
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()

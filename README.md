@@ -546,6 +546,68 @@ crazy" stays ordinary conversation.
   exempt). Every outcome is a line in the log — `live data answered for …`,
   `live data ask from … paced`, or the engine's own failure reason.
 
+### News — "who got into a helicopter crash today in California"
+
+Live-fire, that exact question got `FunFact | who got into a helicopter
+crash today 15th September 2026…: The Interstate Aviation Committee (MAK)
+investigation found out that the Certificate of Airworthiness of the
+aircraft had expired in 2012.` — a Wikipedia sentence about a different
+crash on a different continent, fourteen years earlier. The fact engine's
+sources are an encyclopedia and a search engine's instant-answer box;
+neither knows what happened this morning, and the grounded-answer path did
+exactly what it is built to do with the only "helicopter crash" text it
+could find.
+
+What *happened* is news, and it now has its own path. A question with a
+recency marker (today, tonight, yesterday, this week, latest, breaking, or a
+date like "15th September 2026") **and** an event word (crash, died,
+arrested, won, earthquake, happened, "going on"…) is a **news question**:
+
+- It is answered from a **headline feed**, not the encyclopedia and not a
+  model: Google News' keyless RSS search (seconds fresh, no key, no quota to
+  speak of), or Tavily's `topic: news` first when `tavily_api_key` is set.
+- The answer is the **headline itself**, verbatim, with its outlet and age:
+  `News | helicopter crash California: NBC4 helicopter crashes in Chatsworth,
+  killing 3, after deadly Metro bus crash (Los Angeles Times, 3h ago)`. A
+  repeat of the question rotates to the next headline (BBC, CBS…), like any
+  fact pool; headlines are cached ten minutes, not an hour.
+- It takes the **weather fast lane**: answered at once on its own thread,
+  no model, no mention clock. `!ask` uses the same path.
+- The window follows the question: "today"/"latest" is one day, a named date
+  or "yesterday" two days, "this week" seven.
+- An empty feed is an honest **`Nothing in the headlines about that in the
+  last 2 days.`** — never a 2012 fact dressed as an answer — and a feed
+  outage says so and retries in a minute.
+
+Weather and sunrise keep their own paths ("whats the weather today" is
+weather, not news), opinions aimed at the bot ("who's the best QB today")
+stay with the persona, and plain trivia ("who won the 1998 World Cup") stays
+with the encyclopedia.
+
+### A thinking model narrating instead of answering
+
+Live-fire 15:30:09–15:30:53: "docbot who is your favorite NFL team" got,
+three times in a row, *"The user is asking me (Docbot) who my favorite NFL
+team is. I need to answer as the Commentator persona — a British sp…"* —
+the model's reasoning delivered as its reply. The cleaner threw it out, but
+for **length**; the length recovery nearly posted a trimmed slice of it as
+the answer; the retry was told "too long", which was not what was wrong;
+and after 44 seconds the viewer got nothing.
+
+Narration is now recognised as narration (`chatai.is_narration`): "The user
+X is asking…", "I need to answer as the … persona", "Let me craft a reply…",
+"We need to keep it under 200 characters…". Such a reply is named in the log
+(`model narrated its reasoning instead of answering - one retry`), the
+retry is told *not to narrate* rather than to be shorter, the length recovery
+refuses it outright, and a second leak posts the honest failure line instead
+of a fragment of reasoning. The persona rules now say it in advance ("Output
+ONLY the line itself, spoken in character. Never narrate, plan or explain").
+Three leaks from one model in an hour earn a single console line naming the
+model — because the durable fix is a config change: put a non-reasoning
+model ahead of it in `llm_model` / `llm_fallback_model` (the nemotron
+family is the usual culprit; `llama-3.3-70b-versatile` on Groq and
+`nex-agi/nex-n2.5-pro:free` on OpenRouter do not think out loud).
+
 ### "Your mic is muted" — a mod's announcement stands as a notice
 
 Live-fire: a mod asked "Docbot can you tell every one that @TruckingWithDoc

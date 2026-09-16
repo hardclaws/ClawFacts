@@ -1757,6 +1757,111 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _news_questions_get_headlines():
+        """'Docbot who got into a helicopter crash today 15th September
+        2026 in California' was answered with a Wikipedia line about a
+        2012 airworthiness certificate. What happened lately is looked
+        up in a headline feed, quoted with outlet and age, on the
+        weather fast lane - no model, no encyclopedia."""
+        import threading as _th
+        import urllib.request as _ur
+        import llm as _llm
+        if not hasattr(funfacts, "news_question"):
+            return False
+        if not funfacts.news_question("who got into a helicopter crash today "
+                                      "15th September 2026 in California") \
+                or funfacts.news_question("whats the weather today in scranton") \
+                or funfacts.news_question("what is a bongo twist"):
+            return False
+        rss = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>x'
+               b"</title><item><title>Three dead in Los Angeles helicopter "
+               b"crash - BBC</title><pubDate>Wed, 16 Sep 2026 03:20:20 GMT"
+               b'</pubDate><source url="https://www.bbc.com">BBC</source>'
+               b"</item></channel></rss>")
+
+        class _Resp:
+            def read(self):
+                return rss
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        saved = (_ur.urlopen, _llm.chat_reply)
+        _ur.urlopen = lambda req, timeout=8: _Resp()
+        _llm.chat_reply = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no model on the news path"))
+        said = []
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+            b._on_message("Hardclaws", "#c", "Docbot who got into a helicopter "
+                          "crash today 15th September 2026 in California",
+                          "hardclaws", "moderator/1")
+            for t in _th.enumerate():
+                if t.name == "live-data":
+                    t.join(5)
+            return len(said) == 1 and said[0].startswith(
+                "News | helicopter crash California: Three dead in Los "
+                "Angeles helicopter crash (BBC, ")
+        except AssertionError:
+            return False
+        finally:
+            _ur.urlopen, _llm.chat_reply = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+
+    def _leaked_reasoning_is_caught():
+        """'The user is asking me (Docbot) who my favorite NFL team is. I
+        need to answer as the Commentator persona...' three times in a
+        row, 44 s, no answer: a thinking model's reasoning delivered as
+        the reply. It is recognised, never recovered as a trimmed slice,
+        and the retry is told not to narrate."""
+        import chatai as _ch
+        import llm as _llm
+        if not hasattr(_ch, "is_narration"):
+            return False
+        leak = ("The user Hardclaws is asking me (Docbot) who my favorite "
+                "NFL team is. I need to answer as the Commentator persona - "
+                "a veteran British sports broadcaster. Let me craft a witty "
+                "line about the Bills. " * 2)
+        if not _ch.is_narration(leak) or _ch.recover_direct_line(leak) \
+                or _ch.is_narration("Chiefs, and I will not be taking "
+                                    "questions at this time."):
+            return False
+        prompts = []
+        replies = iter([leak, "Bills. Next question."])
+
+        def _model(s, u, c, **k):
+            if "extract durable facts" in s:
+                return "NOTHING WORTH KEEPING"
+            prompts.append(s)
+            return next(replies)
+
+        saved = _llm.chat_reply
+        _llm.chat_reply = _model
+        said, logs = [], []
+        try:
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+            b._log = logs.append
+            b._on_message("Hardclaws", "#c", "docbot who is your favorite "
+                          "NFL team", "hardclaws", "moderator/1")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+            return (said == ["@Hardclaws Bills. Next question."]
+                    and len(prompts) == 2
+                    and "Do not narrate, plan or explain" in prompts[1]
+                    and any("narrated its reasoning" in l for l in logs))
+        finally:
+            _llm.chat_reply = saved
+
     def _a_notice_answers_the_confused_room():
         """A mod had the bot announce 'Doc is on the phone, radio silence';
         two lines later 'Your mic is muted' got nothing - not addressed,
@@ -2473,6 +2578,14 @@ def main() -> int:
          "dropped silently", _mention_cooldown_is_per_viewer()),
         ("memory distilling is paced, not run after every reply",
          _distilling_is_paced()),
+        ("what-happened questions are answered from today's headlines",
+         _news_questions_get_headlines()
+         and "GOOGLE_NEWS_RSS" in pathlib.Path(
+             "funfacts.py").read_text(encoding="utf-8")),
+        ("a model narrating its reasoning is caught, retried and never posted",
+         _leaked_reasoning_is_caught()
+         and "Never narrate, plan or explain" in __import__(
+             "chatai").system_prompt("")),
         ("a rate-limited model rests alone; chat walks the fallback chain",
          _rate_limits_walk_the_chain()
          and "nemotron" in _llm2._REASONING.pattern

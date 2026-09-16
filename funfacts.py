@@ -54,6 +54,7 @@ WEATHERAPI_API = "https://api.weatherapi.com/v1/current.json"  # needs a key
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
 TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"  # keyless headlines
 SPICY_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "spicy_facts.json"
 )
@@ -3387,6 +3388,226 @@ def _weatherapi_answer(place: str, options: dict) -> dict | None:
             "facts": [fact], "sentence": True}
 
 
+#: A question about something that HAPPENED - recency words, or a date.
+#: Live-fire: 'who got into a helicopter crash today 15th September 2026
+#: in California' went down the encyclopedia path and came back with a
+#: 2012 Interstate Aviation Committee finding about an unrelated crash.
+#: Wikipedia and DuckDuckGo do not know what happened this morning;
+#: a news feed does.
+_NEWS_Q = re.compile(
+    r"\b(?:today|tonight|this\s+(?:morning|afternoon|evening|week|weekend)|"
+    r"yesterday|last\s+night|latest|breaking|right\s+now|just\s+(?:happened|"
+    r"now)|in\s+the\s+news|(?:the\s+)?news\s+(?:on|about|for)|recent(?:ly)?|"
+    r"currently\s+happening|happening\s+(?:now|today)|"
+    r"\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|"
+    r"sep|sept|oct|nov|dec)[a-z]*\.?(?:\s+\d{4})?|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+"
+    r"\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?)\b", re.IGNORECASE)
+#: What happened - an event word - so 'whats the weather today' (weather
+#: path) and 'whos the best QB today' (opinion) do not become news.
+_NEWS_EVENT = re.compile(
+    r"\b(?:crash(?:ed|es)?|accident|died?|dead|death|killed|shot|shooting|"
+    r"fire|explosion|earthquake|hurricane|tornado|storm|flood|arrest(?:ed)?|"
+    r"charged|indicted|elect(?:ed|ion)|resign(?:ed|s)?|announce[ds]?|"
+    r"launch(?:ed|es)?|release[ds]?|won|win|lost|score[ds]?|game|match|"
+    r"happen(?:ed|ing|s)?|going\s+on|news|headline[s]?|trade[ds]?|signed|"
+    r"fired|hired|verdict|sentenced|passed\s+away|attack(?:ed)?|strike|"
+    r"protest|recall(?:ed)?|outage|crisis|missing|found|rescued|collapse[ds]?|"
+    r"derail(?:ed|ment)?|evacuat(?:ed|ion)|wildfire|blaze)\b", re.IGNORECASE)
+_NEWS_STRIP = frozenset((
+    "today", "tonight", "yesterday", "latest", "breaking", "currently",
+    "right", "now", "just", "happened", "happening", "news", "recently",
+    "recent", "this", "morning", "afternoon", "evening", "week", "weekend",
+    "last", "night", "got", "get", "gets", "into", "did", "does", "who",
+    "whos", "what", "whats", "when", "where", "how", "why", "is", "are",
+    "was", "were", "the", "a", "an", "of", "in", "on", "at", "to", "and",
+    "any", "there", "anything", "something", "about", "tell", "me", "us",
+    "please", "plz", "do", "you", "know", "heard", "hear", "have", "has",
+    "had", "up", "with", "for", "from", "by", "it", "that", "which",
+))
+_MONTH = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+          "oct", "nov", "dec")
+
+
+def news_question(question: str) -> bool:
+    """True when the question asks what HAPPENED lately - the news path,
+    not the encyclopedia. Needs a recency marker (today, yesterday, this
+    week, latest, a date) AND an event word (crash, died, arrested, won,
+    happened...). Weather and sunrise are their own paths and are
+    excluded first; so is an opinion aimed at the bot."""
+    q = " ".join((question or "").split())
+    if not q or _WEATHER_Q.search(q) or _SOLAR_Q.search(q):
+        return False
+    if not _NEWS_Q.search(q):
+        return False
+    return bool(_NEWS_EVENT.search(q))
+
+
+def _news_query(question: str) -> str:
+    """The searchable core of a news question: the event words and the
+    proper nouns, minus the asking words and the date. 'who got into a
+    helicopter crash today 15th September 2026 in California' ->
+    'helicopter crash California'."""
+    q = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|"
+               r"jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(?:\s+\d{4})?\b",
+               " ", question or "", flags=re.IGNORECASE)
+    q = re.sub(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+               r"[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b",
+               " ", q, flags=re.IGNORECASE)
+    q = re.sub(r"\b(?:19|20)\d{2}\b", " ", q)
+    words = []
+    for w in re.findall(r"[A-Za-z][A-Za-z'\-]*", q):
+        if w.lower() in _NEWS_STRIP or len(w) < 2:
+            continue
+        words.append(w)
+    return " ".join(words[:8])
+
+
+def _news_when(question: str) -> str:
+    """How far back to look: a named date or 'yesterday' widens to two
+    days, 'this week' to seven; plain 'today/latest' is one day."""
+    q = (question or "").lower()
+    if re.search(r"\bthis\s+week|past\s+week|last\s+week|recent", q):
+        return "7d"
+    if re.search(r"\byesterday|last\s+night|\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?"
+                 r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|"
+                 r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+                 r"\s+\d{1,2}", q):
+        return "2d"
+    return "1d"
+
+
+def _age(published: str) -> str:
+    """'Wed, 16 Sep 2026 05:07:49 GMT' -> '3h ago' / 'yesterday'."""
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(published)
+        secs = time.time() - dt.timestamp()
+    except Exception:
+        return ""
+    if secs < 0:
+        return "just now"
+    if secs < 3600:
+        return f"{max(1, int(secs // 60))}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    days = int(secs // 86400)
+    return "yesterday" if days == 1 else f"{days}d ago"
+
+
+def _google_news_rss(query: str, when: str, limit: int = 6) -> list:
+    """Headlines from Google News' RSS search: keyless, seconds fresh.
+    Returns [(title, source, published)], newest first as served."""
+    import xml.etree.ElementTree as ET
+    params = {"q": f"{query} when:{when}", "hl": "en-US", "gl": "US",
+              "ceid": "US:en"}
+    req = urllib.request.Request(
+        GOOGLE_NEWS_RSS + "?" + urllib.parse.urlencode(params),
+        headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        raw = resp.read()
+    root = ET.fromstring(raw)
+    out = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        source = (item.findtext("source") or "").strip()
+        pub = (item.findtext("pubDate") or "").strip()
+        if not title:
+            continue
+        # Google appends ' - Source' to the title; the source tag has it.
+        if source and title.endswith(" - " + source):
+            title = title[:-(len(source) + 3)].rstrip()
+        out.append((html.unescape(title), source, pub))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tavily_news(query: str, when: str, options: dict, limit: int = 6) -> list:
+    """Tavily's news topic when a key is set: same shape as the RSS."""
+    tkey = (options.get("tavily_api_key") or "").strip()
+    if not tkey:
+        return []
+    days = {"1d": "day", "2d": "week", "7d": "week"}.get(when, "day")
+    req = urllib.request.Request(
+        TAVILY_API,
+        data=json.dumps({"query": query, "topic": "news", "max_results": limit,
+                         "time_range": days, "search_depth": "basic"}
+                        ).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {tkey}", "User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    out = []
+    for item in (data.get("results") or [])[:limit]:
+        title = " ".join((item.get("title") or "").split())
+        if not title:
+            continue
+        host = urllib.parse.urlsplit(item.get("url") or "").hostname or ""
+        source = re.sub(r"^www\.", "", host)
+        out.append((title, source, item.get("published_date") or ""))
+    return out
+
+
+def _news_answer(question: str, options: dict = None):
+    """Headlines for a what-happened question, ``False`` when it is not
+    one. The answer is the HEADLINE, verbatim, with its outlet and age -
+    no model rewrites it, no encyclopedia line can stand in for it. An
+    empty feed is an honest 'nothing in the last day', not a 2012 fact.
+    Cached 10 minutes (news moves; the daily cache would pin a stale
+    headline on a developing story)."""
+    if not news_question(question):
+        return False
+    query = _news_query(question)
+    if not query:
+        return {"place": "the news", "kind": "News", "_ttl": _MISS_TTL,
+                "facts": ["Give me a subject to look up - 'docbot news on "
+                          "the LA helicopter crash'."]}
+    when = _news_when(question)
+    opts = options or {}
+    items = []
+    errors = []
+    for name, fetch in (("tavily", lambda: _tavily_news(query, when, opts)),
+                        ("google news", lambda: _google_news_rss(query, when))):
+        try:
+            items = fetch()
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError) as exc:
+            errors.append(f"{name}: {exc!r}")
+            items = []
+        except Exception as exc:                # a feed parse surprise
+            errors.append(f"{name}: {exc!r}")
+            items = []
+        if items:
+            break
+    if errors:
+        print(f"[funfacts] news lookup trouble ({query!r}): "
+              + "; ".join(errors), flush=True)
+    if not items:
+        if errors and len(errors) >= 2:
+            return {"place": query, "kind": "News", "_ttl": _BUSY_TTL,
+                    "facts": ["I couldn't reach the news feeds right now; "
+                              "try me again in a minute."]}
+        print(f"[funfacts] no headlines in the last {when} for {query!r}",
+              flush=True)
+        return {"place": query, "kind": "News", "_ttl": _MISS_TTL,
+                "facts": [f"Nothing in the headlines about that in the last "
+                          f"{'day' if when == '1d' else when.rstrip('d') + ' days'}."]}
+    facts = []
+    seen = set()
+    for title, source, pub in items:
+        key = _fold(title)[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        tail = ", ".join(x for x in (source, _age(pub)) if x)
+        facts.append(f"{title}" + (f" ({tail})" if tail else ""))
+    print(f"[funfacts] answered from {len(facts)} headline(s) for {query!r}",
+          flush=True)
+    return {"place": query, "kind": "News", "facts": facts[:4],
+            "_ttl": 600, "news": True}
+
+
 def _weather_answer(question: str, options: dict = None):
     """Current conditions from Open-Meteo, or ``False`` when not weather.
 
@@ -3858,6 +4079,14 @@ def get_funfact(location: str, options=None):
         else:
             solar = _solar_answer(location.strip())
             result = None if solar is False else solar
+        if result is None:
+            # What HAPPENED (today, yesterday, a date) is news, and the
+            # encyclopedia does not have it: a question about this
+            # morning's helicopter crash came back with a 2012 finding
+            # about a different one. Headlines, or an honest 'nothing'.
+            news = _news_answer(location.strip(), opts)
+            if news is not False:
+                result = news
         if result is None and llm_only:
             facts = _llm_only_facts(location.strip(), limit, opts)
             if facts:

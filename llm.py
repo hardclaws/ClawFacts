@@ -283,6 +283,29 @@ def _note_primary_line() -> None:
     _ON_FALLBACK = False
 
 
+#: Which model last answered a chat line - so a leak can be pinned on it.
+_LAST_CHAT_MODEL = ""
+_NARRATED = {}      # model -> [timestamps of leaked-reasoning replies]
+
+
+def note_narration(cfg: dict = None) -> None:
+    """The chat model just returned its reasoning as the reply. Count it
+    against the model that answered; three in an hour earns one clear
+    log line naming the model, because the fix is a config change (a
+    non-reasoning model in the chain), not a retry."""
+    model = _LAST_CHAT_MODEL or "the chat model"
+    now = time.time()
+    hits = [t for t in _NARRATED.get(model, []) if now - t < 3600] + [now]
+    _NARRATED[model] = hits
+    if len(hits) == 3:
+        print(f"[llm] {model} has narrated its reasoning instead of "
+              f"answering 3 times this hour ('The user is asking me...'). "
+              f"It is a thinking model leaking its think block into the "
+              f"answer. Put a non-reasoning model ahead of it in llm_model / "
+              f"llm_fallback_model (e.g. llama-3.3-70b-versatile on Groq, "
+              f"nex-agi/nex-n2.5-pro:free on OpenRouter).", flush=True)
+
+
 _NO_FALLBACK_WARNED_UNTIL = 0.0
 
 
@@ -347,6 +370,7 @@ def reset_disable_state() -> None:
     _ON_FALLBACK = False
     _NO_FALLBACK_WARNED_UNTIL = 0.0
     _MODEL_DISABLED_UNTIL.clear()
+    _NARRATED.clear()
 
 SYSTEM_PROMPT = (
     "You write fun facts about places for a trucker's Twitch stream watched by "
@@ -572,9 +596,12 @@ def _chat_call_chain(base: str, models: list, key: str, prompt: str,
         if _model_unavailable(base, m):
             continue
         try:
-            return _call(base, m, key, prompt, system, timeout=timeout,
+            text = _call(base, m, key, prompt, system, timeout=timeout,
                          max_tokens=budget,
                          hard_nothink=_hard_nothink(cfg, base), **extra)
+            global _LAST_CHAT_MODEL
+            _LAST_CHAT_MODEL = m
+            return text
         except urllib.error.HTTPError as exc:
             if exc.code != 429:
                 raise
