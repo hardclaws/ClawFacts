@@ -18,8 +18,9 @@ Everything it says passes one cleaning gate: one short line, no @mentions
 one emoji, and no command syntax (the persona never sends viewers to
 !funfact - it answers itself or says nothing). The rules a regex cannot
 enforce live in the system prompt: tease topics, never people; no threats,
-no creepiness, no medical or grief jokes; never state a fact it is not
-certain of (factual questions are routed to the fact engine elsewhere);
+no creepiness, no medical or grief jokes; answer general knowledge it is
+sure of and never state a fact it is not certain of (lookups on named
+things and live data are routed to the fact engine elsewhere);
 never guess anything personal about anyone; never repeat your own recent
 lines. A model with nothing worth saying replies NOTHING TO SAY and the
 bot stays quiet.
@@ -61,8 +62,12 @@ _RULES = (
     "- At most one emoji. No hashtags, no links, no @mentions.\n"
     "- Tease topics, never people. No insults, no threats, nothing "
     "creepy, no politics, no medical or grief jokes.\n"
-    "- Never state a fact you are not certain of - factual questions are "
-    "answered elsewhere; you hold opinions and stories.\n"
+    "- Answer general-knowledge questions plainly and correctly from what "
+    "you know (how long a 5K takes, how air brakes work, why the sky is "
+    "blue) - a real answer first, in your voice, in one line. Never state "
+    "a fact you are not certain of: if you do not know, say so rather "
+    "than guess. Live data (weather, headlines) and lookups on named "
+    "things are answered elsewhere.\n"
     "- NEVER mention or point viewers at commands like !funfact or !ask. "
     "YOU are the one answering: answer yourself, or reply NOTHING TO "
     "SAY.\n"
@@ -111,7 +116,7 @@ def user_prompt(lines: list, nick: str, text: str,
                 memories: list = None, quiet: bool = False,
                 max_lines: int = 15, max_memories: int = 8,
                 own: list = None, overheard: bool = False,
-                notice: str = None) -> str:
+                notice: str = None, knowledge: bool = False) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
@@ -191,6 +196,15 @@ def user_prompt(lines: list, nick: str, text: str,
         out.append(f"{nick} just said: {text}")
         out.append("They are talking to YOU: answer THIS message - the "
                    "earlier room chat is context, not the question.")
+        if knowledge:
+            # 'how long does it take to run 5k': the answer is a figure,
+            # a range or a reason the model KNOWS. Said first, plainly;
+            # the voice is the wrapping, not a substitute for it.
+            out.append("This is a general-knowledge question. Give the "
+                       "real answer first - the figure, the range or the "
+                       "reason - in your own voice, one line. If you "
+                       "genuinely do not know, say so; never invent a "
+                       "number.")
     out.append("")
     out.append("Your line:")
     return "\n".join(out)
@@ -907,6 +921,65 @@ def live_data_question(text: str, names=()) -> bool:
     return bool(place) and not _OPINION_Q.match(t)
 
 
+#: General knowledge the chat model answers from what it knows - the
+#: shape of a question that wants a figure, a rate, a typical value or
+#: an explanation rather than an encyclopedia entry on a named thing:
+#: 'how long does it take to run 5k', 'whats the avg time for a 5k',
+#: 'how much does a gallon of diesel weigh', 'why is the sky blue',
+#: 'how do air brakes work', 'whats the speed limit in ohio'. Live-fire:
+#: both 5K questions were routed at the fact engine, which found a
+#: Reddit thread title and then the race's DISTANCE, when the model
+#: would have said 'about 30 to 40 minutes for most people' at once.
+_KNOWLEDGE_Q = re.compile(
+    r"^\s*(?:"
+    # a rate, a duration, a size, a weight, a price, a temperature...
+    # ('how many' is a COUNT - 'how many trailers can a truck pull' is
+    # a record the engine mines - and 'how long IS the X' names a thing)
+    r"how\s+(?:long|far|fast|slow|much|often|heavy|hot|cold|warm|"
+    r"big|tall|deep|wide|high|quick|late|early|soon|old)\b"
+    r"(?!\s+(?:is|was|are|were)\s+(?:the|a|an)\b)|"
+    # an average / typical / normal / good / usual X (superlatives -
+    # 'the longest truck' - are records, the engine's job)
+    r"what(?:s|'s|\s+is|\s+was|\s+are)?\s+(?:the\s+|a\s+|an\s+)?"
+    r"(?:avg|average|typical|normal|usual|good|decent|standard|"
+    r"recommended|ideal|safe|legal|minimum|maximum|max|min|"
+    r"easiest|cheapest|best\s+way)\b|"
+    # an explanation
+    r"why\b|how\s+(?:do|does|did|can|could|would|should|to)\b|"
+    r"what\s+(?:happens|causes|makes)\b"
+    r")", re.IGNORECASE)
+
+#: ...unless it plainly names a thing the encyclopedia has an entry on:
+#: a capitalised proper noun past the first word ('how long is the
+#: Golden Gate Bridge', 'how tall is Mount Everest').
+_PROPER_NOUN = re.compile(r"(?<=\s)[A-Z][a-z]{2,}")
+
+
+def knowledge_question(text: str, names=()) -> bool:
+    """True for a general-knowledge question the chat model should
+    answer from what it knows rather than the fact engine: durations,
+    rates, typical values, how-tos and explanations. The engine is for
+    NAMED things it can look up ('what is a bongo twist', 'when was
+    the eiffel tower built', 'how tall is Mount Everest') and for live
+    data (weather, sunrise, headlines); those stay False here.
+
+    Live-fire, twice on one subject: 'whats the avg time for someone
+    to run 5k' and 'how long it take to run 5k home boy?' both went to
+    the engine, which posted a Reddit thread title and then the race's
+    distance. Neither is an encyclopedia question. The model knows the
+    answer; it was never asked."""
+    t = strip_address(text, names).strip()
+    if weather_question(t) or live_data_question(t):
+        return False
+    if funfacts.news_question(t):
+        return False
+    if not _KNOWLEDGE_Q.match(t):
+        return False
+    # 'how long is the Golden Gate Bridge' / 'how old is Willie Nelson':
+    # a named thing with an article - the engine's kind of question.
+    return not _PROPER_NOUN.search(t)
+
+
 def factual_question(text: str, names=()) -> bool:
     """True when the text asks about a third-party thing the fact engine
     can look up - 'what is a bongo twist'. Questions about the bot
@@ -916,7 +989,12 @@ def factual_question(text: str, names=()) -> bool:
     the bot ('doc, what is a bongo twist') is stripped first - mentions
     carry their trigger word. A weather ask with a place counts however
     it is phrased ('docbot weather in paris?'): the persona guessing at
-    a live reading is the one answer worse than none."""
+    a live reading is the one answer worse than none.
+
+    General knowledge ('how long does it take to run 5k', 'why is the
+    sky blue') is False too - see knowledge_question: the engine looks
+    things UP, and there is no article to look up for a typical 5K
+    time. The chat model answers those from what it knows."""
     t = strip_address(text, names)
     if weather_question(t):
         return True
@@ -924,7 +1002,9 @@ def factual_question(text: str, names=()) -> bool:
         return True
     if not _FACTUAL_Q.match(t) or _OPINION_Q.match(t):
         return False
-    return not _ABOUT_BOT.search(t)
+    if _ABOUT_BOT.search(t):
+        return False
+    return not knowledge_question(t)
 
 
 #: Opinion questions aimed at the bot ("are you a Miami Dolphins fan?",

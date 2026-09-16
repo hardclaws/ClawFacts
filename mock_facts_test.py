@@ -1954,8 +1954,9 @@ def test_the_answer_is_the_kind_of_figure_asked_for():
     a duration / distance / cost / temperature / weight is answered only
     by a line carrying that kind of figure - through the model path, the
     records miner and the article-facts path alike - and when no source
-    has one, the bot says that instead of posting a fact of the wrong
-    kind."""
+    has one the engine returns NOTHING, so the bot hands the question to
+    the chat model (which knows a 5K takes most people 30-40 minutes)
+    rather than post a fact of the wrong kind."""
     import llm
     Q = "how long it take to run 5k home boy?"
     assert funfacts.answer_kind(Q)[0] == "duration"
@@ -1984,7 +1985,8 @@ def test_the_answer_is_the_kind_of_figure_asked_for():
     try:
         # the model restates the definition (as it did live): rejected,
         # retried with the kind named, and with nothing better in any
-        # source the bot says so
+        # source the engine returns None - the bot's cue to let the chat
+        # model answer. Never the distance, never a shrug in its way.
         funfacts._http_get_json = _serve_5k()
         asked = []
 
@@ -1996,22 +1998,18 @@ def test_the_answer_is_the_kind_of_figure_asked_for():
         funfacts._cache.clear()
         got = funfacts.get_funfact(Q, {"llm_api_key": "k",
                                        "max_fact_chars": 200})
-        assert got["fact"] == ("I couldn't find a straight duration for that "
-                               "in my sources."), got
+        assert got is None, got
         assert len(asked) == 2 and "Answer with the duration" in asked[1], asked
-        # with no model at all, the article path must not post it either:
-        # the engine has no duration and no proof the subject was found,
-        # so it stays out of it (None) - never the distance
+        # with no model at all, the article path must not post it either
         llm.is_configured = llm.any_configured = lambda o: False
         funfacts._cache.clear()
         got = funfacts.get_funfact(Q, {"max_fact_chars": 200})
         assert got is None, got
-        # the shrug is EARNED: 'how far to the next stop' is a question
-        # for the streamer that merely looks encyclopedic. With nothing
-        # on the subject (a film that happens to share the words, and a
-        # model that declines) the engine returns None so the persona
-        # can take it - the live-fire replay in mock_chatai_test depends
-        # on exactly that.
+        # 'how far to the next stop' is a question for the streamer that
+        # merely looks encyclopedic: with nothing on the subject (a film
+        # that shares the words, a model that declines) the engine
+        # returns None so the persona can take it - the live-fire replay
+        # in mock_chatai_test depends on exactly that.
         llm.is_configured = llm.any_configured = lambda o: True
         llm.answer_question = lambda q, src, cfg: "NOTHING RELIABLE"
         funfacts._http_get_json = lambda url, params, timeout=8.0: (
@@ -2047,7 +2045,7 @@ def test_the_answer_is_the_kind_of_figure_asked_for():
          llm.any_configured) = orig
         funfacts._cache.clear()
     print("[PASS] how-long/how-far/how-much questions get that kind of "
-          "figure, or an honest 'no figure found'")
+          "figure from the engine, or nothing - never the wrong kind")
 
 
 def test_skip_llm_declines_without_touching_the_model():

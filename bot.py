@@ -2506,6 +2506,15 @@ class TwitchBot:
             system += ("\nYour previous attempt repeated your own recent "
                        "lines. Write something COMPLETELY different: "
                        "different words, different angle, different mood.")
+        # 'how long does it take to run 5k' is a question the model
+        # KNOWS the answer to. Live-fire it went to the fact engine
+        # twice (a Reddit thread title, then the race's distance); now
+        # it comes here, and the prompt says what kind of ask it is.
+        knowledge = direct and chatai.knowledge_question(
+            text, self._chat_ai_names)
+        if knowledge:
+            self._log("general-knowledge question - the model answers it, "
+                      "not the fact engine")
         try:
             raw = llm_mod.chat_reply(
                 system,
@@ -2515,7 +2524,8 @@ class TwitchBot:
                                    max_memories=4 if local else 8,
                                    own=list(self._chat_ai_own),
                                    overheard=overheard,
-                                   notice=self._standing_notice()),
+                                   notice=self._standing_notice(),
+                                   knowledge=knowledge),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2568,7 +2578,8 @@ class TwitchBot:
                                        max_memories=4 if local else 8,
                                        own=list(self._chat_ai_own),
                                        overheard=overheard,
-                                       notice=self._standing_notice()),
+                                       notice=self._standing_notice(),
+                                       knowledge=knowledge),
                     self._opts)
             except Exception as exc:
                 self._log(f"chat ai error: {exc!r}")
@@ -2824,10 +2835,21 @@ class TwitchBot:
         else:
             self._mark_mention_reply(nick, now)
         if not line:
-            # The model is down or declined. A chatty direct address still
-            # gets a canned Doc line - the bot never goes fully mute on
-            # "doc, hows it going?" - but a factual question stays silent
-            # rather than risk a made-up answer.
+            # The model is down or declined. A general-knowledge question
+            # ('how long does it take to run 5k') still gets the fact
+            # engine's try - it posts only a figure of the kind asked for,
+            # or nothing. A chatty direct address gets a canned Doc line -
+            # the bot never goes fully mute on "doc, hows it going?" - but
+            # any other factual question stays silent rather than risk a
+            # made-up answer.
+            if (addressed and not quiet
+                    and chatai.knowledge_question(text, self._chat_ai_names)
+                    and self._answer_factual(nick, text)):
+                self._log("the model had nothing for a general-knowledge "
+                          "question - the fact engine answered it")
+                self._chat_ai_times = [t for t in self._chat_ai_times
+                                       if now - t < 3600] + [now]
+                return
             quip = chatai.smalltalk(text)
             if quip and not quiet:
                 self._say(self._fit(f"@{nick} ", quip))

@@ -431,8 +431,10 @@ qwen/qwen3-32b"`) and the primary walks them the same way.
 
 What it will never do, by prompt *and* by output filter: tease people
 (only topics), post insults, threats or anything creepy, joke about
-illness or grief, state facts it is not sure of (factual questions are
-routed to the fact engine first), guess anything personal about a viewer, or post links,
+illness or grief, state facts it is not sure of (it answers general
+knowledge it knows — *how long does a 5K take* — and lookups on named things
+and live data are routed to the fact engine first), guess anything personal
+about a viewer, or post links,
 @mentions or more than one emoji, no command syntax (the persona never
 tells viewers to go use `!funfact` — it answers itself or says nothing).
 It also cannot repeat itself: its own recent lines are named in the
@@ -584,42 +586,54 @@ weather, not news), opinions aimed at the bot ("who's the best QB today")
 stay with the persona, and plain trivia ("who won the 1998 World Cup") stays
 with the encyclopedia.
 
-### "How long does it take to run 5k" — the kind of answer a question wants
+### "How long does it take to run 5k" — the model's question, not the encyclopedia's
 
 Live-fire, two rounds:
 
 - *"Docbot whats the avg time for someone to run 5k"* → `FunFact | …: Whats
   a good average time to do 5K? : r/C25K.` — a Reddit thread title. The same
-  question, asked back, with the subreddit glued on after the question mark
-  (which is exactly why the "is it a question?" check missed it).
+  question, asked back.
 - *"Docbot how long it take to run 5k home boy?"* → `FunFact | …: The 5K
   run is a long-distance road running competition over a distance of five
   kilometres (3.107 mi).` — a how-long question answered with a distance.
-  The line has a figure in it, so the "specific answer" check was satisfied.
 
-Two rules now:
+The root cause was the **routing**: both were sent to the fact engine, and
+the engine *looks things up* — there is no article to look up for a typical
+5K time. The chat model knows the answer and was never asked.
+
+**Routing now.** A general-knowledge question — a duration, rate, typical
+value, size, weight, price, temperature, a how-to or a why (*how long does
+it take to run 5k, whats the avg time for a 5k, how much does a gallon of
+diesel weigh, how often should you change oil, why is the sky blue, how do
+air brakes work*) — goes to the **chat model**, whose prompt says what kind
+of ask it is: *give the real answer first — the figure, the range or the
+reason — in your own voice; if you genuinely do not know, say so; never
+invent a number.* The persona rule that used to say "factual questions are
+answered elsewhere" now says to answer general knowledge it is sure of. The
+fact engine keeps what it is good at: **named things** with an article
+(*what is a bongo twist, when was the eiffel tower built, how tall is Mount
+Everest* — a capitalised name past the first word is the tell), **records**
+(*how many trailers can a truck pull, whats the longest truck*), and **live
+data** (weather, sunrise, headlines). Questions about the bot still go to
+the persona as before. If the model declines a knowledge question, the
+engine still gets its try, under the rules below.
+
+**The engine's own rails**, for when it does answer:
 
 1. **A question is never a source and never an answer**, wherever its `?`
    sits. Forum furniture (`r/C25K`, `| Reddit`, `Posted by u/…`, Quora) is
-   dropped before the model ever sees it.
+   dropped before the engine's model ever sees it.
 2. **The answer must be the kind of figure the question asked for.** A
-   question that asks *how long does it take / average time / how fast* wants
-   a **duration** ("30 to 40 minutes", "13:10", "half an hour"); *how far /
-   how many miles* wants a **distance**; *how much does it cost* a **price**;
-   *how hot / how cold* a **temperature**; *how heavy* a **weight**. A line
-   of the wrong kind is rejected on every path — the model answer, the
-   Wikipedia records miner and the article-facts path — judged on the trimmed
-   line that would actually post. The model's retry is told which kind it
-   needs, and when the sources cover the subject but none carries the figure
-   the bot says **`I couldn't find a straight duration for that in my
-   sources.`** rather than posting a fact of the wrong shape. That shrug is
-   earned, not automatic: when the engine never found the subject at all
-   (no article, no sources, the network down) it returns nothing, exactly as
-   before — which is what lets the persona take *"how far to the next
-   stop"*, a question for the streamer that merely looks encyclopedic. "How
-   long *is* the bridge" and "how long *ago*" are not duration questions and
-   are untouched; "what temperature does condensation stop" keeps its
-   standing exemption (its honest answer is "the dew point").
+   how-long question wants a **duration** ("30 to 40 minutes", "13:10");
+   *how far* a **distance**; *how much does it cost* a **price**; *how hot /
+   how cold* a **temperature**; *how heavy* a **weight**. A line of the
+   wrong kind is rejected on every path — the engine's model answer, the
+   Wikipedia records miner and the article-facts path — judged on the
+   trimmed line that would actually post. With no such figure in any source
+   the engine returns **nothing** (never a shrug that would stand in front
+   of the chat model, never the wrong-kind fact). "How long *is* the bridge"
+   and "how long *ago*" are not duration questions; "what temperature does
+   condensation stop" keeps its standing exemption ("the dew point").
 
 ### A thinking model narrating instead of answering
 

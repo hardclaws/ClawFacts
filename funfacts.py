@@ -4015,8 +4015,7 @@ def _question_sources(question: str, options: dict) -> list:
     return out[:8]
 
 
-def _answer_question(question: str, opts: dict, limit: int,
-                     subject_found: bool = False):
+def _answer_question(question: str, opts: dict, limit: int):
     """Answer a question from what a search actually returned.
 
     The model path returns None for many reasons - no model, a dead model
@@ -4027,19 +4026,14 @@ def _answer_question(question: str, opts: dict, limit: int,
     whenever the model path has nothing. A broken model must not turn an
     answerable question into a decline.
 
-    None means 'the engine does not know' - and the bot relies on that:
-    it is what lets the persona take 'how far to the next stop', a
-    question for the streamer that merely LOOKS encyclopedic. So the
-    'no figure of that kind' shrug below is only earned when the engine
-    demonstrably had the subject in hand but not the figure: the fact
-    path accepted an article for it (subject_found), or the model
-    answered about it with the wrong kind of figure. The records miner's
-    hit does not count - its on-topic test is word overlap, and 'next
-    stop' overlaps 'Next Stop (film)'. Nothing found at all stays None,
-    as it always did.
+    None means 'the engine does not know', and the bot relies on that:
+    a mention or !ask that gets None here goes on to the chat model,
+    which answers general knowledge from what it knows. So a how-long
+    question whose sources hold no duration ends here as None - never
+    as the race's distance, and never as a shrug that would stand in
+    front of a model that knows the answer.
     """
-    state = {}
-    result = _answer_question_llm(question, opts, limit, state)
+    result = _answer_question_llm(question, opts, limit)
     if result:
         return result
     if _SPECIFIC_Q.search(question):
@@ -4058,35 +4052,21 @@ def _answer_question(question: str, opts: dict, limit: int,
             return {"place": wplace or _question_place(question),
                     "facts": facts[:4], "kind": kind}
     kind = answer_kind(question)
-    if kind and (subject_found or state.get("wrong_kind")):
-        # A how-long / how-far / how-much question about a subject the
-        # sources DO cover, with no figure of that kind in any of them:
-        # say so. 'couldn't find any fun facts' is the wrong shrug for a
-        # question that never asked for one, and a fact of the wrong
-        # kind is worse than either.
+    if kind:
         print(f"[funfacts] no {kind[0]} for the question in any source - "
-              f"saying so rather than posting a fact of the wrong kind",
+              f"nothing posted; the chat model gets the question",
               flush=True)
-        return {"place": _question_place(question), "_ttl": _MISS_TTL,
-                "facts": [f"I couldn't find a straight {kind[0]} for that "
-                          f"in my sources."]}
     return None
 
 
-def _answer_question_llm(question: str, opts: dict, limit: int,
-                         state: dict = None):
+def _answer_question_llm(question: str, opts: dict, limit: int):
     """The model's attempt: sources in, one grounded answer out, or None.
 
     opts["_skip_llm"] is set by !ask when the chat call just timed out on
     this same model: stacking the question call (a BIGGER prompt - it
     carries the sources) on a model that just proved too slow is a
     guaranteed extra timeout. Declining here falls straight through to
-    the records miner.
-
-    state, when given, is filled in for the caller: state["wrong_kind"]
-    is set when the model answered about the subject but with the wrong
-    kind of figure (a distance for a how-long question) - the signal
-    that the sources cover the subject and simply lack the figure."""
+    the records miner."""
     if opts.get("_skip_llm"):
         return None
     try:
@@ -4180,8 +4160,6 @@ def _answer_question_llm(question: str, opts: dict, limit: int,
             if fact and not answers_kind(fact, question):
                 print(f"[funfacts] answer is not a "
                       f"{answer_kind(question)[0]}: {fact[:80]!r}", flush=True)
-                if state is not None:
-                    state["wrong_kind"] = True
                 continue
             if fact:
                 lines.append(fact)
@@ -4275,7 +4253,6 @@ def get_funfact(location: str, options=None):
         # its first line - a distance - as the answer to a how-long
         # question. An article's facts answer a question only when one
         # of them is the kind of figure asked for.
-        subject_found = False
         if (result and result.get("facts") and not result.get("kind")
                 and answer_kind(location)):
             # Judged on what would POST (the trimmed line): a figure in
@@ -4288,9 +4265,6 @@ def get_funfact(location: str, options=None):
                 print(f"[funfacts] the fact path's lines carry no "
                       f"{answer_kind(location)[0]} for the question - "
                       f"answering it properly", flush=True)
-                # The article IS about the thing asked - the question
-                # path may say 'no such figure' rather than stay silent.
-                subject_found = True
                 result = None
         # 4. Not a place and not a thing with an article - a question. Answer
         #    it from the search results, grounded in them, rather than saying
@@ -4303,8 +4277,7 @@ def get_funfact(location: str, options=None):
         # _lookup_all found nothing there is nothing to flavour anyway.
         if (opts.get("answer_questions", True)
                 and (result is None or not result.get("facts"))):
-            answered = _answer_question(location.strip(), opts, limit,
-                                        subject_found=subject_found)
+            answered = _answer_question(location.strip(), opts, limit)
             if answered:
                 result = answered
         with _cache_lock:

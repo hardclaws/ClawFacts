@@ -818,6 +818,115 @@ def test_leaked_reasoning_is_never_posted():
           "right instruction, never posted, and named after three leaks")
 
 
+def test_general_knowledge_goes_to_the_model_not_the_engine():
+    """Live-fire, twice on one night: 'Docbot whats the avg time for
+    someone to run 5k' and 'Docbot how long it take to run 5k home
+    boy?' were routed at the fact engine - which posted a Reddit thread
+    title, then the race's DISTANCE. Neither is an encyclopedia
+    question: there is no article to look up for a typical 5K time.
+    The chat model knows the answer and was never asked. General
+    knowledge (durations, rates, typical values, how-tos, explanations)
+    now goes to the model, told what kind of ask it is; the engine keeps
+    NAMED things ('what is a bongo twist', 'how tall is Mount Everest'),
+    records ('how many trailers can a truck pull') and live data. If the
+    model declines, the engine still gets its try - a figure of the
+    right kind or nothing."""
+    names = ("doc", "docbot", "truckingwithdocbot")
+    for q in ("whats the avg time for someone to run 5k",
+              "how long it take to run 5k home boy?",
+              "Docbot how long it take to run 5k home boy?",
+              "how long does it take to run a 5k",
+              "how much does a gallon of diesel weigh",
+              "how far can a truck go on a tank", "how fast can a semi go",
+              "how often should you change oil", "why is the sky blue",
+              "how do air brakes work", "what happens if you run out of def",
+              "whats the legal weight limit for a semi"):
+        assert chatai.knowledge_question(q, names), q
+        assert not chatai.factual_question(q, names), q
+    for q in ("what is a bongo twist", "when was the eiffel tower built",
+              "who won the 1998 world cup", "how long is the Golden Gate Bridge",
+              "how tall is Mount Everest", "how old is Willie Nelson",
+              "whats the longest truck in the world",
+              "how many trailers can a truck pull", "how long is a marathon",
+              "how long is the amazon river", "what is the dew point",
+              "which state has the most truck stops",
+              "docbot weather in paris?",
+              "who got into a helicopter crash today in California",
+              "what time is sunrise today in vandalia"):
+        assert not chatai.knowledge_question(q, names), q
+        assert chatai.factual_question(q, names), q
+    for q in ("whats your favorite truck", "how do you feel about donuts",
+              "how long have you been driving", "how are you today"):
+        assert not chatai.factual_question(q, names), q
+
+    b = _bot(llm_api_key="k")
+    b._distill = lambda nick, lines: None
+    logs, prompts, engine = [], [], []
+    b._log = logs.append
+    orig_fact, orig_reply = bot_mod.get_funfact, llm.chat_reply
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or {
+        "place": "5K run",
+        "fact": "The 5K run is a long-distance road running competition "
+                "over a distance of five kilometres (3.107 mi)."})
+
+    def model(system, user, cfg=None, **k):
+        prompts.append(user)
+        if "avg time" in user.lower():
+            return ("Most folks finish a 5K somewhere in the 30 to 40 "
+                    "minute range; around 34 is a fair average.")
+        if "does it take" in user.lower():
+            return ("Beginners land near 35 minutes; regular joggers "
+                    "closer to 25.")
+        return ("Call it half an hour to forty minutes for most people. "
+                "Quicker if you have been training.")
+
+    llm.chat_reply = model
+    try:
+        # both live questions: the model answers, the engine is never asked
+        for msg in ("Docbot whats the avg time for someone to run 5k",
+                    "Docbot how long it take to run 5k home boy?"):
+            b._chat_ai_mention_last = 0.0
+            b._chat_ai_mention_by.clear()
+            b._on_message("kvack", "#t", msg, "kvack", "")
+            _drain(b)
+        assert len(b.said) == 2, b.said
+        assert "30 to 40 minute" in b.said[0], b.said
+        assert "half an hour to forty" in b.said[1], b.said
+        assert engine == [], engine
+        assert all("general-knowledge question" in p for p in prompts), \
+            prompts
+        assert sum("the model answers it, not the fact engine" in l
+                   for l in logs) == 2, logs
+        # !ask takes the same route
+        b._reply_ask("kvack", "how long does it take to run a 5k")
+        assert len(b.said) == 3 and "35 minutes" in b.said[2], b.said
+        assert engine == [], engine
+        # a NAMED thing still goes to the engine first
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("kvack", "#t", "doc what is a bongo twist", "kvack", "")
+        _drain(b)
+        assert engine == ["what is a bongo twist"], engine
+        # the model declines a knowledge question: the engine gets its
+        # try, and posts only a figure of the right kind - never the
+        # distance
+        llm.chat_reply = lambda s, u, c=None, **k: "NOTHING TO SAY"
+        engine.clear()
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("kvack", "#t", "Docbot how long it take to run 5k "
+                      "home boy?", "kvack", "")
+        _drain(b)
+        assert engine == ["how long it take to run 5k home boy?"], engine
+        assert len(b.said) == 5 and "3.107" in b.said[-1], b.said
+        assert any("the fact engine answered it" in l for l in logs), logs
+    finally:
+        bot_mod.get_funfact = orig_fact
+        llm.chat_reply = orig_reply
+    print("[PASS] general knowledge ('how long does it take to run 5k') "
+          "goes to the model; the engine keeps named things and live data")
+
+
 def test_overheard_questions_never_get_funfacts():
     """Live-fire: 'Where ya cuttin thru with Illinois?' was asked of the
     ROOM - and the chime path answered it with a FunFact about traffic
@@ -2310,6 +2419,7 @@ def main():
     test_the_follower_count_is_one_question_away()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
+    test_general_knowledge_goes_to_the_model_not_the_engine()
     test_mods_can_switch_the_bots_voice()
     test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()

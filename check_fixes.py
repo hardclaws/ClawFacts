@@ -1862,12 +1862,62 @@ def main() -> int:
         finally:
             _llm.chat_reply = saved
 
+    def _general_knowledge_goes_to_the_model():
+        """'whats the avg time for someone to run 5k' / 'how long it
+        take to run 5k' are general knowledge the chat model answers
+        from what it knows - not encyclopedia lookups. They were routed
+        at the fact engine (a Reddit thread title, then the race's
+        distance). Now they reach the model, told what kind of ask it
+        is; named things and live data still go to the engine first."""
+        import chatai as _ch
+        import bot as _bot
+        import llm as _llm
+        if not callable(getattr(_ch, "knowledge_question", None)):
+            return False
+        names = ("doc", "docbot")
+        for q in ("whats the avg time for someone to run 5k",
+                  "how long it take to run 5k home boy?",
+                  "why is the sky blue", "how do air brakes work"):
+            if not _ch.knowledge_question(q, names) \
+                    or _ch.factual_question(q, names):
+                return False
+        for q in ("what is a bongo twist", "how tall is Mount Everest",
+                  "how many trailers can a truck pull",
+                  "docbot weather in paris?"):
+            if _ch.knowledge_question(q, names) \
+                    or not _ch.factual_question(q, names):
+                return False
+        b = _scratch_bot(llm_api_key="k")
+        b._distill = lambda *a, **k: None
+        said, prompts, engine = [], [], []
+        b._say = said.append
+        saved = (_bot.get_funfact, _llm.chat_reply)
+        _bot.get_funfact = lambda q, o: (engine.append(q) or None)
+        _llm.chat_reply = lambda s, u, c=None, **k: (
+            prompts.append(u) or "Most people finish a 5K in 30 to 40 "
+                                 "minutes; around 34 is typical.")
+        try:
+            b._on_message("kvack", "#c", "Docbot how long it take to run "
+                          "5k home boy?", "kvack", "")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+            return (said == ["@kvack Most people finish a 5K in 30 to 40 "
+                             "minutes; around 34 is typical."]
+                    and engine == []
+                    and any("general-knowledge question" in p
+                            for p in prompts))
+        finally:
+            _bot.get_funfact, _llm.chat_reply = saved
+
     def _answers_are_the_kind_asked_for():
         """'whats the avg time to run 5k' -> a Reddit thread title (the
         same question, asked back); 'how long it take to run 5k' -> the
         race's DISTANCE. A question is never a source or an answer, and
-        a how-long / how-far / how-much question is answered only by a
-        line carrying that kind of figure - or an honest 'no figure'."""
+        the engine posts for a how-long / how-far / how-much question
+        only a line carrying that kind of figure - else nothing, so the
+        chat model gets the question."""
         import llm as _llm
         if not hasattr(funfacts, "answer_kind") \
                 or not hasattr(funfacts, "_is_forum_title"):
@@ -1905,8 +1955,7 @@ def main() -> int:
                 funfacts._cache.clear()
             got = funfacts.get_funfact(Q, {"llm_api_key": "k",
                                            "max_fact_chars": 200})
-            return bool(got) and got["fact"].startswith(
-                "I couldn't find a straight duration")
+            return got is None
         finally:
             (funfacts._http_get_json, _llm.is_configured,
              _llm.any_configured, _llm.answer_question) = saved
@@ -2635,6 +2684,8 @@ def main() -> int:
              "funfacts.py").read_text(encoding="utf-8")),
         ("a how-long question gets a duration, never a distance or a "
          "question", _answers_are_the_kind_asked_for()),
+        ("general knowledge ('how long to run 5k') is the chat model's "
+         "question, not the fact engine's", _general_knowledge_goes_to_the_model()),
         ("a model narrating its reasoning is caught, retried and never posted",
          _leaked_reasoning_is_caught()
          and "Never narrate, plan or explain" in __import__(
