@@ -50,6 +50,7 @@ DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
 OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # weather + solar
 OPEN_METEO_GEOCODE_API = "https://geocoding-api.open-meteo.com/v1/search"
+WEATHERAPI_API = "https://api.weatherapi.com/v1/current.json"  # needs a key
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
 TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
@@ -3277,7 +3278,116 @@ def _weather_number(value):
     return number if math.isfinite(number) else None
 
 
-def _weather_answer(question: str):
+def _weatherapi_answer(place: str, options: dict) -> dict | None:
+    """Current conditions from WeatherAPI.com, or None to fall back.
+
+    Used when ``weatherapi_key`` is set (weatherapi.com, free tier). One
+    call does the geocoding and the conditions together, and the reply is
+    the sentence the channel asked for:
+
+        it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F (17°C).
+        Feels like 61°F (16°C). Wind is blowing from the SW at 4 mph
+        (7 km/h). 61% humidity. Visibility: 6 miles (10 km).
+        Precipitation: 0.0 in (0.0 mm).
+
+    None means "let Open-Meteo answer": no key, the key was rejected, the
+    place was not found, or the service is down. The caller logs why.
+    """
+    key = (options.get("weatherapi_key") or "").strip()
+    if not key:
+        return None
+    try:
+        data = _http_get_json(WEATHERAPI_API,
+                              {"key": key, "q": place, "aqi": "no"},
+                              timeout=10)
+    except urllib.error.HTTPError as exc:
+        # 400 = no matching location (code 1006), 401/403 = key trouble.
+        # Both are worth a log line; neither should mute the weather.
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8", "replace")) \
+                .get("error", {}).get("message", "")
+        except Exception:
+            pass
+        print(f"[funfacts] weatherapi.com HTTP {exc.code}"
+              f"{': ' + detail if detail else ''} - falling back to "
+              f"Open-Meteo", flush=True)
+        return None
+    except Exception as exc:
+        print(f"[funfacts] weatherapi.com error: {exc!r} - falling back to "
+              f"Open-Meteo", flush=True)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("current"),
+                                                    dict):
+        print("[funfacts] weatherapi.com returned no current conditions - "
+              "falling back to Open-Meteo", flush=True)
+        return None
+    loc = data.get("location") if isinstance(data.get("location"),
+                                             dict) else {}
+    cur = data["current"]
+    condition = cur.get("condition") if isinstance(cur.get("condition"),
+                                                   dict) else {}
+    temp_f = _weather_number(cur.get("temp_f"))
+    if temp_f is None:
+        print("[funfacts] weatherapi.com returned no temperature - falling "
+              "back to Open-Meteo", flush=True)
+        return None
+
+    # The location as the API resolved it: 'Wilkes-Barre, Pennsylvania'
+    # at home, 'Paris, France' abroad - the country only when it is not
+    # the channel's own.
+    name = str(loc.get("name") or place).strip()
+    region = str(loc.get("region") or "").strip()
+    country = str(loc.get("country") or "").strip()
+    where = name
+    if region and region.lower() != name.lower():
+        where += f", {region}"
+    if country and country.lower() not in ("united states of america",
+                                           "usa", "united states") \
+            and country.lower() not in (name.lower(), region.lower()):
+        where += f", {country}"  # 'Paris, Ile-de-France, France'
+
+    def both(imp, met, unit_i, unit_m, digits=0):
+        i = _weather_number(imp)
+        m = _weather_number(met)
+        if i is None:
+            return None
+        text = f"{i:.{digits}f}{unit_i}"
+        if m is not None:
+            text += f" ({m:.{digits}f}{unit_m})"
+        return text
+
+    text = str(condition.get("text") or "").strip() or "unknown conditions"
+    pieces = [f"it is currently {text} in {where}.",
+              f"{both(temp_f, cur.get('temp_c'), '°F', '°C')}."]
+    feels = both(cur.get("feelslike_f"), cur.get("feelslike_c"), "°F", "°C")
+    if feels:
+        pieces.append(f"Feels like {feels}.")
+    wind = both(cur.get("wind_mph"), cur.get("wind_kph"), " mph", " km/h")
+    if wind:
+        wind_dir = str(cur.get("wind_dir") or "").strip()
+        pieces.append((f"Wind is blowing from the {wind_dir} at {wind}."
+                       if wind_dir else f"Wind is {wind}."))
+    humidity = _weather_number(cur.get("humidity"))
+    if humidity is not None:
+        pieces.append(f"{humidity:.0f}% humidity.")
+    vis = both(cur.get("vis_miles"), cur.get("vis_km"), " miles", " km")
+    if vis:
+        pieces.append(f"Visibility: {vis}.")
+    precip = both(cur.get("precip_in"), cur.get("precip_mm"), " in", " mm",
+                  digits=1)
+    if precip:
+        pieces.append(f"Precipitation: {precip}.")
+    fact = " ".join(pieces)
+    print(f"[funfacts] current weather for {where} (weatherapi.com): {fact}",
+          flush=True)
+    # 'sentence' tells the bot to post this as a line addressed to the
+    # asker ('kvack, it is currently...') rather than under a header.
+    return {"place": where, "kind": "Weather", "_ttl": 300,
+            "facts": [fact], "sentence": True}
+
+
+def _weather_answer(question: str, options: dict = None):
     """Current conditions from Open-Meteo, or ``False`` when not weather.
 
     Weather search results routinely describe archive pages (the exact field
@@ -3292,6 +3402,13 @@ def _weather_answer(question: str):
     if not place:
         return {"place": "requested place", "kind": "Weather",
                 "facts": ["I need a city or town to check the weather."]}
+
+    # weatherapi.com first when a key is configured: one call, the
+    # channel's sentence format. Any trouble there falls through to the
+    # keyless Open-Meteo path below, so weather never goes quiet.
+    from_api = _weatherapi_answer(place, options or {})
+    if from_api is not None:
+        return from_api
 
     geo = _osm_geocode(place) or _open_meteo_geocode(place)
     label = place
@@ -3735,7 +3852,7 @@ def get_funfact(location: str, options=None):
         # go through a search snippet or an LLM. ``False`` means the specialist
         # did not recognise its query; a dict (including a transparent fetch
         # failure) is the whole answer.
-        weather = _weather_answer(location.strip())
+        weather = _weather_answer(location.strip(), opts)
         if weather is not False:
             result = weather
         else:
@@ -3788,7 +3905,8 @@ def get_funfact(location: str, options=None):
                 # call so the reply matches the place's most famous story.
                 entry = {"place": result["place"], "facts": list(result["facts"]),
                          "kind": result.get("kind"), "shown": 0, "t": now,
-                         "ttl": result.get("_ttl", _HIT_TTL)}
+                         "ttl": result.get("_ttl", _HIT_TTL),
+                         "sentence": bool(result.get("sentence"))}
             else:
                 entry = {"place": None, "facts": [], "shown": 0,
                          "t": now, "ttl": _MISS_TTL}
@@ -3819,9 +3937,15 @@ def get_funfact(location: str, options=None):
         entry["shown"] = shown + 1
         entry["last"] = fact
 
-    out = {"place": place, "fact": _fit_fact(fact, limit, opts)}
+    # A live-data sentence (weatherapi.com) is measured numbers, not prose
+    # to summarise: max_fact_chars must not hand it to the model or cut
+    # it mid-reading. The bot still fits it to the message limit.
+    out = {"place": place,
+           "fact": fact if entry.get("sentence") else _fit_fact(fact, limit, opts)}
     if entry.get("kind"):
         out["kind"] = entry["kind"]
+    if entry.get("sentence"):
+        out["sentence"] = True
     return out
 
 

@@ -9,6 +9,7 @@ import time
 import json
 import pathlib
 
+import chatai
 import funfacts
 
 
@@ -3177,6 +3178,153 @@ def test_sunrise_uses_live_clock_data_not_search_debris():
     print("[PASS] sunrise/sunset returns the actual local clock time")
 
 
+def test_weatherapi_answers_in_the_channels_sentence_when_a_key_is_set():
+    """The channel asked for weatherapi.com and one sentence to the asker:
+    '%user%, it is currently %condition% in %location%. %temp%. Feels like
+    %feelslike%. Wind is blowing from the %dir% at %wind%. %humidity%%
+    humidity. Visibility: %vis%. Precipitation: %precip%.' With
+    weatherapi_key set that is the reply - via a mention or !ask, whole
+    (max_fact_chars never trims a reading) and with metric alongside. No
+    key, a rejected key, an unknown place or an outage all fall back to
+    the keyless Open-Meteo path, so weather never goes quiet."""
+    import os
+    import tempfile
+    import urllib.error
+    import bot as bot_mod
+
+    wapi = {"location": {"name": "Wilkes-Barre", "region": "Pennsylvania",
+                         "country": "United States of America"},
+            "current": {"temp_c": 17.2, "temp_f": 63.0,
+                        "condition": {"text": "Clear", "code": 1000},
+                        "wind_mph": 4.3, "wind_kph": 6.8, "wind_dir": "SW",
+                        "precip_mm": 0.0, "precip_in": 0.0, "humidity": 61,
+                        "feelslike_c": 16.1, "feelslike_f": 61.0,
+                        "vis_km": 10.0, "vis_miles": 6.0}}
+    open_meteo = {"current": {
+        "temperature_2m": 63.0, "apparent_temperature": 61.0,
+        "relative_humidity_2m": 61, "precipitation": 0, "weather_code": 0,
+        "wind_speed_10m": 4.3, "wind_direction_10m": 230,
+        "wind_gusts_10m": 6}}
+    calls = []
+
+    def http(url, params=None, timeout=0):
+        calls.append((url, dict(params or {})))
+        if url == funfacts.WEATHERAPI_API:
+            return wapi
+        assert url == funfacts.OPEN_METEO_API, url
+        return open_meteo
+
+    def fresh(**over):
+        cfg = {**bot_mod.DEFAULTS, "nick": "TruckingWithDocBot",
+               "channel": "#t", "chat_ai_enabled": True,
+               "beef_state_path": os.path.join(tempfile.mkdtemp(), "b.json"),
+               "memory_db_path": os.path.join(tempfile.mkdtemp(), "m.db"),
+               "persona_state_path": os.path.join(tempfile.mkdtemp(),
+                                                  "p.json"),
+               "subgoal_state_path": os.path.join(tempfile.mkdtemp(),
+                                                  "s.json"), **over}
+        b = bot_mod.TwitchBot(cfg)
+        b.said = []
+        b._say = b.said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        return b
+
+    def clear():
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+
+    saved = (funfacts._http_get_json, funfacts._osm_geocode,
+             funfacts._lookup_all)
+    funfacts._http_get_json = http
+    funfacts._osm_geocode = lambda place: {
+        "name": "Wilkes-Barre", "state": "Pennsylvania",
+        "country": "United States", "lat": 41.25, "lon": -75.88}
+    funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a weather question reached generic search"))
+    want = ("it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F "
+            "(17°C). Feels like 61°F (16°C). Wind is blowing from the SW at "
+            "4 mph (7 km/h). 61% humidity. Visibility: 6 miles (10 km). "
+            "Precipitation: 0.0 in (0.0 mm).")
+    try:
+        clear()
+        # The exact live line, as a mention.
+        b = fresh(weatherapi_key="abc123")
+        b._do_chime("Hardclaws", "Docbot whats the weather in wilkes barre, pa")
+        assert b.said == [f"Hardclaws, {want}"], b.said
+        assert calls[-1][1] == {"key": "abc123", "q": "wilkes barre, pa",
+                                "aqi": "no"}, calls[-1]
+        # !ask reads the same (cached, 5 min) answer to its own asker,
+        # and terse phrasings reach the data too.
+        n = len(calls)
+        b._reply_ask("kvack", "whats the weather in wilkes barre, pa")
+        assert b.said[-1] == f"kvack, {want}" and len(calls) == n, b.said
+        b._reply_ask("kvack", "weather in wilkes barre, pa")
+        assert b.said[-1] == f"kvack, {want}", b.said
+        clear()
+        b = fresh(weatherapi_key="abc123", max_fact_chars=80)
+        b._do_chime("kvack", "docbot weather in wilkes barre, pa")
+        assert b.said == [f"kvack, {want}"], b.said
+        # A statement about weather is not hijacked by the data path.
+        assert not chatai.weather_question(
+            "doc the weather in texas is crazy", ["docbot", "doc"])
+        # Abroad the country is named; a city-state is not repeated.
+        clear()
+        wapi["location"].update(name="Paris", region="Ile-de-France",
+                                country="France")
+        b = fresh(weatherapi_key="abc123")
+        b._do_chime("kvack", "doc what's the weather in paris")
+        assert "in Paris, Ile-de-France, France. 63°F" in b.said[-1], b.said
+        clear()
+        wapi["location"].update(name="Singapore", region="Singapore",
+                                country="Singapore")
+        b = fresh(weatherapi_key="abc123")
+        b._do_chime("kvack", "doc weather in singapore?")
+        assert "Clear in Singapore. 63°F" in b.said[-1], b.said
+
+        # No key: the Open-Meteo reply exactly as before, headed.
+        clear()
+        b = fresh()
+        b._do_chime("Hardclaws", "Docbot whats the weather in wilkes barre, pa")
+        assert b.said == ["Weather | Wilkes-Barre, Pennsylvania: Currently "
+                          "63°F with clear skies; feels like 61°F; humidity "
+                          "61%; wind SW at 4 mph."], b.said
+        # A rejected key, an unknown place, a spent quota: same fallback.
+        for code, body in ((401, b'{"error":{"code":2006,"message":"API key '
+                                 b'is invalid."}}'),
+                           (400, b'{"error":{"code":1006,"message":"No '
+                                 b'matching location found."}}'),
+                           (403, b'{"error":{"code":2007,"message":"quota"}}')):
+            clear()
+
+            def failing(url, params=None, timeout=0, code=code, body=body):
+                if url == funfacts.WEATHERAPI_API:
+                    raise urllib.error.HTTPError(url, code, "x", {},
+                                                 io.BytesIO(body))
+                return http(url, params, timeout)
+
+            funfacts._http_get_json = failing
+            b = fresh(weatherapi_key="k")
+            b._do_chime("Hardclaws",
+                        "Docbot whats the weather in wilkes barre, pa")
+            assert b.said[-1].startswith(
+                "Weather | Wilkes-Barre, Pennsylvania: Currently 63°F"), \
+                (code, b.said)
+        # Everything down: the honest line, still headed Weather.
+        clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("down"))
+        b = fresh(weatherapi_key="k")
+        b._do_chime("Hardclaws", "Docbot whats the weather in wilkes barre, pa")
+        assert "couldn't fetch the current weather" in b.said[-1], b.said
+    finally:
+        (funfacts._http_get_json, funfacts._osm_geocode,
+         funfacts._lookup_all) = saved
+        clear()
+    print("[PASS] weatherapi.com answers as one sentence to the asker; "
+          "Open-Meteo stays the keyless fallback")
+
+
 def main():
     test_trim()
     test_trim_keeps_whole_sentences()
@@ -3281,6 +3429,7 @@ def main():
     test_spicy_mode_still_answers_questions()
     test_the_geocoder_may_not_substitute_a_different_place()
     test_weather_uses_current_data_not_an_archive_search_snippet()
+    test_weatherapi_answers_in_the_channels_sentence_when_a_key_is_set()
     test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0

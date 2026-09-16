@@ -1657,6 +1657,119 @@ def test_performances_have_a_subject_a_fallback_and_an_encore():
           "on 'encore', and never start unasked")
 
 
+def test_a_mods_announcement_answers_the_confused_room():
+    """Live-fire: a mod had the bot announce 'TruckingWithDoc is on the
+    phone, radio silence'. Two lines later a viewer said 'Your mic is
+    muted' / 'I assume because your codriver is sleeping' - and the bot
+    said nothing. Those lines were not addressed to it, so they were
+    ambient chimes: a 10% roll, five lines of recent chat and the
+    ten-minute cooldown the bot's own announcement had just started.
+    The one thing it knew for certain, it kept to itself.
+
+    Now a mod's announcement stands as a notice for chat_ai_notice_minutes:
+    anyone who sounds confused about the quiet stream - addressed to the
+    bot or not - gets it once, with no roll and no cooldown; the persona
+    sees it in every prompt while it stands; 'doc is back' clears it;
+    and a plain viewer cannot plant one."""
+    prompts = []
+    orig = llm.chat_reply
+
+    def reply(system, user, cfg, **kw):
+        prompts.append(user)
+        return "Copy that, hon - Doc's on the phone, radio silence for a bit."
+
+    llm.chat_reply = reply
+    b = _bot(llm_api_key="k")
+    try:
+        b._on_message("Hardclaws", "#t",
+                      "Docbot can you tell every one that @TruckingWithDoc "
+                      "is currently on the phone so we are in radio silence",
+                      "hardclaws", "moderator/1")
+        _drain(b)
+        assert b.said == ["@Hardclaws Copy that, hon - Doc's on the phone, "
+                          "radio silence for a bit."], b.said
+        # The exact two lines, seconds later: not addressed, cooldown
+        # running, room nearly empty - answered anyway, once.
+        b._on_message("Etchedchampion", "#t", "Your mic is muted",
+                      "etchedchampion", "")
+        _drain(b)
+        b._on_message("Etchedchampion", "#t",
+                      "I assume because your codriver is sleeping",
+                      "etchedchampion", "")
+        _drain(b)
+        assert b.said[1:] == [
+            "@Etchedchampion heads up: TruckingWithDoc is currently on the "
+            "phone so we are in radio silence"], b.said
+        # The relayed notice drops the @ so the man on the phone is not
+        # pinged every time it is repeated. Another confused viewer gets
+        # it; an unrelated line does not; a direct 'is his mic muted?'
+        # gets the certain answer rather than a persona guess.
+        b._on_message("kvack", "#t", "hello? can't hear anything",
+                      "kvack", "")
+        b._on_message("kvack", "#t", "is he afk", "kvack", "")
+        b._on_message("someone", "#t", "great climb earlier", "someone", "")
+        b._on_message("newguy", "#t", "docbot is his mic muted?",
+                      "newguy", "")
+        _drain(b)
+        assert [m.split(" ", 1)[0] for m in b.said[2:]] == [
+            "@kvack", "@newguy"], b.said
+        assert all(m.endswith("in radio silence") for m in b.said[2:])
+        # The persona is told the notice in every prompt while it stands.
+        b._chat_ai_mention_last = 0
+        prompts.clear()
+        b._on_message("kvack", "#t", "docbot hows your night going",
+                      "kvack", "")
+        _drain(b)
+        assert prompts and "STANDING NOTICE from the mods" in prompts[0] \
+            and "on the phone so we are in radio silence" in prompts[0], \
+            prompts[0][:300]
+        # 'doc is back' ends it: 'hello?' is ordinary chatter again.
+        b._chat_ai_mention_last = 0
+        b._on_message("Hardclaws", "#t", "docbot tell everyone doc is back",
+                      "hardclaws", "moderator/1")
+        _drain(b)
+        assert b._chat_ai_notice is None
+        before = len(b.said)
+        b._on_message("late", "#t", "hello? mic muted?", "late", "")
+        _drain(b)
+        assert len(b.said) == before, b.said[before:]
+
+        # A viewer cannot make the bot announce things; a story request
+        # is not a notice; the switch turns it off; notices expire.
+        b = _bot(llm_api_key="k")
+        b._on_message("troll", "#t",
+                      "docbot tell everyone that the stream is over go home",
+                      "troll", "")
+        b._on_message("Hardclaws", "#t",
+                      "docbot tell everyone about the time you drove to "
+                      "alaska", "hardclaws", "moderator/1")
+        _drain(b)
+        assert b._chat_ai_notice is None
+        b = _bot(llm_api_key="k", chat_ai_notice_minutes=0)
+        b._on_message("Hardclaws", "#t",
+                      "docbot tell everyone doc is on the phone",
+                      "hardclaws", "moderator/1")
+        _drain(b)
+        assert b._chat_ai_notice is None
+        b = _bot(llm_api_key="k", chat_ai_notice_minutes=1)
+        b._on_message("TruckingWithDoc", "#t",
+                      "doc let chat know I'm on the phone, back in ten",
+                      "truckingwithdoc", "broadcaster/1")
+        _drain(b)
+        # First person is the MOD's, not the bot's.
+        assert b._chat_ai_notice[0] == \
+            "TruckingWithDoc is on the phone, back in ten", b._chat_ai_notice
+        b._chat_ai_notice = (b._chat_ai_notice[0], time.time() - 61, set())
+        before = len(b.said)
+        b._on_message("kvack", "#t", "your mic is muted", "kvack", "")
+        _drain(b)
+        assert len(b.said) == before and b._chat_ai_notice is None
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a mod's announcement answers 'your mic is muted' - once "
+          "each, no roll, no cooldown - until 'doc is back'")
+
+
 def main():
     test_a_mention_gets_one_bounded_reply()
     test_chime_ins_are_gated()
@@ -1690,6 +1803,7 @@ def main():
     test_a_performance_is_cleaned_line_by_line()
     test_sing_me_a_song_gets_a_song_over_several_messages()
     test_performances_have_a_subject_a_fallback_and_an_encore()
+    test_a_mods_announcement_answers_the_confused_room()
     print("\nALL PASSED \u2714")
     return 0
 

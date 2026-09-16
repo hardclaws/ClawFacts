@@ -21,6 +21,7 @@ FunFact | Milford, Pennsylvania: Milford was founded in 1796 by Judge John Biddi
    - **DuckDuckGo Instant Answers** — fallback if Wikipedia fails or rate-limits.
    - **Geocoder + coordinate search** — if text search finds nothing (very remote spots), the bot geocodes the name with OpenStreetMap's Nominatim (free, no key, covers even tiny villages), retries with the canonical "Name, State", then uses Wikipedia's coordinate search for the nearest notable place.
    - **Open-Meteo live clock data** — sunrise and sunset questions use the requested place's coordinates and timezone, not search-result snippets or an LLM.
+   - **weatherapi.com (optional key) / Open-Meteo** — weather questions are live readings, never snippets; see [Weather](#weather).
    - **`spicy_facts.json`** — a built-in database of verified adult-rated facts (used only when spice="spicy").
    - **Google (optional)** — with your own API key + search-engine ID, searches
      the web with `safe=off` for adult-rated local stories.
@@ -122,6 +123,7 @@ Edit `config.json`:
 | `llm_base_url`     | LLM API base URL (default `https://api.groq.com/openai/v1`; Ollama = `http://localhost:11434/v1`). |
 | `llm_model`        | LLM model (default `openai/gpt-oss-120b`; Ollama e.g. `llama3.1:8b`). |
 | `serper_api_key` | **Recommended.** Serper web-search key (free tier 2,500 queries). |
+| `weatherapi_key`   | Optional [weatherapi.com](https://www.weatherapi.com/) key (free tier 1M calls/month). Set it and weather questions are answered as one sentence to the asker — see [Weather](#weather). Empty = the keyless Open-Meteo reply. |
 | `google_api_key`   | Legacy Google Custom Search key (closed to new customers).     |
 | `google_cx`        | Optional Google search-engine ID (from programmablesearchengine.google.com). |
 | `max_message_chars`| Hard cap for a chat message (Twitch caps ~500; default 450).   |
@@ -281,12 +283,13 @@ line.
   answered directly from Open-Meteo — for example,
   `Sunrise | Vandalia, Illinois: Sunrise is expected around 6:38 AM local time today.`
   — instead of accepting a search snippet that merely says times are
-  local. Weather questions now take the same direct-data route, including
-  temperature, apparent temperature, humidity and wind from Open-Meteo; for
-  example, `Weather | Marshall, Illinois: Currently 68°F with partly cloudy
-  skies; feels like 66°F; humidity 59%; wind WSW at 12 mph.` An archive-page
-  snippet such as “weather reports from the last weeks” can never become a
-  current-weather answer. When the records miner backs a
+  local. Weather questions take the same direct-data route — one sentence
+  from weatherapi.com when `weatherapi_key` is set, otherwise Open-Meteo's
+  `Weather | Marshall, Illinois: Currently 68°F with partly cloudy skies;
+  feels like 66°F; humidity 59%; wind WSW at 12 mph.` (see
+  [Weather](#weather)). An archive-page snippet such as “weather reports
+  from the last weeks” can never become a current-weather answer. When the
+  records miner backs a
   superlative question, the article it digs through must actually be
   about the subject (a US freight-lane question once came back with
   Ivory Coast's GDP — the search loved "coat"~"Côte" and "west
@@ -445,6 +448,68 @@ Bot:   Where the diesel goes, nobody knows.            (4 s later)
   between lines. Empty (the default) means the same gap as `beef_act_delay`;
   `0` posts the whole piece at once. A performance counts as the mention reply,
   so the usual `chat_ai_mention_cooldown` applies afterwards.
+
+### Weather
+
+"Docbot whats the weather in wilkes barre, pa" is a live reading, never a
+search snippet and never a persona guess. Any phrasing with a place reaches
+the data — `docbot weather in scranton?`, `doc hows the weather in paris`,
+`!ask weather in miami` — while a remark like "the weather in texas is
+crazy" stays ordinary conversation.
+
+- **With `weatherapi_key`** (free at [weatherapi.com](https://www.weatherapi.com/)),
+  the answer is one sentence addressed to whoever asked, in the shape the
+  channel asked for:
+
+  ```
+  Hardclaws, it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F (17°C). Feels like 61°F (16°C). Wind is blowing from the SW at 4 mph (7 km/h). 61% humidity. Visibility: 6 miles (10 km). Precipitation: 0.0 in (0.0 mm).
+  ```
+
+  Condition, place as weatherapi.com resolved it (the country is added outside
+  the US), temperature, feels-like, wind direction and speed, humidity,
+  visibility and precipitation — imperial first, metric in brackets. The
+  sentence is never trimmed by `max_fact_chars` (it is data, not prose) and is
+  cached for five minutes per place. `WEATHERAPI_KEY` in the environment works
+  too.
+- **Without a key** — or when the key is rejected, the place is unknown to
+  weatherapi.com, or the service is down — the keyless Open-Meteo path answers
+  exactly as before: `Weather | Wilkes-Barre, Pennsylvania: Currently 63°F with
+  clear skies; feels like 61°F; humidity 61%; wind SW at 4 mph.` Every fallback
+  is logged with the reason (`weatherapi.com HTTP 401: API key is invalid -
+  falling back to Open-Meteo`). Weather never goes quiet over a key problem.
+
+### "Your mic is muted" — a mod's announcement stands as a notice
+
+Live-fire: a mod asked "Docbot can you tell every one that @TruckingWithDoc
+is currently on the phone so we are in radio silence", the bot answered in
+character — and two lines later a viewer said "Your mic is muted" / "I
+assume because your codriver is sleeping" and the bot said nothing. Those
+lines were not addressed to it, so they were ambient chime-ins: a 10% roll,
+five lines of recent chat, and the ten-minute `chat_ai_cooldown` the bot's
+own announcement had just started. The one thing it knew for certain, it
+kept to itself.
+
+Now an announcement a **mod or the broadcaster** hands the bot — "docbot tell
+everyone that ...", "doc let chat know ...", "docbot remind the folks ..." —
+is still answered in character, and is also kept as a **standing notice** for
+`chat_ai_notice_minutes` (default 20). While it stands:
+
+- anyone who sounds lost about the quiet stream — "your mic is muted",
+  "hello?", "can't hear you", "no audio", "is he afk?", "why so quiet" —
+  gets `@name heads up: TruckingWithDoc is currently on the phone so we are
+  in radio silence`, whether or not they addressed the bot, with **no chime
+  roll and no cooldown**. Each viewer is told once per notice, and the
+  relayed text drops the `@` so the man on the phone is not pinged every
+  time;
+- the persona sees the notice in every prompt, so "docbot hows your night"
+  is answered by someone who knows the stream is quiet and why;
+- "docbot tell everyone doc is back" (or "mic is back on", "unmuted") clears
+  it early, so "hello?" is ordinary chatter again.
+
+A plain viewer cannot plant a notice, a story request ("tell everyone about
+the time you drove to Alaska") is not one, and `chat_ai_notice_minutes: 0`
+turns the feature off. Every notice kept, repeated, or cleared is a line in
+the log.
 
 ### Changing the voice
 

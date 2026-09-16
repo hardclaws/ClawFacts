@@ -107,7 +107,8 @@ def system_prompt(persona: str = "") -> str:
 def user_prompt(lines: list, nick: str, text: str,
                 memories: list = None, quiet: bool = False,
                 max_lines: int = 15, max_memories: int = 8,
-                own: list = None, overheard: bool = False) -> str:
+                own: list = None, overheard: bool = False,
+                notice: str = None) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
@@ -138,6 +139,18 @@ def user_prompt(lines: list, nick: str, text: str,
         out.append("Do not recycle their phrasing, imagery or opener. Words "
                    "needed for the CURRENT topic are allowed. Do not end with "
                    "a question merely because the last line did.")
+        out.append("")
+    if notice:
+        # The one thing the bot knows for certain about right now: what
+        # a mod asked it to tell the room. Without it the persona
+        # guesses at 'is he afk?' - or worse, plays along with 'your
+        # mic is muted' as if it were news.
+        out.append("STANDING NOTICE from the mods (true right now): "
+                   f"{notice}")
+        out.append("If the message is about the stream being quiet, the "
+                   "mic, the audio, or where the streamer is, THIS is the "
+                   "answer - say it in your own words. Do not invent any "
+                   "other reason.")
         out.append("")
     if memories:
         out.append("What you remember about people here (from past chat,"
@@ -515,6 +528,101 @@ def note_request(text: str):
     return (at.group(1) if at else None, payload)
 
 
+#: 'docbot tell everyone that X', 'doc let chat know X', 'docbot can you
+#: tell every one that @Doc is on the phone' - a mod handing the bot an
+#: announcement to make. The payload after the verb is what is announced.
+_ANNOUNCE_ASK = re.compile(
+    r"\b(?:tell|inform|remind|let)\s+"
+    r"(?:every\s?one|everybody|chat|the\s+(?:room|chat|stream|folks|"
+    r"viewers|people)|(?:the\s+)?(?:folks|people|viewers|guys))"
+    r"(?:\s+know)?\b[\s:,-]*(?:that\b)?", re.IGNORECASE)
+
+#: What a viewer says when the stream has gone quiet on them and they do
+#: not know why: the muted mic, no audio, an unanswered hello, the
+#: streamer gone missing. The words come from live chat - the exact case
+#: was 'Your mic is muted' / 'I assume because your codriver is sleeping'
+#: two lines after the bot had announced radio silence. Kept narrow on
+#: purpose: while a notice stands, a match posts a line to someone who
+#: did not address the bot, so 'the baby is sleeping' must not fire.
+_STREAM_CONFUSION = re.compile(
+    # the mic / the audio
+    r"\b(?:mic(?:rophone)?|audio|sound|volume)\b.*"
+    r"\b(?:mute[ds]?|off|dead|gone|broke[n]?|not\s+work\w*|cut(?:ting)?\s+out|"
+    r"die[ds]?|drop\w*)\b"
+    r"|\b(?:mute[ds]?|no\s+(?:audio|sound|mic)|lost\s+(?:audio|sound|"
+    r"the\s+mic|him|her|you))\b"
+    r"|\bcan'?t\s+hear\b|\bcannot\s+hear\b|\bhear\s+(?:you|him|her|anything|"
+    r"nothing)\b"
+    # the quiet
+    r"|\bwhy\b.*\b(?:quiet|silent|gone|afk|away|disappear\w*)\b"
+    r"|\bwhere(?:'s|s|\s+is|\s+did|\s+are|\s+r)\b.*"
+    r"\b(?:go|went|gone|at|afk|away|quiet|silent|disappear\w*)\s*[?!.]*$"
+    r"|\b(?:so|went|gone|real|very|awful\w*|pretty)\s+quiet\b"
+    r"|\bradio\s+silence\b|\bdead\s+air\b"
+    # the person
+    r"|\b(?:is|are)\s+(?:he|she|they|doc|you|u)\s+(?:afk|away|gone|asleep|"
+    r"sleeping|napping|there|alive|ok|okay|still\s+here|on\s+the\s+phone|"
+    r"busy)\b"
+    r"|\b(?:he|she|doc|you|u)(?:'s|\s+is|\s+are|'re)\s+(?:asleep|sleeping|"
+    r"napping|on\s+the\s+phone|afk|away|gone|busy)\b"
+    r"|\b(?:your|his|her)\s+\w+\s+(?:is\s+)?(?:asleep|sleeping|napping)\b"
+    r"|\bhello+\?|\bhelloo+\b|\byou\s+there\b|\banyone\s+(?:there|home)\b",
+    re.IGNORECASE)
+
+#: A notice is a STATUS - someone is somewhere, something is off, back
+#: in ten. 'tell everyone about the time you drove to Alaska' is a story
+#: request and must not become the standing answer to 'hello?'.
+_NOTICE_STATUS = re.compile(
+    r"\b(?:is|are|am|was|were|will|won'?t|has|have|had|went|gone|going|"
+    r"back|away|afk|brb|busy|stepping|taking|leaving|on\s+the\s+phone|"
+    r"be\s+right\s+back|in\s+\d+|for\s+\d+|until|till|no\s+\w+)\b"
+    r"|'s\b|'re\b|'m\b|'ll\b", re.IGNORECASE)
+
+
+def announce_request(text: str, names=()):
+    """The announcement a mod asked the bot to make, or None.
+
+    'Docbot can you tell every one that @TruckingWithDoc is currently on
+    the phone so we are in radio silence' -> '@TruckingWithDoc is
+    currently on the phone so we are in radio silence'. Only the
+    payload; the caller decides who may hand the bot a notice (mods and
+    the broadcaster - a viewer cannot make the bot announce things)."""
+    t = strip_address(text, names)
+    m = _ANNOUNCE_ASK.search(t)
+    if not m:
+        return None
+    payload = t[m.end():].strip().rstrip(" ?!.")
+    if len(payload) < 8 or not _NOTICE_STATUS.search(payload):
+        return None
+    # A relayed notice must not re-ping the person it is about every
+    # time it is repeated - he is on the phone.
+    return re.sub(r"@(?=[A-Za-z0-9_])", "", payload)
+
+
+#: 'tell everyone doc is back' / 'mic is back on' / 'we're unmuted' ends
+#: the quiet rather than starting a new one.
+_NOTICE_OVER = re.compile(
+    r"\b(?:is|am|are|'s|'re|'m)\s+back\b|\bback\s+(?:now|online|on|live|"
+    r"in\s+the\s+(?:saddle|seat|chair))\b|\b(?:mic|audio|sound)(?:'s|\s+is)"
+    r"\s+(?:back\s+)?(?:on|up|working|fixed)\b|\bunmuted\b|\boff\s+the\s+"
+    r"phone\b|\bcall(?:'s|\s+is)\s+(?:over|done)\b|\bsilence(?:'s|\s+is)\s+"
+    r"over\b", re.IGNORECASE)
+
+
+def notice_clears(payload: str) -> bool:
+    """True when an announcement ENDS the quiet ('doc is back', 'mic is
+    back on'): the standing notice is dropped instead of replaced, or
+    'hello?' would get 'heads up: doc is back' for twenty minutes."""
+    return bool(_NOTICE_OVER.search(payload or ""))
+
+
+def stream_confusion(text: str) -> bool:
+    """True when a line reads like a viewer wondering why the stream has
+    gone quiet - the kind of line a standing notice answers."""
+    t = " ".join((text or "").split())
+    return bool(t) and bool(_STREAM_CONFUSION.search(t))
+
+
 def named_people(text: str) -> list:
     """Names a message might be about: @mentions as typed, plus
     capitalised words (display names are CamelCase - CyclingWithDoc).
@@ -696,6 +804,30 @@ def strip_address(text: str, names=()) -> str:
     return t
 
 
+#: A weather ask that is not shaped like trivia: 'docbot weather in
+#: paris?', 'doc hows the weather in wilkes barre, pa', 'is it raining
+#: in ohio'. Statements ('the weather in texas is crazy') do not match -
+#: they need a question mark or an asking verb up front.
+_WEATHER_ASK = re.compile(
+    r"^\s*(?:weather\b|(?:what|whats|what's|how|hows|how's|is|is it|"
+    r"tell me|check|give me|do you know|any idea)\b.*\bweather\b)",
+    re.IGNORECASE)
+
+
+def weather_question(text: str, names=()) -> bool:
+    """True when the text asks for the weather somewhere - live data the
+    engine reads from weatherapi.com / Open-Meteo, never something the
+    persona should guess at. Needs a place ('in/for/at <place>' at the
+    end) and a question shape: a question mark, or an asking start
+    ('weather in ...', 'hows the weather in ...')."""
+    t = strip_address(text, names).strip()
+    place, _kind = funfacts._weather_header(t)
+    if not place or _OPINION_Q.match(t):
+        # 'what do you think of the weather in paris' wants the persona.
+        return False
+    return t.endswith("?") or bool(_WEATHER_ASK.match(t))
+
+
 def factual_question(text: str, names=()) -> bool:
     """True when the text asks about a third-party thing the fact engine
     can look up - 'what is a bongo twist'. Questions about the bot
@@ -703,8 +835,12 @@ def factual_question(text: str, names=()) -> bool:
     False: those are the persona's job, and routing them at the fact
     engine would answer a question nobody asked. A leading address to
     the bot ('doc, what is a bongo twist') is stripped first - mentions
-    carry their trigger word."""
+    carry their trigger word. A weather ask with a place counts however
+    it is phrased ('docbot weather in paris?'): the persona guessing at
+    a live reading is the one answer worse than none."""
     t = strip_address(text, names)
+    if weather_question(t):
+        return True
     if not _FACTUAL_Q.match(t) or _OPINION_Q.match(t):
         return False
     return not _ABOUT_BOT.search(t)

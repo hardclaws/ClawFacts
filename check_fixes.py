@@ -1404,6 +1404,153 @@ def main() -> int:
         return said[:1] == ["@kvack Rolling down the I-80 line,"] \
             and len(said) == 4 and not said[1].startswith("@")
 
+    def _scratch_bot(**over):
+        """A TwitchBot on scratch state files, mute and off the network."""
+        import os as _os
+        import tempfile as _tf
+        import bot as _bot
+        b = _bot.TwitchBot(dict(
+            _bot.DEFAULTS, nick="TruckingWithDocBot", channel="#c",
+            chat_ai_enabled=True,
+            beef_state_path=_os.path.join(_tf.mkdtemp(), "bs.json"),
+            memory_db_path=_os.path.join(_tf.mkdtemp(), "m.db"),
+            persona_state_path=_os.path.join(_tf.mkdtemp(), "p.json"),
+            subgoal_state_path=_os.path.join(_tf.mkdtemp(), "sg.json"),
+            **over))
+        b._say = lambda *a, **k: None
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        return b
+
+    def _weather_is_one_sentence_from_weatherapi():
+        """With weatherapi_key set, a weather question is answered from
+        weatherapi.com as one sentence to the asker - 'kvack, it is
+        currently Clear in Wilkes-Barre, Pennsylvania. 63°F (17°C). Feels
+        like ... Wind is blowing from the SW at ... humidity. Visibility:
+        ... Precipitation: ...' - never trimmed by max_fact_chars. No key
+        (or a rejected one) keeps the Open-Meteo path exactly as it was."""
+        import io as _io
+        import urllib.error as _ue
+        import chatai as _ch
+        if not _ch.factual_question("docbot weather in paris?",
+                                    ("doc", "docbot")):
+            return False
+        wapi = {"location": {"name": "Wilkes-Barre", "region": "Pennsylvania",
+                             "country": "United States of America"},
+                "current": {"temp_c": 17.2, "temp_f": 63.0,
+                            "condition": {"text": "Clear"},
+                            "wind_mph": 4.3, "wind_kph": 6.8, "wind_dir": "SW",
+                            "precip_mm": 0.0, "precip_in": 0.0,
+                            "humidity": 61, "feelslike_c": 16.1,
+                            "feelslike_f": 61.0, "vis_km": 10.0,
+                            "vis_miles": 6.0}}
+        meteo = {"current": {
+            "temperature_2m": 63.0, "apparent_temperature": 61.0,
+            "relative_humidity_2m": 61, "precipitation": 0,
+            "weather_code": 0, "wind_speed_10m": 4.3,
+            "wind_direction_10m": 230, "wind_gusts_10m": 6}}
+
+        def live(url, params=None, timeout=0):
+            if url == funfacts.WEATHERAPI_API:
+                if params.get("key") != "good":
+                    raise _ue.HTTPError(url, 401, "x", {}, _io.BytesIO(
+                        b'{"error":{"code":2006,"message":"invalid"}}'))
+                return wapi
+            if url == funfacts.OPEN_METEO_API:
+                return meteo
+            raise AssertionError(url)
+
+        saved = (funfacts._http_get_json, funfacts._osm_geocode,
+                 funfacts._lookup_all)
+        funfacts._http_get_json = live
+        funfacts._osm_geocode = lambda _p: {
+            "name": "Wilkes-Barre", "state": "Pennsylvania",
+            "country": "United States", "lat": 41.25, "lon": -75.88}
+        funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("weather reached search"))
+        said = []
+        try:
+            out = []
+            for key, limit in (("good", 80), ("", 200), ("bad", 200)):
+                with funfacts._cache_lock:
+                    funfacts._cache.clear()
+                b = _scratch_bot(weatherapi_key=key, max_fact_chars=limit)
+                said.clear()
+                b._say = said.append
+                b._do_chime("kvack",
+                            "Docbot whats the weather in wilkes barre, pa")
+                out.append(said[-1] if said else "")
+        finally:
+            (funfacts._http_get_json, funfacts._osm_geocode,
+             funfacts._lookup_all) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+        want = ("kvack, it is currently Clear in Wilkes-Barre, Pennsylvania. "
+                "63°F (17°C). Feels like 61°F (16°C). Wind is blowing from "
+                "the SW at 4 mph (7 km/h). 61% humidity. Visibility: 6 miles "
+                "(10 km). Precipitation: 0.0 in (0.0 mm).")
+        meteo_line = ("Weather | Wilkes-Barre, Pennsylvania: Currently 63°F "
+                      "with clear skies; feels like 61°F; humidity 61%; wind "
+                      "SW at 4 mph.")
+        return out == [want, meteo_line, meteo_line]
+
+    def _a_notice_answers_the_confused_room():
+        """A mod had the bot announce 'Doc is on the phone, radio silence';
+        two lines later 'Your mic is muted' got nothing - not addressed,
+        so an ambient chime behind a 10% roll and a cooldown the
+        announcement itself had started. Now the announcement stands as
+        a notice: anyone confused about the quiet stream gets it once,
+        no roll, no cooldown; the persona sees it; 'doc is back' clears
+        it; a plain viewer cannot plant one."""
+        import chatai as _ch
+        import llm as _llm
+        orig = _llm.chat_reply
+        _llm.chat_reply = lambda s, u, c, **k: "Copy that, radio silence."
+        said = []
+        try:
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+
+            def pump():
+                while not b._jobs.empty():
+                    nick, login, badges, command, argument = b._jobs.get()
+                    if command == "chime":
+                        b._do_chime(nick, argument)
+                    elif command == "say":
+                        b._say(argument)
+
+            b._on_message("Hardclaws", "#c",
+                          "Docbot can you tell every one that @TruckingWithDoc"
+                          " is currently on the phone so we are in radio "
+                          "silence", "hardclaws", "moderator/1")
+            pump()
+            b._on_message("Etched", "#c", "Your mic is muted", "etched", "")
+            pump()
+            b._on_message("Etched", "#c",
+                          "I assume because your codriver is sleeping",
+                          "etched", "")
+            b._on_message("someone", "#c", "great climb earlier",
+                          "someone", "")
+            pump()
+            if said != ["@Hardclaws Copy that, radio silence.",
+                        "@Etched heads up: TruckingWithDoc is currently on "
+                        "the phone so we are in radio silence"]:
+                return False
+            b._on_message("Hardclaws", "#c", "docbot tell everyone doc is "
+                          "back", "hardclaws", "moderator/1")
+            pump()
+            if b._chat_ai_notice is not None:
+                return False
+            b = _scratch_bot(llm_api_key="k")
+            b._on_message("troll", "#c", "docbot tell everyone that the "
+                          "stream is over go home", "troll", "")
+            pump()
+            return b._chat_ai_notice is None \
+                and _ch.stream_confusion("hello? no audio") \
+                and not _ch.stream_confusion("the baby is sleeping")
+        finally:
+            _llm.chat_reply = orig
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -2049,6 +2196,15 @@ def main() -> int:
          _sing_me_a_song_is_a_song()
          and "chat_ai_perform_delay" in _bot_src
          and "chat_ai_perform_delay" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("weather is one sentence to the asker from weatherapi.com",
+         _weather_is_one_sentence_from_weatherapi()
+         and "weatherapi_key" in _bot_src
+         and "weatherapi_key" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("a mod's announcement answers 'your mic is muted'",
+         _a_notice_answers_the_confused_room()
+         and "chat_ai_notice_minutes" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")),
     ]
     width = max(len(name) for name, _ in checks)

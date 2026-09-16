@@ -242,6 +242,10 @@ DEFAULTS = {
     # poem, a story asked for by name ('docbot sing me a song'). Empty
     # means the same gap as beef_act_delay; 0 posts the piece at once.
     "chat_ai_perform_delay": "",
+    # How long a mod's announcement ('docbot tell everyone Doc is on the
+    # phone, radio silence') stands as the answer to 'your mic is muted' /
+    # 'hello?' / 'is he afk?'. Each viewer is told once. 0 turns it off.
+    "chat_ai_notice_minutes": 20,
     # Where the beef leaderboard and the !revenge windows live. Local file,
     # local logic: the game runs on what the bot already has even with no LLM
     # anywhere, so there is nothing else to configure.
@@ -270,6 +274,11 @@ DEFAULTS = {
     "google_api_key": "",
     "google_cx": "",
     "serper_api_key": "",
+    # weatherapi.com (free key at weatherapi.com/signup): when set, weather
+    # questions are answered from it as one sentence to the asker -
+    # "kvack, it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F
+    # (17°C). Feels like ..." - with Open-Meteo as the keyless fallback.
+    "weatherapi_key": "",
     # Advanced / testing only — normally leave these alone.
     "host": HOST,
     "port": PORT,
@@ -472,6 +481,11 @@ class TwitchBot:
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
+        # A standing notice: what a mod asked the bot to tell the room
+        # ('@Doc is on the phone, radio silence'). While it stands, a
+        # viewer wondering why the stream went quiet gets it repeated -
+        # (text, posted-at, {nicks already told}).
+        self._chat_ai_notice = None
         self._chat_human_times = []             # rolling flow/busy detector
         # One quiet opener per HUMAN conversation lull. It starts disarmed so
         # startup never becomes a timer talking into a room that said nothing.
@@ -522,6 +536,8 @@ class TwitchBot:
             "serper_api_key": cfg.get("serper_api_key", ""),
             "tavily_api_key": cfg.get("tavily_api_key", "")
             or os.environ.get("TAVILY_API_KEY", ""),
+            "weatherapi_key": cfg.get("weatherapi_key", "")
+            or os.environ.get("WEATHERAPI_KEY", ""),
             "debug": bool(cfg.get("debug")),
         }
 
@@ -2185,7 +2201,28 @@ class TwitchBot:
                     ack = "Noted." if kept else "Already had that one."
                 self._jobs.put(("", "", "", "say", f"@{nick} {ack}"))
                 return
+            # 'docbot tell everyone that Doc is on the phone' - the
+            # persona still answers in character below; the plain
+            # notice is kept for whoever asks 'why is it so quiet?'.
+            announced = self._take_notice(nick, badges, message)
+        else:
+            announced = False
         now = time.time()
+        # A standing notice answers the room's confusion on the spot.
+        # Live-fire: a mod had the bot announce 'Doc is on the phone,
+        # radio silence'; two lines later a viewer said 'Your mic is
+        # muted' / 'I assume because your codriver is sleeping' and the
+        # bot said nothing - those lines were not addressed to it, so
+        # they were ambient chimes: a 10% roll, five lines of recent
+        # chat, and a ten-minute cooldown the bot's own announcement
+        # had just started. The one thing the bot knew for certain, it
+        # kept to itself. A viewer who is confused about something the
+        # bot was ASKED to tell the room is not ambient chatter: they
+        # get the notice, once each, no roll and no cooldown.
+        # A direct 'docbot, is his mic muted?' gets it the same way -
+        # the one certain answer, not a persona guess held by a cooldown.
+        if not announced and self._say_notice(nick, message):
+            return
         recent_chat, busy = self._chat_activity(now)
         # Flowing human chat already has a conversation. Autonomous Doc listens;
         # mentions still pass straight through this gate.
@@ -2229,6 +2266,74 @@ class TwitchBot:
             self._chat_ai_last = now
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
+
+    def _notice_minutes(self) -> float:
+        try:
+            return max(0.0, float(self.cfg.get("chat_ai_notice_minutes", 20)))
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _take_notice(self, nick: str, badges: str, text: str) -> bool:
+        """Keep what a mod asked the bot to tell the room as the standing
+        notice. The reply itself still comes from the persona (it reads
+        the room and says it in character); this is the plain fact the
+        bot repeats to anyone confused later. Mods and the broadcaster
+        only - a viewer cannot make the bot announce things."""
+        if not self.cfg.get("chat_ai_enabled", False) \
+                or self._notice_minutes() <= 0:
+            return False
+        if access.tier_from_badges(badges) not in ("broadcaster",
+                                                   "moderator"):
+            return False
+        notice = chatai.announce_request(text, self._chat_ai_names)
+        if not notice:
+            return False
+        if chatai.notice_clears(notice):
+            # 'tell everyone doc is back' ends the quiet: drop the
+            # notice rather than answer 'hello?' with it for 20 min.
+            if self._chat_ai_notice:
+                self._log(f"standing notice cleared by {nick}: "
+                          f"{notice[:60]!r}")
+            self._chat_ai_notice = None
+            return True
+        # Said in the bot's own voice: 'tell everyone that I am on the
+        # phone' is the MOD on the phone, not the bot.
+        notice = re.sub(r"\b[Ii]\s+am\b", f"{nick} is", notice)
+        notice = re.sub(r"\b[Ii]'m\b", f"{nick} is", notice)
+        notice = re.sub(r"\b(?:[Ii]|me)\b", nick, notice)
+        notice = re.sub(r"\bmy\b", f"{nick}'s", notice, flags=re.IGNORECASE)
+        self._chat_ai_notice = (notice, time.time(), set())
+        self._log(f"standing notice from {nick} for the next "
+                  f"{self._notice_minutes():g} min: {notice[:80]!r}")
+        return True
+
+    def _standing_notice(self) -> str | None:
+        """The notice text while it stands, else None (and expired ones
+        are dropped)."""
+        held = self._chat_ai_notice
+        if not held:
+            return None
+        if time.time() - held[1] > self._notice_minutes() * 60:
+            self._chat_ai_notice = None
+            return None
+        return held[0]
+
+    def _say_notice(self, nick: str, text: str) -> bool:
+        """Repeat the standing notice to a viewer who sounds confused
+        about the quiet stream. True when it posted. Each viewer is told
+        once per notice; the notice expires after chat_ai_notice_minutes
+        or when a mod hands the bot a new one."""
+        if self.paused or self._standing_notice() is None:
+            return False
+        notice, _since, told = self._chat_ai_notice
+        asked = chatai.strip_address(text, self._chat_ai_names)
+        if (nick or "").lower() in told or not chatai.stream_confusion(asked):
+            return False
+        told.add((nick or "").lower())
+        self._jobs.put(("", "", "", "say",
+                        self._fit(f"@{nick} heads up: ", notice)))
+        self._log(f"standing notice repeated to {nick} for {text[:50]!r}")
+        return True
 
     def _chat_ai_snapshot(self) -> list:
         with self._chat_lock:
@@ -2285,7 +2390,8 @@ class TwitchBot:
                                    max_lines=8 if local else 15,
                                    max_memories=4 if local else 8,
                                    own=list(self._chat_ai_own),
-                                   overheard=overheard),
+                                   overheard=overheard,
+                                   notice=self._standing_notice()),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2318,7 +2424,8 @@ class TwitchBot:
                                        max_lines=8 if local else 15,
                                        max_memories=4 if local else 8,
                                        own=list(self._chat_ai_own),
-                                       overheard=overheard),
+                                       overheard=overheard,
+                                       notice=self._standing_notice()),
                     self._opts)
             except Exception as exc:
                 self._log(f"chat ai error: {exc!r}")
@@ -3144,10 +3251,19 @@ class TwitchBot:
             return
         place = result.get("place") or argument
         fact = _CONTROL.sub("", " ".join(result["fact"].split()))
+        limit = int(self.cfg.get("max_message_chars", 450))
+        if result.get("sentence"):
+            # Live data written as a sentence (weatherapi.com): it names
+            # its own place, so it is said TO the asker rather than filed
+            # under a 'Weather | place:' header.
+            prefix = f"{nick}, "
+            msg = prefix + trim_to_fit(fact, max(40, limit - len(prefix)))
+            self._say(msg)
+            self._log(f"replied for {argument!r}")
+            return
         name = result.get('kind') \
             or self.cfg.get('fact_prefix', 'FunFact')
         prefix = f"{name} | {place}: "
-        limit = int(self.cfg.get("max_message_chars", 450))
         # Fit the fact to what is left of the message budget, ending on a
         # sentence boundary rather than chopping one in half.
         fact = trim_to_fit(fact, max(40, limit - len(prefix)))
@@ -3184,6 +3300,12 @@ def _doctor_questions(cfg: dict) -> None:
         "none - only DuckDuckGo, which returns nothing for most "
         "free-form questions")
     print(f"  search for answers: {line}")
+    wkey = (cfg.get("weatherapi_key") or os.environ.get("WEATHERAPI_KEY", "")
+            or "").strip()
+    print("  weather          : " + (
+        "weatherapi.com (one sentence to the asker), Open-Meteo fallback"
+        if wkey else
+        "Open-Meteo (no weatherapi_key - set one for the sentence format)"))
 
     try:
         import llm as llm_mod
