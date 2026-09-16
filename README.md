@@ -477,6 +477,20 @@ crazy" stays ordinary conversation.
   clear skies; feels like 61°F; humidity 61%; wind SW at 4 mph.` Every fallback
   is logged with the reason (`weatherapi.com HTTP 401: API key is invalid -
   falling back to Open-Meteo`). Weather never goes quiet over a key problem.
+- **It is instant, and it skips the chat AI's rails.** Live-fire, "Docbot
+  whats the weather currently in Brewster, NY" got *nothing*: the bot had
+  answered a different "docbot …" 40 seconds earlier, so the 60-second
+  `chat_ai_mention_cooldown` held the question — and a held question that
+  waits behind someone else's slow model call in the single worker queue
+  could be dropped without a log line when its turn came. Those rails exist
+  for persona chatter; an API reading has no model in the loop and no reason
+  to wait behind one. A weather or sunrise/sunset question addressed to the
+  bot (`docbot …`, or the click-to-mention `@TruckingWithDocBot …`) now takes
+  a **fast lane**: answered immediately on its own thread, never touching the
+  mention clock (so the next persona question is still answered on time),
+  paced at one reading per viewer per 15 seconds (mods and the broadcaster
+  exempt). Every outcome is a line in the log — `live data answered for …`,
+  `live data ask from … paced`, or the engine's own failure reason.
 
 ### "Your mic is muted" — a mod's announcement stands as a notice
 

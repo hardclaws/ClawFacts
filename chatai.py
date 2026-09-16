@@ -793,11 +793,14 @@ def strip_address(text: str, names=()) -> str:
     -> 'what is a bongo twist'. Mentions carry their trigger word, and
     neither the fact engine's header nor its query should include it."""
     t = (text or "").strip()
-    low = t.lower()
+    # '@TruckingWithDocBot whats the weather in ...' - the click-to-
+    # mention form carries an @ that the name list does not.
+    bare = t[1:] if t.startswith("@") else t
+    low = bare.lower()
     for n in sorted({str(x).lower().lstrip("@") for x in names if x},
                     key=len, reverse=True):
         if low.startswith(n):
-            rest = t[len(n):].lstrip(" ,:!")
+            rest = bare[len(n):].lstrip(" ,:!")
             if rest:
                 t = rest
             break
@@ -826,6 +829,24 @@ def weather_question(text: str, names=()) -> bool:
         # 'what do you think of the weather in paris' wants the persona.
         return False
     return t.endswith("?") or bool(_WEATHER_ASK.match(t))
+
+
+def live_data_question(text: str, names=()) -> bool:
+    """A question the engine answers from a live feed with no model in
+    the loop: the weather somewhere, sunrise/sunset somewhere. These
+    take the fast lane in bot._maybe_chime - straight to the data, in
+    front of the chat AI's cooldowns and its one worker. Live-fire:
+    'Docbot whats the weather currently in Brewster, NY' got NOTHING
+    because the bot had answered a different 'docbot ...' 40 seconds
+    earlier and the 60-second mention cooldown held the question; an
+    API reading should never wait behind a persona rail."""
+    t = strip_address(text, names).strip()
+    if weather_question(t):
+        return True
+    if not funfacts._SOLAR_Q.search(t):
+        return False
+    place = funfacts._SOLAR_PLACE.search(t)
+    return bool(place) and not _OPINION_Q.match(t)
 
 
 def factual_question(text: str, names=()) -> bool:

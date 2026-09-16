@@ -13,6 +13,7 @@ import time
 
 import bot as bot_mod
 import chatai
+import funfacts
 import llm
 
 
@@ -1770,6 +1771,128 @@ def test_a_mods_announcement_answers_the_confused_room():
           "each, no roll, no cooldown - until 'doc is back'")
 
 
+def test_live_data_questions_take_the_fast_lane():
+    """Live-fire: 'Docbot whats the weather currently in Brewster, NY' got
+    NOTHING - with weatherapi.com configured, no model in the loop. Two
+    rails built for persona chatter stood in front of the reading: the
+    60s mention cooldown (the bot had answered a different 'docbot ...'
+    moments earlier, so the question was 'held' for a minute), and the
+    single worker queue, where a job that waited behind someone else's
+    slow model call found the cooldown re-armed when its turn came and
+    was dropped without a log line. A weather or sunrise question is
+    data: answered now, on its own thread, never touching the mention
+    clock - paced at one reading per viewer per 15s (mods exempt)."""
+    import threading
+    wapi = {"location": {"name": "Brewster", "region": "New York",
+                         "country": "United States of America"},
+            "current": {"temp_f": 65.0, "temp_c": 18.3,
+                        "condition": {"text": "Partly cloudy"},
+                        "wind_mph": 5.6, "wind_kph": 9.0, "wind_dir": "NW",
+                        "precip_in": 0.0, "precip_mm": 0.0, "humidity": 55,
+                        "feelslike_f": 65.0, "feelslike_c": 18.3,
+                        "vis_miles": 9.0, "vis_km": 16.0}}
+    api_calls = []
+
+    def http(url, params=None, timeout=0):
+        assert url == funfacts.WEATHERAPI_API, url
+        api_calls.append(params["q"])
+        return wapi
+
+    def settle():
+        for t in threading.enumerate():
+            if t.name == "live-data":
+                t.join(5)
+
+    def clear():
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+
+    q = "Docbot whats the weather currently in Brewster, NY"
+    reading = ("Hardclaws, it is currently Partly cloudy in Brewster, New "
+               "York. 65°F (18°C). Feels like 65°F (18°C). Wind is blowing "
+               "from the NW at 6 mph (9 km/h). 55% humidity. Visibility: 9 "
+               "miles (16 km). Precipitation: 0.0 in (0.0 mm).")
+    saved = (funfacts._http_get_json, funfacts._osm_geocode, llm.chat_reply)
+    funfacts._http_get_json = http
+    funfacts._osm_geocode = lambda p: (_ for _ in ()).throw(
+        AssertionError("geocoded despite weatherapi"))
+    llm.chat_reply = lambda s, u, c, **kw: "Copy that, hon."
+    try:
+        # The exact live case: a different mention answered 10s ago.
+        clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("Hardclaws", "#t", "docbot you there?", "hardclaws",
+                      "moderator/1")
+        _drain(b)
+        b._on_message("Hardclaws", "#t", q, "hardclaws", "moderator/1")
+        settle()
+        _drain(b)
+        assert b.said == ["@Hardclaws Copy that, hon.", reading], b.said
+        assert not b._chat_ai_pending, b._chat_ai_pending
+        # The worker is busy with someone else's mention: both answered.
+        clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("kvack", "#t", "docbot you awake?", "kvack", "")
+        b._on_message("Hardclaws", "#t", q, "hardclaws", "moderator/1")
+        settle()
+        _drain(b)
+        assert sorted(b.said) == sorted([reading, "@kvack Copy that, hon."]), \
+            b.said
+        # The click-to-mention form, and the mention clock is untouched
+        # so the next persona question is still answered on time.
+        clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("Hardclaws", "#t", "@TruckingWithDocBot whats the "
+                      "weather currently in Brewster, NY", "hardclaws",
+                      "moderator/1")
+        settle()
+        assert b.said == [reading], b.said
+        b._on_message("kvack", "#t", "docbot hows your night", "kvack", "")
+        _drain(b)
+        assert b.said[-1] == "@kvack Copy that, hon.", b.said
+        # Pacing: a viewer looping 'docbot weather in X?' is one reading
+        # and one API call per 15s; mods are exempt.
+        clear()
+        api_calls.clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        for place in ("Brewster, NY", "Scranton, PA", "Miami, FL"):
+            b._on_message("spammer", "#t", f"docbot weather in {place}?",
+                          "spammer", "")
+            settle()
+        assert len(b.said) == 1 and api_calls == ["Brewster, NY"], \
+            (b.said, api_calls)
+        b._live_data_last["spammer"] -= 16
+        b._on_message("spammer", "#t", "docbot weather in Reno, NV?",
+                      "spammer", "")
+        settle()
+        assert len(b.said) == 2, b.said
+        for place in ("Brewster, NY", "Scranton, PA"):
+            b._on_message("Hardclaws", "#t", f"docbot weather in {place}?",
+                          "hardclaws", "moderator/1")
+            settle()
+        assert len(b.said) == 4, b.said
+        # A sunrise question rides the same lane; everything down is an
+        # honest line, never silence.
+        assert chatai.live_data_question("doc when is sunset in brewster ny",
+                                         ["doc", "docbot"])
+        assert not chatai.live_data_question("docbot sunset was gorgeous",
+                                             ["doc", "docbot"])
+        clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("down"))
+        funfacts._osm_geocode = lambda p: None
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("Hardclaws", "#t", q, "hardclaws", "moderator/1")
+        settle()
+        assert b.said and "couldn't fetch the current weather" in b.said[-1], \
+            b.said
+    finally:
+        funfacts._http_get_json, funfacts._osm_geocode, llm.chat_reply = saved
+        clear()
+    print("[PASS] weather/sunrise questions are answered at once, ahead of "
+          "the chat AI's cooldown and its worker queue")
+
+
 def main():
     test_a_mention_gets_one_bounded_reply()
     test_chime_ins_are_gated()
@@ -1804,6 +1927,7 @@ def main():
     test_sing_me_a_song_gets_a_song_over_several_messages()
     test_performances_have_a_subject_a_fallback_and_an_encore()
     test_a_mods_announcement_answers_the_confused_room()
+    test_live_data_questions_take_the_fast_lane()
     print("\nALL PASSED \u2714")
     return 0
 

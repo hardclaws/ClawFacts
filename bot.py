@@ -486,6 +486,9 @@ class TwitchBot:
         # viewer wondering why the stream went quiet gets it repeated -
         # (text, posted-at, {nicks already told}).
         self._chat_ai_notice = None
+        # The live-data fast lane skips the mention cooldown, so it paces
+        # itself: one reading per viewer per 15s (mods exempt). {login: t}
+        self._live_data_last = {}
         self._chat_human_times = []             # rolling flow/busy detector
         # One quiet opener per HUMAN conversation lull. It starts disarmed so
         # startup never becomes a timer talking into a room that said nothing.
@@ -2223,6 +2226,41 @@ class TwitchBot:
         # the one certain answer, not a persona guess held by a cooldown.
         if not announced and self._say_notice(nick, message):
             return
+        # THE FAST LANE. 'Docbot whats the weather currently in Brewster,
+        # NY' is an API reading, no model in the loop - and live-fire it
+        # got NOTHING. Two rails built for persona chatter were in front
+        # of it: the 60s mention cooldown (the bot had answered a
+        # different 'docbot ...' moments earlier, so the question was
+        # 'held'), and the single worker queue, where a job that waits
+        # behind someone else's slow model call finds the cooldown
+        # re-armed when its turn comes and is dropped without a log
+        # line. Neither rail exists for data: a weather or sunrise
+        # question is answered now, on its own thread, and it does not
+        # touch the mention clock - it is not chatter.
+        if kind == chatai.MENTION and self.cfg.get(
+                "chat_ai_enabled", False) and not self.paused \
+                and chatai.live_data_question(message, self._chat_ai_names):
+            # No mention cooldown here, so the lane paces itself: a
+            # viewer gets one reading per 15s (a real ask is instant, a
+            # loop of 'docbot weather in X?' is not six API calls). The
+            # broadcaster and mods are exempt - they run the show.
+            who = (login or nick or "").lower()
+            if access.tier_from_badges(badges) not in ("broadcaster",
+                                                       "moderator"):
+                last = self._live_data_last.get(who, 0.0)
+                if now - last < 15.0:
+                    self._log(f"live data ask from {nick} paced - one "
+                              f"reading per 15s")
+                    return
+                self._live_data_last[who] = now
+                if len(self._live_data_last) > 200:
+                    self._live_data_last = {
+                        k: v for k, v in self._live_data_last.items()
+                        if now - v < 60.0}
+            threading.Thread(target=self._answer_live_data,
+                             args=(nick, message), name="live-data",
+                             daemon=True).start()
+            return
         recent_chat, busy = self._chat_activity(now)
         # Flowing human chat already has a conversation. Autonomous Doc listens;
         # mentions still pass straight through this gate.
@@ -2266,6 +2304,25 @@ class TwitchBot:
             self._chat_ai_last = now
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
+
+    def _answer_live_data(self, nick: str, message: str) -> None:
+        """Answer a weather / sunrise question from the live feed, off
+        the read loop. The engine owns the whole path: a reading, or an
+        honest 'couldn't fetch' line - never silence and never a model.
+        Failures are logged by the engine; a crash here is logged too,
+        so a missing reply always has a line in bot.log."""
+        try:
+            question = chatai.strip_address(message, self._chat_ai_names)
+            result = get_funfact(question, self._opts)
+            if not result or not result.get("fact"):
+                self._log(f"live data: engine had nothing for {question!r}")
+                self._say(f"@{nick} I couldn't get that reading right now - "
+                          f"try me again in a minute.")
+                return
+            self._reply(nick, question, result)
+            self._log(f"live data answered for {nick}: {question[:60]!r}")
+        except Exception as exc:
+            self._log(f"live data failed for {nick}: {exc!r}")
 
     def _notice_minutes(self) -> float:
         try:

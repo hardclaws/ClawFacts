@@ -1494,6 +1494,63 @@ def main() -> int:
                       "SW at 4 mph.")
         return out == [want, meteo_line, meteo_line]
 
+    def _live_data_takes_the_fast_lane():
+        """'Docbot whats the weather currently in Brewster, NY' got nothing
+        live: a different mention answered 40s earlier had the 60s
+        cooldown holding it, and the one worker can drop a held reading
+        without a trace. Weather/sunrise questions are answered at once
+        on their own thread, no model, no mention clock, paced per viewer."""
+        import threading as _th
+        import chatai as _ch
+        import llm as _llm
+        import bot as _bot_mod
+        if not hasattr(_ch, "live_data_question") \
+                or not hasattr(_bot_mod.TwitchBot, "_answer_live_data"):
+            return False
+        wapi = {"location": {"name": "Brewster", "region": "New York",
+                             "country": "United States of America"},
+                "current": {"temp_f": 65.0, "temp_c": 18.3,
+                            "condition": {"text": "Partly cloudy"},
+                            "humidity": 55}}
+        saved = (funfacts._http_get_json, funfacts._osm_geocode,
+                 _llm.chat_reply)
+        funfacts._http_get_json = lambda url, params=None, timeout=0: wapi
+        funfacts._osm_geocode = lambda _p: None
+        _llm.chat_reply = lambda s, u, c, **k: "Copy that, hon - still here."
+        said = []
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            b = _scratch_bot(llm_api_key="k", weatherapi_key="abc")
+            b._say = said.append
+
+            def pump():
+                while not b._jobs.empty():
+                    nick, login, badges, command, argument = b._jobs.get()
+                    if command == "chime":
+                        b._do_chime(nick, argument)
+                    elif command == "say":
+                        b._say(argument)
+
+            b._on_message("Hardclaws", "#c", "docbot you there?",
+                          "hardclaws", "moderator/1")
+            pump()
+            b._on_message("Hardclaws", "#c", "Docbot whats the weather "
+                          "currently in Brewster, NY", "hardclaws",
+                          "moderator/1")
+            for t in _th.enumerate():
+                if t.name == "live-data":
+                    t.join(5)
+            pump()
+        finally:
+            (funfacts._http_get_json, funfacts._osm_geocode,
+             _llm.chat_reply) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+        return said == ["@Hardclaws Copy that, hon - still here.",
+                        "Hardclaws, it is currently Partly cloudy in "
+                        "Brewster, New York. 65°F (18°C). 55% humidity."]
+
     def _a_notice_answers_the_confused_room():
         """A mod had the bot announce 'Doc is on the phone, radio silence';
         two lines later 'Your mic is muted' got nothing - not addressed,
@@ -2206,6 +2263,8 @@ def main() -> int:
          _a_notice_answers_the_confused_room()
          and "chat_ai_notice_minutes" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")),
+        ("weather/sunrise questions are answered at once, ahead of the "
+         "chat AI's cooldown", _live_data_takes_the_fast_lane()),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0
