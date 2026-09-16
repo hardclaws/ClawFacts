@@ -238,6 +238,14 @@ DEFAULTS = {
     # so the knob means what it reads. 0 sends the whole story at once,
     # which is a wall nobody reads.
     "beef_act_delay": 4.0,
+    # Seconds between the lines when the chat AI performs - a song, a
+    # poem, a story asked for by name ('docbot sing me a song'). Empty
+    # means the same gap as beef_act_delay; 0 posts the piece at once.
+    "chat_ai_perform_delay": "",
+    # How long a mod's announcement ('docbot tell everyone Doc is on the
+    # phone, radio silence') stands as the answer to 'your mic is muted' /
+    # 'hello?' / 'is he afk?'. Each viewer is told once. 0 turns it off.
+    "chat_ai_notice_minutes": 20,
     # Where the beef leaderboard and the !revenge windows live. Local file,
     # local logic: the game runs on what the bot already has even with no LLM
     # anywhere, so there is nothing else to configure.
@@ -266,6 +274,11 @@ DEFAULTS = {
     "google_api_key": "",
     "google_cx": "",
     "serper_api_key": "",
+    # weatherapi.com (free key at weatherapi.com/signup): when set, weather
+    # questions are answered from it as one sentence to the asker -
+    # "kvack, it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F
+    # (17°C). Feels like ..." - with Open-Meteo as the keyless fallback.
+    "weatherapi_key": "",
     # Advanced / testing only — normally leave these alone.
     "host": HOST,
     "port": PORT,
@@ -468,6 +481,11 @@ class TwitchBot:
         self._chat_ai_mention_last = 0.0           # last mention reply
         self._chat_ai_times = []                   # lines posted, last hour
         self._chat_ai_own = []                  # its last lines: anti-echo
+        # A standing notice: what a mod asked the bot to tell the room
+        # ('@Doc is on the phone, radio silence'). While it stands, a
+        # viewer wondering why the stream went quiet gets it repeated -
+        # (text, posted-at, {nicks already told}).
+        self._chat_ai_notice = None
         self._chat_human_times = []             # rolling flow/busy detector
         # One quiet opener per HUMAN conversation lull. It starts disarmed so
         # startup never becomes a timer talking into a room that said nothing.
@@ -480,6 +498,7 @@ class TwitchBot:
         # sub goal; the lock keeps the two writers honest.
         self._subgoal_lock = threading.Lock()
         self._chat_ai_pending = []              # mentions held by cooldown
+        self._last_performance = None           # (kind, subject) for 'encore'
         self._chat_ai_names = set(
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
@@ -517,6 +536,8 @@ class TwitchBot:
             "serper_api_key": cfg.get("serper_api_key", ""),
             "tavily_api_key": cfg.get("tavily_api_key", "")
             or os.environ.get("TAVILY_API_KEY", ""),
+            "weatherapi_key": cfg.get("weatherapi_key", "")
+            or os.environ.get("WEATHERAPI_KEY", ""),
             "debug": bool(cfg.get("debug")),
         }
 
@@ -1175,16 +1196,39 @@ class TwitchBot:
         config knob behaves exactly as it reads. 0 sends the rest at once
         (the tests rely on that for determinism).
         """
+        self._drip(body, delay, started=started)
+
+    def _drip(self, lines: list, delay: float, head: str = "",
+              started: float = None) -> None:
+        """Post `lines` one message at a time, `delay` seconds apart.
+
+        The shared pacing for anything the bot delivers in parts: a beef
+        story's acts, a song's lines, a poem's verses. Each line still
+        passes through the say queue, so Twitch's rate limit is respected
+        and the reader thread never stops. `head` is prefixed to the
+        FIRST line only (the @-tag of whoever asked); the rest stand
+        alone. 0 sends everything at once.
+
+        With no `started`, the first line goes out now and the rest
+        follow at delay, 2*delay, ... after it. A caller that already
+        posted an opening message (a beef headline) passes the moment it
+        did as `started`, and every line here waits its turn from THAT
+        moment - time spent waiting on a model never stretches the gaps.
+        """
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            return
+        lines = [head + lines[0]] + lines[1:]
         if delay <= 0.0:
-            for line in body:
+            for line in lines:
                 self._queue_say(line)
             return
-        # Gaps are measured from the headline, not from whenever the LLM
-        # finished thinking - waiting on the model must not stretch the
-        # pacing the config promised.
-        base = started if started is not None else time.time()
-        for i, line in enumerate(body, 1):
-            wait = max(0.05, i * delay - (time.time() - base))
+        if started is None:
+            started = time.time()
+            self._queue_say(lines[0])
+            lines = lines[1:]
+        for i, line in enumerate(lines, 1):
+            wait = max(0.05, i * delay - (time.time() - started))
             t = threading.Timer(wait, self._queue_say, args=(line,))
             t.daemon = True
             t.start()
@@ -2157,7 +2201,28 @@ class TwitchBot:
                     ack = "Noted." if kept else "Already had that one."
                 self._jobs.put(("", "", "", "say", f"@{nick} {ack}"))
                 return
+            # 'docbot tell everyone that Doc is on the phone' - the
+            # persona still answers in character below; the plain
+            # notice is kept for whoever asks 'why is it so quiet?'.
+            announced = self._take_notice(nick, badges, message)
+        else:
+            announced = False
         now = time.time()
+        # A standing notice answers the room's confusion on the spot.
+        # Live-fire: a mod had the bot announce 'Doc is on the phone,
+        # radio silence'; two lines later a viewer said 'Your mic is
+        # muted' / 'I assume because your codriver is sleeping' and the
+        # bot said nothing - those lines were not addressed to it, so
+        # they were ambient chimes: a 10% roll, five lines of recent
+        # chat, and a ten-minute cooldown the bot's own announcement
+        # had just started. The one thing the bot knew for certain, it
+        # kept to itself. A viewer who is confused about something the
+        # bot was ASKED to tell the room is not ambient chatter: they
+        # get the notice, once each, no roll and no cooldown.
+        # A direct 'docbot, is his mic muted?' gets it the same way -
+        # the one certain answer, not a persona guess held by a cooldown.
+        if not announced and self._say_notice(nick, message):
+            return
         recent_chat, busy = self._chat_activity(now)
         # Flowing human chat already has a conversation. Autonomous Doc listens;
         # mentions still pass straight through this gate.
@@ -2201,6 +2266,74 @@ class TwitchBot:
             self._chat_ai_last = now
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
+
+    def _notice_minutes(self) -> float:
+        try:
+            return max(0.0, float(self.cfg.get("chat_ai_notice_minutes", 20)))
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _take_notice(self, nick: str, badges: str, text: str) -> bool:
+        """Keep what a mod asked the bot to tell the room as the standing
+        notice. The reply itself still comes from the persona (it reads
+        the room and says it in character); this is the plain fact the
+        bot repeats to anyone confused later. Mods and the broadcaster
+        only - a viewer cannot make the bot announce things."""
+        if not self.cfg.get("chat_ai_enabled", False) \
+                or self._notice_minutes() <= 0:
+            return False
+        if access.tier_from_badges(badges) not in ("broadcaster",
+                                                   "moderator"):
+            return False
+        notice = chatai.announce_request(text, self._chat_ai_names)
+        if not notice:
+            return False
+        if chatai.notice_clears(notice):
+            # 'tell everyone doc is back' ends the quiet: drop the
+            # notice rather than answer 'hello?' with it for 20 min.
+            if self._chat_ai_notice:
+                self._log(f"standing notice cleared by {nick}: "
+                          f"{notice[:60]!r}")
+            self._chat_ai_notice = None
+            return True
+        # Said in the bot's own voice: 'tell everyone that I am on the
+        # phone' is the MOD on the phone, not the bot.
+        notice = re.sub(r"\b[Ii]\s+am\b", f"{nick} is", notice)
+        notice = re.sub(r"\b[Ii]'m\b", f"{nick} is", notice)
+        notice = re.sub(r"\b(?:[Ii]|me)\b", nick, notice)
+        notice = re.sub(r"\bmy\b", f"{nick}'s", notice, flags=re.IGNORECASE)
+        self._chat_ai_notice = (notice, time.time(), set())
+        self._log(f"standing notice from {nick} for the next "
+                  f"{self._notice_minutes():g} min: {notice[:80]!r}")
+        return True
+
+    def _standing_notice(self) -> str | None:
+        """The notice text while it stands, else None (and expired ones
+        are dropped)."""
+        held = self._chat_ai_notice
+        if not held:
+            return None
+        if time.time() - held[1] > self._notice_minutes() * 60:
+            self._chat_ai_notice = None
+            return None
+        return held[0]
+
+    def _say_notice(self, nick: str, text: str) -> bool:
+        """Repeat the standing notice to a viewer who sounds confused
+        about the quiet stream. True when it posted. Each viewer is told
+        once per notice; the notice expires after chat_ai_notice_minutes
+        or when a mod hands the bot a new one."""
+        if self.paused or self._standing_notice() is None:
+            return False
+        notice, _since, told = self._chat_ai_notice
+        asked = chatai.strip_address(text, self._chat_ai_names)
+        if (nick or "").lower() in told or not chatai.stream_confusion(asked):
+            return False
+        told.add((nick or "").lower())
+        self._jobs.put(("", "", "", "say",
+                        self._fit(f"@{nick} heads up: ", notice)))
+        self._log(f"standing notice repeated to {nick} for {text[:50]!r}")
+        return True
 
     def _chat_ai_snapshot(self) -> list:
         with self._chat_lock:
@@ -2257,7 +2390,8 @@ class TwitchBot:
                                    max_lines=8 if local else 15,
                                    max_memories=4 if local else 8,
                                    own=list(self._chat_ai_own),
-                                   overheard=overheard),
+                                   overheard=overheard,
+                                   notice=self._standing_notice()),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2290,7 +2424,8 @@ class TwitchBot:
                                        max_lines=8 if local else 15,
                                        max_memories=4 if local else 8,
                                        own=list(self._chat_ai_own),
-                                       overheard=overheard),
+                                       overheard=overheard,
+                                       notice=self._standing_notice()),
                     self._opts)
             except Exception as exc:
                 self._log(f"chat ai error: {exc!r}")
@@ -2506,6 +2641,19 @@ class TwitchBot:
                                    if now - t < 3600] + [now]
             self._chat_ai_mention_last = now
             return
+        # 'Docbot sing me a song' / 'make me a poem' asks for a PIECE, not
+        # a line. Through the one-line path the model wrote a sentence
+        # about singing and stopped - it rambled and never did the thing.
+        # A performance is written whole and delivered over several
+        # messages, a few seconds apart. Only when addressed: the bot
+        # never breaks into song because two viewers discussed karaoke.
+        if not quiet and addressed and self._perform(nick, text):
+            now = time.time()
+            self._chat_ai_times = [t for t in self._chat_ai_times
+                                   if now - t < 3600] + [now]
+            self._chat_ai_mention_last = now
+            self._distill(nick, self._chat_ai_snapshot())
+            return
         snapshot = self._chat_ai_snapshot()
         line = self._chat_ai_line(snapshot, nick or "chat", text, quiet=quiet,
                                   overheard=not (quiet or addressed))
@@ -2589,6 +2737,88 @@ class TwitchBot:
             self._say(self._fit(f"@{nick} ", line))
             self._log(f"chat ai replied to {nick}")
             self._distill(nick, self._chat_ai_snapshot())
+
+    # ---- performances: a song, a poem, a story, over several messages ----
+    def _perform_gap(self) -> float:
+        """Seconds between the lines of a performance - the same knob as
+        the beef acts unless chat_ai_perform_delay says otherwise."""
+        for key in ("chat_ai_perform_delay", "beef_act_delay"):
+            try:
+                value = self.cfg.get(key)
+                if value is not None and value != "":
+                    return max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return 4.0
+
+    def _perform(self, nick: str, text: str) -> bool:
+        """Deliver a song / poem / story / rap / limerick / haiku / toast
+        when `text` asks for one. True when it was handled - including
+        an honest 'can't right now' - False when the message is not a
+        performance request at all (the one-line path takes it).
+
+        The piece is composed off the read loop (this runs on the
+        worker), validated line by line against the same rails as any
+        chat line, and then posted the way a person would deliver it:
+        the first line at once, @-tagged to whoever asked, the rest a
+        few seconds apart through the drip scheduler, so the worker is
+        free again immediately and chat can react between lines. A model
+        that pads with 'Sure, here's a song:' loses that line, not the
+        piece; one that breaks a rail anywhere loses the piece and is
+        asked once more with the miss named; a second miss gets a plain
+        one-line decline rather than half a song.
+        """
+        import llm as llm_mod
+        want = chatai.performance_request(text, self._chat_ai_names)
+        if want is None:
+            if chatai.encore_request(text, self._chat_ai_names) \
+                    and self._last_performance:
+                want = self._last_performance
+            else:
+                return False
+        kind, subject = want
+        if not llm_mod.any_configured(self._opts):
+            # No model anywhere: say so instead of a Wikipedia fact about
+            # the word 'song'. The line is deterministic on purpose.
+            self._say(self._fit(f"@{nick} ",
+                                chatai.performance_unavailable(kind)))
+            return True
+        self._last_performance = (kind, subject)
+        snapshot = self._chat_ai_snapshot()
+        room = chatai.direct_context(
+            snapshot, self._chat_ai_names, self.cfg.get("prefix", "!"),
+            self.nick)
+        system = chatai.system_prompt(self._persona_text())
+        prompt = chatai.performance_prompt(kind, subject, nick, room)
+        piece = []
+        for attempt in range(2):
+            try:
+                raw = llm_mod.chat_reply(
+                    system + ("" if attempt == 0 else
+                              "\nYour previous attempt was unusable - it "
+                              "broke a rule above, or was not the piece "
+                              "itself. Deliver ONLY the lines of the piece."),
+                    prompt, self._opts,
+                    max_tokens=llm_mod.PERFORMANCE_MAX_TOKENS)
+            except Exception as exc:
+                self._log(f"performance error: {exc!r}")
+                raw = None
+            piece = chatai.clean_performance(raw, kind)
+            if piece:
+                break
+            self._log(f"{kind} for {nick} rejected by the cleaner"
+                      f"{' - one retry' if attempt == 0 else ''}: "
+                      f"{(raw or '')[:120]!r}")
+        if not piece:
+            self._say(self._fit(f"@{nick} ",
+                                chatai.performance_unavailable(kind)))
+            return True
+        self._chat_ai_own = (self._chat_ai_own + [piece[-1]])[-3:]
+        self._drip(piece, self._perform_gap(), head=f"@{nick} ")
+        self._log(f"{kind} for {nick}"
+                  + (f" about {subject!r}" if subject else "")
+                  + f": {len(piece)} lines, {self._perform_gap():g}s apart")
+        return True
 
     def _distill(self, nick: str, lines: list) -> None:
         """After talking, remember what is durable about the viewer.
@@ -2836,6 +3066,12 @@ class TwitchBot:
         if chatai.factual_question(q, self._chat_ai_names) \
                 and self._answer_factual(nick, q):
             return
+        # '!ask sing me a song' is the same request as saying it to the
+        # bot: a piece over several lines, never a one-line reply about it.
+        if chatai.performance_request(q, self._chat_ai_names) \
+                and self._perform(nick, q):
+            self._distill(nick, self._chat_ai_snapshot())
+            return
         if llm_mod.any_configured(self._opts):
             snapshot = self._chat_ai_snapshot()
             line = self._chat_ai_line(snapshot, nick, q)
@@ -3015,10 +3251,19 @@ class TwitchBot:
             return
         place = result.get("place") or argument
         fact = _CONTROL.sub("", " ".join(result["fact"].split()))
+        limit = int(self.cfg.get("max_message_chars", 450))
+        if result.get("sentence"):
+            # Live data written as a sentence (weatherapi.com): it names
+            # its own place, so it is said TO the asker rather than filed
+            # under a 'Weather | place:' header.
+            prefix = f"{nick}, "
+            msg = prefix + trim_to_fit(fact, max(40, limit - len(prefix)))
+            self._say(msg)
+            self._log(f"replied for {argument!r}")
+            return
         name = result.get('kind') \
             or self.cfg.get('fact_prefix', 'FunFact')
         prefix = f"{name} | {place}: "
-        limit = int(self.cfg.get("max_message_chars", 450))
         # Fit the fact to what is left of the message budget, ending on a
         # sentence boundary rather than chopping one in half.
         fact = trim_to_fit(fact, max(40, limit - len(prefix)))
@@ -3055,6 +3300,12 @@ def _doctor_questions(cfg: dict) -> None:
         "none - only DuckDuckGo, which returns nothing for most "
         "free-form questions")
     print(f"  search for answers: {line}")
+    wkey = (cfg.get("weatherapi_key") or os.environ.get("WEATHERAPI_KEY", "")
+            or "").strip()
+    print("  weather          : " + (
+        "weatherapi.com (one sentence to the asker), Open-Meteo fallback"
+        if wkey else
+        "Open-Meteo (no weatherapi_key - set one for the sentence format)"))
 
     try:
         import llm as llm_mod
@@ -3407,10 +3658,13 @@ def main() -> None:
     try:
         import subprocess
         _here = os.path.dirname(os.path.abspath(__file__))
-        _out = subprocess.run(
-            [sys.executable, os.path.join(_here, "check_fixes.py")],
+        _checker = os.path.join(_here, "check_fixes.py")
+        _run = subprocess.run(
+            [sys.executable, _checker],
             capture_output=True, text=True, timeout=120, cwd=_here,
-        ).stdout or ""
+            encoding="utf-8", errors="replace",
+        )
+        _out = _run.stdout or ""
         _m = re.search(r"(\d+)/(\d+) present", _out)
         if _m:
             print(f"[bot] fixes self-check: {_m.group(1)}/{_m.group(2)} "
@@ -3420,11 +3674,22 @@ def main() -> None:
             for _missing in re.findall(
                     r"^\s*\[ \]\s*(.*?)(?:\s{2,})?$", _out, re.MULTILINE):
                 print(f"[bot] MISSING FIX: {_missing.strip()}")
-        else:
+        elif not os.path.exists(_checker):
             print("[bot] fixes self-check: could not read check_fixes.py "
                   "- is it next to bot.py?")
-    except Exception:
-        print("[bot] fixes self-check: could not run check_fixes.py")
+        else:
+            # The file is there; the checker itself died before it could
+            # print a count (a check raised, an import failed). That used to
+            # be reported as "could not read", which sent people looking for
+            # a missing file when the traceback held the actual answer.
+            print(f"[bot] fixes self-check: check_fixes.py failed "
+                  f"(exit code {_run.returncode}) before printing a count")
+            _err = (_run.stderr or "").strip()
+            for _line in (_err or "(no error output)").splitlines()[-25:]:
+                print(f"[bot] fixes self-check | {_line}")
+    except Exception as exc:
+        print(f"[bot] fixes self-check: could not run check_fixes.py - "
+              f"{type(exc).__name__}: {exc}")
 
     if not do_selftest:
         warn_config(cfg)
