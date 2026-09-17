@@ -602,6 +602,43 @@ crazy" stays ordinary conversation.
   exempt). Every outcome is a line in the log — `live data answered for …`,
   `live data ask from … paced`, or the engine's own failure reason.
 
+### "Sunrise in Hintok, ok" — the town he meant, not a trail in Thailand
+
+Live-fire: *"Docbot what time is sunrise in Hintok, ok?"* → `Sunrise |
+ไทรโยค: Sunrise is expected around 6:13 AM local time today.` Three faults
+in one line. The geocoder (Nominatim) has no town called Hintok, so its best
+string match was **"Hintok Cut" — a footpath at Hellfire Pass, Thailand** —
+and the `, ok` was ignored; it named the place **in Thai** (Sai Yok
+district); and nothing asked whether the hit was a *place* at all. The
+viewer meant **Hinton, Oklahoma**.
+
+Geocoding now works the way a person reads the question:
+
+- **The region typed with the place is a hard constraint.** `Hintok, ok`,
+  `Hintok ok`, `Cuba Missouri`, `Banff, AB`, `Yorkshire united kingdom` — a
+  US state or Canadian province also pins the *country*, so a hit on another
+  continent is not a near miss, it is a different place and is discarded
+  (logged: *matches for 'Hintok, ok' were all outside oklahoma*).
+- **A road, shop or trail is not a settlement.** Only a city/town/village/
+  hamlet (or an admin area, park or landmark *in the right region*) can
+  answer for a place name.
+- **Labels come back in English** (`accept-language=en`), and a province
+  counts as a region, so the header is `Hinton, Oklahoma` — or `Sai Yok,
+  Kanchanaburi Province` if someone really asks for Thailand.
+- **A spelling that finds nothing gets a fuzzy match on places** in that
+  region, from Photon (komoot's keyless OSM geocoder): `Hintok` in Oklahoma
+  → Hinton, `Terra Haute` → Terre Haute, `Scrantin` → Scranton. Only a
+  plausible misspelling is accepted (`Red Rock` is *not* "Red Rock Canyon
+  State Park", `Hilton` is not `Hintok`), and every correction is logged:
+  *geocoder read 'Hintok, ok' as 'Hinton, Oklahoma, United States' (closest
+  place by that name)*.
+- An exact, real place still costs **one** geocoder call; the fuzzy step
+  only runs when the exact spelling finds no place in the region. Photon
+  down and nothing found is an honest "couldn't fetch", never the trail.
+
+The same geocoder serves weather (keyless Open-Meteo path), sunrise/sunset,
+and the fact engine's tiny-town fallback, so all three inherit this.
+
 ### News — "who got into a helicopter crash today in California"
 
 Live-fire, that exact question got `FunFact | who got into a helicopter

@@ -81,6 +81,48 @@ def main() -> int:
                     and "Senate passes" in got["fact"]
                     and "Top news of the day" not in got["fact"])
 
+    def _misspelt_town_is_that_town():
+        """'sunrise in Hintok, ok' was answered for a footpath in
+        Thailand, labelled in Thai. The typed state pins the search,
+        a road is not a settlement, labels are English, and a
+        misspelling gets a fuzzy match on places in that state."""
+        for fn in ("_region_of", "_geo_in_region", "_photon_geocode",
+                   "_close_name"):
+            if not callable(getattr(funfacts, fn, None)):
+                return False
+        if funfacts._region_of("Hintok, ok") != ("ok", "oklahoma", "us"):
+            return False
+        thai = [{"lat": "14.36", "lon": "98.94", "type": "footway",
+                 "addresstype": "road", "name": "Hintok Cut",
+                 "display_name": "Hintok Cut, Sai Yok, Thailand",
+                 "address": {"road": "Hintok Cut", "municipality": "Sai Yok",
+                             "province": "Kanchanaburi Province",
+                             "country": "Thailand", "country_code": "th"}}]
+        photon = {"features": [{"properties": {
+            "osm_key": "place", "osm_value": "town", "name": "Hinton",
+            "state": "Oklahoma", "country": "United States",
+            "countrycode": "US"}, "geometry": {"coordinates": [-98.36, 35.47]}}]}
+
+        def http(url, params, timeout=8.0):
+            if url == funfacts.OSM_API:
+                if params.get("accept-language") != "en":
+                    raise AssertionError("labels must be asked for in English")
+                return [] if params.get("countrycodes") == "us" else thai
+            if url == funfacts.PHOTON_API:
+                return photon
+            raise AssertionError(url)
+
+        saved = funfacts._http_get_json
+        funfacts._http_get_json = http
+        try:
+            geo = funfacts._osm_geocode("Hintok, ok")
+        except Exception:
+            return False
+        finally:
+            funfacts._http_get_json = saved
+        return bool(geo and geo.get("name") == "Hinton"
+                    and geo.get("state") == "Oklahoma")
+
     def _working_memory_holds():
         import ongoing as _og
         import tempfile as _tf
@@ -2827,6 +2869,8 @@ def main() -> int:
          _headlines_are_top_stories()
          and "news_country" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")),
+        ("'sunrise in Hintok, ok' is Hinton, Oklahoma - never a footpath in Thailand",
+         _misspelt_town_is_that_town()),
         ("the big top and middle-earth join the voices; the list goes out by crew",
          len(_ch2.PERSONAS) >= 28
          and all(_ch2.persona(v) for v in (

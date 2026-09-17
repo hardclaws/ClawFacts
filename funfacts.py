@@ -48,6 +48,7 @@ USER_AGENT = ("ClawFacts/1.0 "
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
+PHOTON_API = "https://photon.komoot.io/api/"  # keyless OSM geocoder, fuzzy
 OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # weather + solar
 OPEN_METEO_GEOCODE_API = "https://geocoding-api.open-meteo.com/v1/search"
 WEATHERAPI_API = "https://api.weatherapi.com/v1/current.json"  # needs a key
@@ -1998,7 +1999,11 @@ def _parse_geocode(item: dict):
             or addr.get("city") or addr.get("municipality") or addr.get("suburb")
             or addr.get("locality") or addr.get("road") or item.get("name")
             or "").strip()
-    state = (addr.get("state") or addr.get("territory") or "").strip()
+    # Thailand, Japan and much of the world file their region under
+    # 'province' or 'region', not 'state'; a label with no region at
+    # all reads like a typo.
+    state = (addr.get("state") or addr.get("territory") or addr.get("province")
+             or addr.get("region") or "").strip()
     county = (addr.get("county") or "").strip()
     country = (addr.get("country") or "").strip()
     try:
@@ -2012,26 +2017,221 @@ def _parse_geocode(item: dict):
         "state": state,
         "county": county,
         "country": country,
+        "country_code": str(addr.get("country_code") or "").strip().lower(),
+        "kind": str(item.get("addresstype") or item.get("type") or "").strip(),
         "lat": lat,
         "lon": lon,
         "display_name": item.get("display_name", "").strip(),
     }
 
 
+#: Nominatim result types that are a PLACE someone can ask the sunrise
+#: or weather for. A footpath, a shop or a bus stop is not one - and a
+#: name-only match on one of those is how 'Hintok, ok' became a trail
+#: in Thailand.
+_SETTLEMENT_KINDS = frozenset((
+    "city", "town", "village", "hamlet", "municipality", "suburb", "locality",
+    "borough", "quarter", "neighbourhood", "neighborhood", "isolated_dwelling",
+    "farm", "county", "state", "province", "region", "district", "country",
+    "island", "administrative", "census", "city_district", "township",
+    "postcode", "state_district", "territory",
+))
+
+
+def _region_of(query: str) -> tuple:
+    """The region a viewer typed with the place, if any: 'Hintok, ok' ->
+    ('ok', 'oklahoma', 'us'); 'Cuba Missouri' -> ('missouri', 'missouri',
+    'us'); 'Paris' -> ('', '', ''). The third value is the country code
+    the region implies (a US state or a Canadian province) so a
+    geocoder can be pinned to it."""
+    region = _query_region(query)
+    if not region:
+        return "", "", ""
+    key = region.strip().lower().strip(".")
+    if key in _US_STATES:
+        return key, _US_STATES[key], "us"
+    if key in _US_STATE_BY_NAME:
+        return key, key, "us"
+    if key in _CA_PROVINCES:
+        return key, _CA_PROVINCES[key], "ca"
+    if key in _CA_PROVINCE_BY_NAME:
+        return key, key, "ca"
+    full = _COUNTRIES.get(key, key)
+    code = {"united states": "us", "united kingdom": "gb", "canada": "ca",
+            "australia": "au", "new zealand": "nz", "ireland": "ie",
+            "england": "gb", "scotland": "gb", "wales": "gb",
+            "northern ireland": "gb", "united arab emirates": "ae",
+            "mexico": "mx", "germany": "de", "france": "fr"}.get(full, "")
+    return key, full, code
+
+
+def _geo_in_region(geo: dict, region_name: str, country_code: str) -> bool:
+    """Does a geocoder hit sit in the region the viewer named? A state or
+    province must match by name; a bare country by code."""
+    if not geo:
+        return False
+    if region_name and region_name not in ("united states", "canada"):
+        state = (geo.get("state") or "").strip().lower()
+        if state and state == region_name:
+            return True
+        if country_code in ("us", "ca"):
+            return False        # a US state / CA province was named: no
+        return region_name in (geo.get("country") or "").strip().lower() \
+            or region_name in (geo.get("display_name") or "").lower()
+    if country_code:
+        return (geo.get("country_code") or "").lower() == country_code
+    return True
+
+
+def _nominatim(query: str, limit: int = 5, country_code: str = "") -> list:
+    """Nominatim hits for a query, parsed, English labels. Live-fire,
+    'Hintok, ok' was answered under the header 'ไทรโยค' - Nominatim
+    names places in the local language unless asked otherwise."""
+    params = {"q": query, "format": "json", "limit": limit,
+              "addressdetails": 1, "accept-language": "en"}
+    if country_code:
+        params["countrycodes"] = country_code
+    data = _http_get_json(OSM_API, params, timeout=10)
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data:
+        geo = _parse_geocode(item) if isinstance(item, dict) else None
+        if geo:
+            out.append(geo)
+    return out
+
+
+def _photon_geocode(query: str, region_name: str = "",
+                    country_code: str = "") -> dict | None:
+    """A settlement from Photon (komoot's keyless OSM geocoder), which
+    matches FUZZILY: 'Hintok' finds Hinton. Nominatim needs the exact
+    spelling, and chat does not spell. Only places (city/town/village/
+    hamlet...) count, and the region the viewer named must match."""
+    params = {"q": " ".join(x for x in (query, region_name) if x),
+              "limit": 10, "lang": "en"}
+    data = _http_get_json(PHOTON_API, params, timeout=10)
+    feats = data.get("features") if isinstance(data, dict) else None
+    if not isinstance(feats, list):
+        return None
+    for feat in feats:
+        props = feat.get("properties") or {}
+        if props.get("osm_key") != "place" or props.get("osm_value") not in (
+                "city", "town", "village", "hamlet", "municipality",
+                "borough", "suburb", "locality", "isolated_dwelling"):
+            continue
+        try:
+            lon, lat = (float(x) for x in feat["geometry"]["coordinates"][:2])
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        geo = {"name": str(props.get("name") or "").strip(),
+               "state": str(props.get("state") or "").strip(),
+               "county": str(props.get("county") or "").strip(),
+               "country": str(props.get("country") or "").strip(),
+               "country_code": str(props.get("countrycode") or "").lower(),
+               "kind": str(props.get("osm_value") or ""),
+               "lat": lat, "lon": lon}
+        geo["display_name"] = ", ".join(
+            x for x in (geo["name"], geo["state"], geo["country"]) if x)
+        if not geo["name"]:
+            continue
+        if (region_name or country_code) and not _geo_in_region(
+                geo, region_name, country_code):
+            continue
+        return geo
+    return None
+
+
 def _osm_geocode(query: str):
-    """Geocode an arbitrary place name. Covers even very remote villages."""
+    """Geocode a place name the way a viewer typed it - even a very
+    remote village, even misspelt.
+
+    Live-fire: 'what time is sunrise in Hintok, ok' was answered for
+    'ไทรโยค' - Sai Yok, Thailand. Nominatim had no town called Hintok,
+    so its best string match was 'Hintok Cut', a footpath at Hellfire
+    Pass, and the ', ok' (Oklahoma) was ignored. The viewer meant
+    Hinton, Oklahoma. So: the region typed with the place is a hard
+    constraint (a US state pins the country too); a name-only hit on a
+    road, shop or trail is not a place; labels come back in English;
+    and when the exact spelling finds nothing, Photon's fuzzy match
+    gets a turn before giving up - a corrected place is logged."""
+    query = " ".join((query or "").split())
+    if not query:
+        return None
+    region_key, region_name, country_code = _region_of(query)
+    core = query
+    if region_key:
+        # 'Hintok, ok' / 'Hintok ok' -> 'Hintok' + region 'oklahoma':
+        # Nominatim does better with the full state name.
+        core = re.split(r"[,;|]", query, maxsplit=1)[0].strip()
+        if _norm(core) == _norm(query):
+            core = _split_trailing_region(query)[0] or query
+    attempts = []
+    if region_name:
+        attempts.append((f"{core}, {region_name}", country_code))
+    attempts.append((query, ""))
+    hits = []
+    for q, cc in attempts:
+        try:
+            hits = _nominatim(q, 5, cc)
+        except Exception as exc:
+            print(f"[funfacts] nominatim error: {exc!r}", flush=True)
+            hits = []
+        if hits:
+            break
+    # The region typed with the place is a hard constraint: a hit in
+    # the wrong state or the wrong country is not a near miss, it is
+    # a different place.
+    if region_name or country_code:
+        wrong = [g for g in hits
+                 if not _geo_in_region(g, region_name, country_code)]
+        hits = [g for g in hits if g not in wrong]
+        if wrong and not hits:
+            print(f"[funfacts] geocoder's matches for {query!r} were all "
+                  f"outside {region_name or country_code}: "
+                  + "; ".join(repr(g.get("display_name")) for g in wrong[:3]),
+                  flush=True)
+    settled = [g for g in hits if (g.get("kind") or "administrative")
+               in _SETTLEMENT_KINDS]
+    if settled:
+        return settled[0]
+    # No town by that spelling there. Before settling for a trail or a
+    # shop that happens to carry the name, try a fuzzy match on PLACES:
+    # 'Hintok' in Oklahoma is Hinton. Photon only, and only a name
+    # close enough to be a typo of what was typed.
     try:
-        data = _http_get_json(
-            OSM_API,
-            {"q": query, "format": "json", "limit": 1, "addressdetails": 1},
-            timeout=10,
-        )
+        fuzzy = _photon_geocode(core, region_name if region_key else "",
+                                country_code)
     except Exception as exc:
-        print(f"[funfacts] nominatim error: {exc!r}", flush=True)
-        return None
-    if not isinstance(data, list) or not data:
-        return None
-    return _parse_geocode(data[0])
+        print(f"[funfacts] photon geocoder error: {exc!r}", flush=True)
+        fuzzy = None
+    if fuzzy and _close_name(fuzzy["name"], core):
+        if _norm(fuzzy["name"]) != _norm(core):
+            print(f"[funfacts] geocoder read {query!r} as "
+                  f"{fuzzy['display_name']!r} (closest place by that name)",
+                  flush=True)
+        return fuzzy
+    if hits:
+        # A landmark, a park, a road - in the right region. Fine for a
+        # sunrise or a weather reading; the label says what it is.
+        return hits[0]
+    return None
+
+
+def _close_name(found: str, typed: str) -> bool:
+    """Is a geocoder's fuzzy hit a plausible spelling of what was typed?
+    'Hinton' for 'Hintok' yes; 'Red Rock' for 'Red Rock Canyon State
+    Park' no - that is a different thing, not a typo."""
+    import difflib
+    a, b = _norm(found), _norm(typed)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # A prefix is a different, longer name ('Red Rock' vs 'Red Rock
+    # Canyon State Park'), not a misspelling - unless it is nearly all
+    # of it ('Wilkes-Barr' for 'Wilkes-Barre').
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.8
 
 
 def _open_meteo_geocode(query: str):

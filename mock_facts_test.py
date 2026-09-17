@@ -3496,8 +3496,137 @@ def test_weatherapi_answers_in_the_channels_sentence_when_a_key_is_set():
           "Open-Meteo stays the keyless fallback")
 
 
+def test_a_misspelt_town_in_a_named_state_is_that_town():
+    """Live-fire: 'Docbot what time is sunrise in Hintok, ok?' was
+    answered 'Sunrise | ไทรโยค: Sunrise is expected around 6:13 AM local
+    time today.' Three faults in one line. Nominatim has no town called
+    Hintok, so its best string match was 'Hintok Cut' - a FOOTPATH at
+    Hellfire Pass, Thailand - and the ', ok' (Oklahoma) was ignored; it
+    named the place in Thai; and nobody asked whether the hit was a
+    place at all. The viewer meant Hinton, Oklahoma.
+
+    Now the typed region is a hard constraint that pins the country,
+    a road/shop/trail is not a settlement, labels are English, and a
+    spelling that finds nothing gets Photon's fuzzy match on PLACES in
+    that region - logged as a correction."""
+    hintok_cut = [{"lat": "14.3655849", "lon": "98.9405573", "class": "highway",
+                   "type": "footway", "addresstype": "road", "name": "Hintok Cut",
+                   "display_name": "Hintok Cut, Sai Yok, Sai Yok District, "
+                                   "Kanchanaburi Province, Thailand",
+                   "address": {"road": "Hintok Cut", "municipality": "Sai Yok",
+                               "county": "Sai Yok District",
+                               "province": "Kanchanaburi Province",
+                               "country": "Thailand", "country_code": "th"}}]
+    hinton = [{"lat": "35.4715518", "lon": "-98.3556589", "class": "boundary",
+               "type": "administrative", "addresstype": "town", "name": "Hinton",
+               "display_name": "Hinton, Caddo County, Oklahoma, United States",
+               "address": {"town": "Hinton", "county": "Caddo County",
+                           "state": "Oklahoma", "country": "United States",
+                           "country_code": "us"}}]
+    photon = {"type": "FeatureCollection", "features": [
+        {"properties": {"osm_key": "place", "osm_value": "town", "name": "Hinton",
+                        "county": "Caddo", "state": "Oklahoma",
+                        "country": "United States", "countrycode": "US"},
+         "geometry": {"coordinates": [-98.3556589, 35.4715518]}},
+        {"properties": {"osm_key": "highway", "osm_value": "residential",
+                        "name": "West Oklahoma Street", "city": "Hinton",
+                        "state": "Oklahoma", "country": "United States",
+                        "countrycode": "US"},
+         "geometry": {"coordinates": [-98.368129, 35.4640245]}}]}
+    calls = []
+
+    def http(url, params, timeout=8.0):
+        calls.append((url, dict(params)))
+        if url == funfacts.OSM_API:
+            assert params.get("accept-language") == "en", params
+            q = params["q"].lower()
+            if "hinton" in q:
+                return hinton
+            if params.get("countrycodes") == "us":
+                return []               # what Nominatim really returns
+            return hintok_cut           # ...and without the pin
+        if url == funfacts.PHOTON_API:
+            return photon if "hintok" in params["q"].lower() else {"features": []}
+        if url == funfacts.OPEN_METEO_API:
+            assert abs(params["latitude"] - 35.47) < 0.05, params
+            return {"daily": {"sunrise": ["2026-09-17T07:19", "2026-09-18T07:20"],
+                              "sunset": ["2026-09-17T19:37", "2026-09-18T19:35"]}}
+        raise AssertionError(f"unexpected fetch: {url} {params}")
+
+    import contextlib
+    import io
+    saved = funfacts._http_get_json
+    funfacts._http_get_json = http
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):
+            got = funfacts.get_funfact("what time is sunrise in Hintok, ok?", {})
+        assert got == {"place": "Hinton, Oklahoma", "kind": "Sunrise",
+                       "fact": "Sunrise is expected around 7:19 AM local "
+                               "time today."}, got
+        assert "read 'Hintok, ok' as 'Hinton, Oklahoma, United States'" \
+            in console.getvalue(), console.getvalue()
+        hosts = [u.split("/")[2] for u, _ in calls]
+        assert hosts[0] == "nominatim.openstreetmap.org" and \
+            calls[0][1]["q"] == "Hintok, oklahoma" and \
+            calls[0][1]["countrycodes"] == "us", calls[0]
+        assert "photon.komoot.io" in hosts, hosts
+        # An exact, real place: one Nominatim call, no fuzzy step.
+        calls.clear()
+        geo = funfacts._osm_geocode("Hinton, OK")
+        assert geo["name"] == "Hinton" and geo["state"] == "Oklahoma", geo
+        assert [u.split("/")[2] for u, _ in calls] == \
+            ["nominatim.openstreetmap.org"], calls
+        # The region is a hard constraint even without a comma, and a
+        # Canadian province pins Canada.
+        assert funfacts._region_of("Hintok ok") == ("ok", "oklahoma", "us")
+        assert funfacts._region_of("Cuba Missouri") == ("missouri", "missouri", "us")
+        assert funfacts._region_of("Banff, AB") == ("ab", "alberta", "ca")
+        assert funfacts._region_of("Paris") == ("", "", "")
+        # A hit in the wrong country is not the place asked for.
+        thai = funfacts._parse_geocode(hintok_cut[0])
+        assert thai["state"] == "Kanchanaburi Province" and thai["kind"] == "road"
+        assert not funfacts._geo_in_region(thai, "oklahoma", "us")
+        assert funfacts._geo_in_region(funfacts._parse_geocode(hinton[0]),
+                                       "oklahoma", "us")
+        # The fuzzy step only accepts a plausible misspelling.
+        assert funfacts._close_name("Hinton", "Hintok")
+        assert funfacts._close_name("Terre Haute", "Terra Haute")
+        assert not funfacts._close_name("Red Rock", "Red Rock Canyon State Park")
+        assert not funfacts._close_name("Hilton", "Hintok")
+        # With no region typed, the trail is still not a town: Photon's
+        # place wins, and it is logged as a correction.
+        calls.clear()
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):
+            geo = funfacts._osm_geocode("Hintok")
+        assert geo["display_name"] == "Hinton, Oklahoma, United States", geo
+        assert "closest place by that name" in console.getvalue()
+        # Photon down and nothing in the region: an honest None, never
+        # the Thai footpath.
+        calls.clear()
+
+        def photon_down(url, params, timeout=8.0):
+            if url == funfacts.PHOTON_API:
+                raise OSError("down")
+            return http(url, params, timeout)
+
+        funfacts._http_get_json = photon_down
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert funfacts._osm_geocode("Hintok, ok") is None
+    finally:
+        funfacts._http_get_json = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] 'sunrise in Hintok, ok' is Hinton, Oklahoma - never a "
+          "footpath in Thailand")
+
+
 def main():
     test_trim()
+    test_a_misspelt_town_in_a_named_state_is_that_town()
     test_trim_keeps_whole_sentences()
     test_smk_game()
     test_rotation()
