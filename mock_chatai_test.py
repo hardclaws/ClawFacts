@@ -36,6 +36,7 @@ def _bot(**over):
            "memory_db_path": os.path.join(tempfile.mkdtemp(), "mem.db"),
            "persona_state_path": os.path.join(tempfile.mkdtemp(), "p.json"),
            "subgoal_state_path": os.path.join(tempfile.mkdtemp(), "sg.json"),
+           "ongoing_state_path": os.path.join(tempfile.mkdtemp(), "og.json"),
            **over}
     b = bot_mod.TwitchBot(cfg)
     b.said = []
@@ -51,6 +52,10 @@ def _drain(b):
         nick, login, badges, command, argument = b._jobs.get()
         if command == "chime":
             b._do_chime(nick, argument)
+        elif command == "step":
+            b._do_step(nick, argument)
+        elif command == "tally":
+            b._do_tally(nick, argument)
         elif command == "ask":
             b._reply_ask(nick, argument)
         elif command == "say":
@@ -727,6 +732,247 @@ def test_news_questions_get_headlines_not_encyclopedia():
           "headlines, never the encyclopedia")
 
 
+def test_the_headlines_are_the_top_stories_not_a_page_title():
+    """Live-fire: 'Docbot whats the leading headlines for today' got
+    'News | leading headlines: top news of the day september 16 2026
+    (thehindu.com, 17h ago)' - the words 'leading headlines' were
+    SEARCHED and the best match was a roundup page's title, a headline
+    about headlines. The follow-up 'that is not a headline where the
+    news' had no recency word, so it went to the persona, which made a
+    joke about not being a headline. A headline ask with no subject is
+    the day's TOP STORIES feed, three real titles per message with
+    outlet and age; roundup page titles are never quoted; 'where the
+    news' / 'whats the news' / 'headlines?' need no 'today'; and a
+    repeat of the ask rotates to the next three."""
+    import threading
+    # The classifier: subject-less headline asks, however phrased.
+    for q in ("whats the leading headlines for today",
+              "that is not a headline where the news", "whats the news",
+              "news?", "headlines", "headlines please", "top stories",
+              "any news", "give us the top stories",
+              "whats going on in the world", "what happened in the news today",
+              "what's the biggest story today", "hows the news looking",
+              "tell me the news", "what are todays headlines",
+              "read me the headlines", "whats new in the news",
+              "whats the latest news", "any breaking news",
+              "Whats The Top Stories Today"):
+        assert funfacts.news_question(q), q
+        assert funfacts._news_generic(q), q
+    # ...and asks WITH a subject still search for it.
+    for q, topic in (("whats the news on the LA helicopter crash",
+                      "LA helicopter crash"),
+                     ("any news on the LA bus crash", "LA bus crash"),
+                     ("whats the news in Australia today", "Australia"),
+                     ("whats the sports news today", "sports"),
+                     ("any news on the Big Bend fire today", "Big Bend fire"),
+                     ("who got into a helicopter crash today 15th September "
+                      "2026 in California", "helicopter crash California")):
+        assert funfacts.news_question(q), q
+        assert not funfacts._news_generic(q), q
+        assert funfacts._news_query(q) == topic, (q, funfacts._news_query(q))
+    # Not news at all: sharing news, the bot's news, weather, opinion.
+    for q in ("did you hear the news, I got a new truck", "good news everyone",
+              "whats your news source", "the news said it would rain",
+              "im watching the news", "no news is good news",
+              "whats the weather today in scranton", "who is the best QB today",
+              "what a day, the news is wild", "tell us a story",
+              "whats the story with your dog", "whats new", "whats going on"):
+        assert not funfacts.news_question(q), q
+    # A page title is not a story.
+    for t in ("Top news of the day September 16 2026", "Today's top stories",
+              "News headlines for September 16", "Latest news",
+              "Morning briefing: what to know today", "5 things to know today",
+              "Weekend wrap-up: five stories you missed", "Live updates",
+              "The latest headlines - Sept. 16, 2026", "leading headlines"):
+        assert funfacts._roundup(t), t
+    for t in ("News Corp shares fall 5% after the split",
+              "Breaking news: quake hits Tokyo",
+              "Live updates: Hurricane Otis makes landfall in Mexico",
+              "Top Gun 3 announced for summer 2027",
+              "Fed holds rates steady as inflation cools",
+              "World leaders gather in New York for UN week"):
+        assert not funfacts._roundup(t), t
+
+    top = [("Top news of the day September 16 2026", "thehindu.com",
+            "Tue, 15 Sep 2026 20:00:00 GMT"),
+           ("Fed holds rates steady as inflation cools", "Reuters",
+            "Wed, 16 Sep 2026 14:07:49 GMT"),
+           ("Hurricane Otis makes landfall near Acapulco as Category 4 "
+            "storm", "AP News", "Wed, 16 Sep 2026 13:20:20 GMT"),
+           ("Senate passes stopgap funding bill, averting shutdown", "CNN",
+            "Wed, 16 Sep 2026 12:01:00 GMT"),
+           ("Apple unveils iPhone 18 lineup at Cupertino event", "The Verge",
+            "Wed, 16 Sep 2026 11:00:00 GMT"),
+           ("Eagles beat Cowboys 27-24 on last-second field goal", "ESPN",
+            "Wed, 16 Sep 2026 04:00:00 GMT"),
+           ("Fed holds rates steady as inflation cools", "Bloomberg",
+            "Wed, 16 Sep 2026 14:10:00 GMT"),          # a duplicate
+           ("Today's top stories", "example.com",
+            "Wed, 16 Sep 2026 14:10:00 GMT")]
+    calls = []
+    saved = (funfacts._google_news_top, funfacts._google_news_rss,
+             funfacts._tavily_news, llm.chat_reply)
+    funfacts._google_news_top = lambda limit=12, options=None: (
+        calls.append(("top", (options or {}).get("news_country"))) or list(top))
+    funfacts._google_news_rss = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("the search feed is not for a subject-less ask"))
+    funfacts._tavily_news = lambda *a, **k: []
+    llm.chat_reply = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no model on the news path"))
+    import contextlib
+    import io
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        b = _bot(llm_api_key="k")
+        logs = []
+        b._log = logs.append
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):
+            b._on_message("Hardclaws", "#t", "Docbot whats the leading "
+                          "headlines for today", "hardclaws", "broadcaster/1")
+            for th in threading.enumerate():
+                if th.name == "live-data":
+                    th.join(5)
+        _drain(b)
+        age = funfacts._age
+        assert b.said == [
+            "News | top headlines: Fed holds rates steady as inflation cools "
+            f"(Reuters, {age('Wed, 16 Sep 2026 14:07:49 GMT')}) | Hurricane "
+            "Otis makes landfall near Acapulco as Category 4 storm (AP News, "
+            f"{age('Wed, 16 Sep 2026 13:20:20 GMT')}) | Senate passes stopgap "
+            "funding bill, averting shutdown (CNN, "
+            f"{age('Wed, 16 Sep 2026 12:01:00 GMT')})"], b.said
+        assert len(b.said[0]) <= 450
+        assert calls == [("top", "US")], calls
+        assert "dropped 2 roundup page title(s)" in console.getvalue(), \
+            console.getvalue()
+        assert any("live data answered" in l for l in logs), logs
+        # The follow-up complaint is a fresh headline ask: it rotates to
+        # the next stories rather than becoming a persona joke, and the
+        # feed is not fetched again (ten-minute cache, one key for every
+        # phrasing).
+        b.said.clear()
+        b._on_message("Hardclaws", "#t", "Docbot that is not a headline "
+                      "where the news", "hardclaws", "broadcaster/1")
+        for th in threading.enumerate():
+            if th.name == "live-data":
+                th.join(5)
+        _drain(b)
+        assert b.said and b.said[0].startswith(
+            "News | top headlines: Apple unveils iPhone 18 lineup"), b.said
+        assert "Eagles beat Cowboys" in b.said[0], b.said
+        assert calls == [("top", "US")], calls
+        assert b._mention_wait("hardclaws") == 0, "not a persona reply"
+        # !ask takes the same path.
+        b.said.clear()
+        b._on_message("kvack", "#t", "!ask whats the news", "kvack", "")
+        _drain(b)
+        assert b.said and b.said[0].startswith("News | top headlines: "), b.said
+        # A feed of nothing but roundups is an honest 'empty', never a
+        # page title.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._google_news_top = lambda limit=12, options=None: top[:1]
+        got = funfacts.get_funfact("whats the news today", b._opts)
+        assert got["fact"].startswith("The top-stories feed came back empty"), got
+        # A subject still goes to the search feed.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._google_news_rss = lambda q, when, limit=6, options=None: [
+            ("Three dead in Los Angeles helicopter crash", "BBC",
+             "Wed, 16 Sep 2026 03:20:20 GMT")]
+        got = funfacts.get_funfact("any news on the LA helicopter crash today",
+                                   b._opts)
+        assert got["place"] == "LA helicopter crash" and got["fact"].startswith(
+            "Three dead in Los Angeles helicopter crash (BBC, "), got
+    finally:
+        (funfacts._google_news_top, funfacts._google_news_rss,
+         funfacts._tavily_news, llm.chat_reply) = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] 'whats the headlines' is the day's top stories, three real "
+          "titles a message, never a roundup page title")
+
+
+def test_the_big_top_and_middle_earth_join_the_voices():
+    """The library grows: the clown, the lot lizard (an actual lizard -
+    the name is the whole joke, nothing else), a maxed-out spin
+    instructor, Yoda, Smeagol/Gollum and the rest of the Fellowship,
+    plus a big top of pure-fun voices. Every one carries the same
+    rails and the streamer's story; '!persona list' now goes out one
+    crew per message because the whole library no longer fits in
+    one; typed names are forgiving ('Lot Lizard', 'gollum', 'Sam')."""
+    import re as _re
+    for v in ("clown", "lotlizard", "spin", "yoda", "smeagol", "gandalf",
+              "gimli", "samwise", "legolas", "treebeard", "pirate", "butler",
+              "grandma", "painter", "infomercial"):
+        assert chatai.persona(v), v
+    assert len(chatai.PERSONAS) >= 28
+    assert len(set(chatai.PERSONAS.values())) == len(chatai.PERSONAS)
+    assert set(chatai.PERSONA_BLURBS) == set(chatai.PERSONAS)
+    grouped = [n for _, names in chatai.PERSONA_GROUPS for n in names]
+    assert len(grouped) == len(set(grouped)) == len(chatai.PERSONAS), grouped
+    assert set(grouped) == set(chatai.PERSONAS)
+    # Every voice text passes the bot's own output rails: nothing
+    # explicit or tasteless, no @, no command syntax - and the lot
+    # lizard is a reptile.
+    for k, text in chatai.PERSONAS.items():
+        assert not funfacts._EXPLICIT.search(text), k
+        assert not funfacts._TASTELESS.search(text), k
+        assert "@" not in text and not _re.search(r"![a-zA-Z]", text), k
+        assert "airborne" in chatai.system_prompt(text), k
+    assert "reptile" in chatai.PERSONAS["lotlizard"]
+    assert "nothing flirty" in chatai.PERSONAS["lotlizard"]
+    assert "Gollum" in chatai.PERSONAS["smeagol"]
+    # Forgiving names.
+    for typed, want in (("Lot Lizard", "lotlizard"), ("lot-lizard", "lotlizard"),
+                        ("gollum", "smeagol"), ("Sam", "samwise"),
+                        ("spin class", "spin"), ("YODA", "yoda"),
+                        ("bob ross", "painter"), ("Gandalf the Grey", "gandalf")):
+        assert chatai.persona_name(typed) == want, typed
+    assert chatai.persona_name("nope") is None
+    assert chatai.persona("gollum") == chatai.PERSONAS["smeagol"]
+
+    b = _bot(llm_api_key="k")
+    b._persona_command("amod", "moderator/1", "list")
+    _drain(b)
+    assert len(b.said) == 1 + len(chatai.PERSONA_GROUPS), b.said
+    assert all(len(s) <= 450 for s in b.said), [len(s) for s in b.said]
+    assert "28 voices" in b.said[0] or f"{len(chatai.PERSONAS)} voices" in b.said[0]
+    joined = " ".join(b.said)
+    for n in chatai.PERSONAS:
+        assert f"{n} (" in joined, n
+    assert "middle-earth" in joined and "smeagol (precious" in joined
+    # 'set Lot Lizard' / 'set gollum' land on the canonical voice, and
+    # the model receives that voice.
+    b.said.clear()
+    b._persona_command("amod", "moderator/1", "set Lot Lizard")
+    assert b.said == ["@amod voice set to lotlizard."], b.said
+    assert b._persona_text() == chatai.PERSONAS["lotlizard"]
+    b._persona_command("amod", "moderator/1", "set gollum")
+    assert b._persona == {"name": "smeagol"}
+    systems = []
+    orig = llm.chat_reply
+    b._distill = lambda *a, **k: None
+    llm.chat_reply = lambda s, u, c, **k: (systems.append(s) or
+                                           "We helps the nice streamer, yes... "
+                                           "no! nasty chatses, precious.")
+    try:
+        b._on_message("Hardclaws", "#t", "doc what do you think of my truck",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert systems and chatai.PERSONAS["smeagol"] in systems[0]
+        assert "airborne" in systems[0]
+        assert b.said[-1].startswith("@Hardclaws We helps"), b.said
+    finally:
+        llm.chat_reply = orig
+    b2 = _bot(persona_state_path=b.cfg["persona_state_path"])
+    assert b2._persona_text() == chatai.PERSONAS["smeagol"]
+    print("[PASS] the big top and middle-earth join the voices; the list "
+          "goes out a crew at a time")
+
+
 def test_leaked_reasoning_is_never_posted():
     """Live-fire 15:30:09-15:30:53: 'docbot who is your favorite NFL
     team' got, three times, 'The user is asking me (Docbot) who my
@@ -1188,6 +1434,7 @@ def test_mods_can_switch_the_bots_voice():
         b._persona_command("amod", "moderator/1", "set nobody")
         assert any("no voice called" in s for s in b.said), b.said
         b._persona_command("amod", "moderator/1", "list")
+        _drain(b)                    # the list goes out through the queue
         assert any("sarge" in s and "rookie" in s for s in b.said), b.said
         b._persona_command("amod", "moderator/1", "custom too short")
         assert any("12-300" in s for s in b.said), b.said
@@ -2414,8 +2661,340 @@ def test_live_data_questions_take_the_fast_lane():
           "the chat AI's cooldown and its worker queue")
 
 
+def test_game_and_count_controls_are_recognised():
+    """The parsers behind the working memory, on the lines the streamer
+    actually typed and the ones that must NOT fire. Pure functions."""
+    import ongoing
+    N = ("doc", "docbot", "truckingwithdocbot")
+    idle = {"activity": None, "tallies": {}}
+
+    def ctl(text, state=idle, strict=False):
+        return ongoing.control(text, state, N, strict=strict)
+
+    # -- a game is set up by asking for one
+    c = ctl("Docbot lets do a test run. Topic would be Cycling and lets "
+            "make it 3 rounds")
+    assert c and c.kind == "start" and c.topic == "Cycling" \
+        and c.rounds == 3, c
+    assert "3-round" in c.what and "Cycling" in c.what, c.what
+    c = ctl("docbot trivia time! topic: 80s music, 5 questions")
+    assert c.kind == "start" and c.topic == "80s music" and c.rounds == 5 \
+        and c.cadence is None, c              # '80s' is a decade, not 80 s
+    c = ctl("hey docbot, quiz us on world capitals")
+    assert c.kind == "start" and c.topic == "world capitals", c
+    c = ctl("lets do a cycling quiz, start now")
+    assert c.kind == "start" and c.go, c
+    # ...never by mentioning one, asking about one, or a bare test run
+    for line in ("is trivia tonight?", "do you like trivia?",
+                 "we played trivia last night lol", "you are the trivia host",
+                 "doc are you hosting a trivia game?", "lets do a test run",
+                 "I love a good quiz", "make it 3 rounds",
+                 "start the first round",              # no game yet
+                 "what is the current temperature in Rolla, Missouri?",
+                 "hows it going", "pick a number 1-100"):
+        assert ctl(line) is None, (line, ctl(line))
+
+    # -- inside a game: the host's controls
+    game = {"activity": {"what": "a 3-round Cycling quiz", "topic": "Cycling",
+                         "rounds": 3, "round": 1, "pending": None, "open": 1,
+                         "question": "Which part holds the pedals?",
+                         "asked_by": "Hardclaws", "log": [], "done": False},
+            "tallies": {}}
+    c = ctl("Docbot lets get Round 2 going. Give 30secs to answer then "
+            "start round 3 30secs after that", game)
+    assert c.kind == "round" and c.n == 2 and c.cadence == (30.0, 30.0), c
+    assert ctl("docbot start the first round", game).n == 1
+    assert ctl("round 2", game).n == 2
+    assert ctl("next question", game).n == 2
+    assert ctl("final round", game).n == 3
+    assert ctl("round 3 with 45 secs to answer", game).cadence == (45.0, None)
+    for line in ("whats the answer", "answer?", "times up", "who got it right"):
+        assert ctl(line, game).kind == "reveal", line
+    assert ctl("what round are we on?", game).kind == "status"
+    assert ctl("repeat the question", game).repeat
+    for line in ("game over", "thats it for the game", "cancel the game"):
+        assert ctl(line, game).kind == "end", line
+    assert ctl("who is winning", game).kind == "score"
+    # a guess, a lookup, smalltalk and an off-topic question are chat
+    for line in ("crankset", "is it the crankset?", "what is a crankset?",
+                 "you ok?", "hows it going",
+                 "what is the current temperature in Rolla, Missouri?",
+                 "round 2 was hard, give them 30 secs",
+                 "we're done here", "good game"):
+        assert ctl(line, game) is None, (line, ctl(line, game))
+    # the host's UN-addressed lines: only outright calls count
+    assert ctl("whats the answer", game, strict=True).kind == "reveal"
+    assert ctl("round 2", game, strict=True).n == 2
+    assert ctl("lets go", game, strict=True) is None
+    assert ctl("next", game, strict=True) is None
+    assert ctl("who is winning", game, strict=True) is None
+
+    # -- counts
+    c = ctl("docbot keep count of Dirty Lepages and we will tell the bot "
+            "when we spot one")
+    assert c.kind == "tally_start" and c.label == "Dirty Lepages" \
+        and c.key == "dirty lepage", c
+    assert ctl("keep track of how many chairs he breaks").label \
+        == "chairs he breaks"
+    counting = {"activity": None, "tallies": {
+        "dirty lepage": {"label": "Dirty Lepages", "count": 1, "by": "hardclaws",
+                         "since": 0, "updated": 0, "last": 0}}}
+    for line, n in (("dirty lepage!", 1), ("spotted one", 1), ("+1", 1),
+                    ("+2 dirty lepages", 2), ("another dirty lepage", 1),
+                    ("there's another one", 1), ("that counts", 1),
+                    ("that was a dirty lepage lol", 1)):
+        c = ctl(line, counting)
+        assert c and c.kind == "tally_add" and c.n == n, (line, c)
+    for line in ("how many dirty lepages so far?", "whats the count?",
+                 "dirty lepage count?", "what's the dirty lepage count",
+                 "how many so far?", "count check"):
+        assert ctl(line, counting).kind == "tally_query", line
+    assert ctl("scratch that", counting).kind == "tally_sub"
+    assert ctl("false alarm", counting).kind == "tally_sub"
+    assert ctl("set the dirty lepage count to 5", counting).n == 5
+    assert ctl("stop counting dirty lepages", counting).kind == "tally_stop"
+    assert ctl("reset the count", counting).kind == "tally_reset"
+    # a question ABOUT the thing, an opinion, or unrelated chat is not a bump
+    for line in ("whats a dirty lepage?", "did anyone see that dirty lepage?",
+                 "what do you think of dirty lepages?", "hows it going",
+                 "you have alot of useless facts", "another joke please",
+                 "what is the current temperature in Rolla, Missouri?"):
+        assert ctl(line, counting) is None, (line, ctl(line, counting))
+    # the thing counted must be postable
+    assert ongoing.tally_label("porn clips and we count them") is None
+    # cadence: times in a timing sentence only
+    assert ongoing.cadence("give them a minute") == (60.0, None)
+    assert ongoing.cadence("45s to answer and then keep going") == (45.0, 45.0)
+    assert ongoing.cadence("the 90s were great") is None
+    assert ongoing.cadence("5 questions") is None
+    assert ongoing.looks_like_question("Name the rider who won in 1999")
+    assert not ongoing.looks_like_question("Round 2 is right here.")
+    print("[PASS] game and count controls are recognised - and chat is not")
+
+
+def test_the_bot_hosts_the_quiz_it_was_asked_to_host():
+    """Live-fire, 2026-09-17: 'lets do a test run. Topic would be
+    Cycling and lets make it 3 rounds' -> the bot posed round 1
+    (crankset), then for 'lets get Round 2 going' it asked chat the
+    temperature in Rolla, Missouri, then explained it was 'just the
+    on-stream info bot', then went 'mangled in the gears' twice. Every
+    prompt was built from the last few HUMAN lines with the bot's own
+    lines and every earlier ask stripped: nothing said it was hosting.
+
+    Now the game is state the bot holds: the persona is TOLD what it is
+    hosting and where it is up to in every prompt, a round is a job the
+    model must perform (the line must BE a question, and a new one), the
+    answer is called by the host (or by the cadence he asked for), the
+    fact engine is not a back door while a round is open, a viewer
+    cannot run the game, and a restart mid-game is not amnesia."""
+    import ongoing
+    b = _bot(llm_api_key="k")
+    logs, prompts = [], []
+    b._log = logs.append
+    b._distill = lambda *a, **k: None
+    questions = iter(["Which part of a bike do the pedals attach to?",
+                      "Which part of a bike do the pedals attach to?",  # repeat
+                      "What is the name of the race with the yellow jersey?",
+                      "Round 3 is right here.",             # not a question
+                      "How many gears does a single-speed bike have?"])
+    answers = iter(["The crankset - and nobody in chat got it.",
+                    "The Tour de France - kvack had it.",
+                    "One. kvack takes it, thanks for playing."])
+    engine = []
+    orig_reply, orig_fact = llm.chat_reply, bot_mod.get_funfact
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or None)
+
+    def model(system, user, cfg=None, **kw):
+        prompts.append(user)
+        if "YOUR JOB RIGHT NOW" in user:
+            if "your line IS the round" in user:
+                return next(questions)
+            if "Time is up on round" in user:
+                return next(answers)
+        # An ordinary reply while the game runs - the persona knows.
+        return "Sit tight, the host calls time - I'm not saying."
+
+    llm.chat_reply = model
+    MOD = "broadcaster/1"
+
+    def say(nick, text, badges=""):
+        b._on_message(nick, "#t", text, nick.lower(), badges)
+        _drain(b)
+
+    def fire_timer():
+        t = b._ongoing_timer
+        assert t is not None, "no cadence step was scheduled"
+        t.cancel()
+        b._ongoing_timer = None
+        t.function(*t.args)
+        _drain(b)
+
+    try:
+        # A viewer cannot make the bot host a game.
+        say("kvack", "docbot lets do a 3 round movie quiz")
+        assert b.said[-1] == "@kvack " + ongoing.NOT_A_MOD_LINE, b.said
+        assert b._ongoing.current() is None
+        # The streamer can. The set-up is acknowledged without a model.
+        say("Hardclaws", "Docbot lets do a test run. Topic would be Cycling "
+            "and lets make it 3 rounds", MOD)
+        assert "3-round Cycling quiz" in b.said[-1] and "round 1" in b.said[-1], \
+            b.said[-1]
+        assert not prompts, "the set-up line went to the model"
+        # Round 1: the model writes the question, framed as the job.
+        say("Hardclaws", "docbot start the first round", MOD)
+        assert b.said[-1] == ("Round 1 of 3: Which part of a bike do the "
+                              "pedals attach to?"), b.said[-1]
+        assert "YOUR JOB RIGHT NOW" in prompts[-1] and \
+            "hosting a 3-round Cycling quiz" in prompts[-1], prompts[-1]
+        assert "round 1 of 3 is DUE" in prompts[-1], prompts[-1]
+        # A guess in chat is chat; a lookup aimed at the bot is held.
+        said_before = len(b.said)
+        say("kvack", "crankset")
+        assert len(b.said) == said_before
+        say("kvack", "docbot what part of a bike holds the pedals?")
+        assert engine == [], "the fact engine answered the quiz question"
+        assert "round 1 is open" in b.said[-1], b.said[-1]
+        # An ordinary question to the bot mid-game: the persona replies,
+        # and its prompt carries the game state and the open question.
+        b._chat_ai_mention_by.clear()
+        b._chat_ai_mention_last = 0.0
+        say("kvack", "docbot is it the crankset?")
+        assert b.said[-1] == "@kvack Sit tight, the host calls time - I'm not saying."
+        assert "WHAT IS GOING ON" in prompts[-1] and \
+            "round 1 of 3 is OPEN" in prompts[-1] and \
+            "pedals attach to" in prompts[-1], prompts[-1]
+        # A viewer cannot call the answer; the host can - by name or not.
+        b._ongoing_pace.clear()          # state answers: one per 15s each
+        say("kvack", "docbot whats the answer")
+        assert b.said[-1] == "@kvack " + ongoing.NOT_THE_HOST_LINE, b.said[-1]
+        say("Hardclaws", "whats the answer", MOD)
+        assert b.said[-1] == "Round 1 answer: The crankset - and nobody in " \
+            "chat got it.", b.said[-1]
+        assert "Time is up on round 1" in prompts[-1] and \
+            "pedals attach to" in prompts[-1], prompts[-1]
+        # Round 2 with a cadence. The model's first try repeats round 1:
+        # refused (one re-ask, with the miss named), the second posts.
+        say("Hardclaws", "Docbot lets get Round 2 going. Give 30secs to "
+            "answer then start round 3 30secs after that", MOD)
+        assert b.said[-1] == ("Round 2 of 3: What is the name of the race "
+                              "with the yellow jersey?"), b.said[-1]
+        assert any("repeated an earlier one" in l for l in logs), logs
+        assert "different from anything you asked before" in prompts[-1]
+        assert any("next game step (reveal 2) in 30s" in l for l in logs), logs
+        # The cadence runs the rest by itself: reveal 2, ask 3, reveal 3.
+        # Round 3's first try ('Round 3 is right here.') is not a
+        # question - the live-fire failure - and is never posted as one.
+        fire_timer()
+        assert b.said[-1] == "Round 2 answer: The Tour de France - kvack had it."
+        fire_timer()
+        assert b.said[-1] == ("Round 3 of 3: How many gears does a "
+                              "single-speed bike have?"), b.said[-1]
+        assert any("was not a question" in l for l in logs), logs
+        assert not any("right here" in x for x in b.said), b.said
+        fire_timer()
+        assert b.said[-1] == "Round 3 answer: One. kvack takes it, thanks for playing."
+        assert b._ongoing_timer is None, "a step was scheduled after the last round"
+        assert b._ongoing.current()["done"] is True
+        # Anyone can ask where things stand - answered from state.
+        b._ongoing_pace.clear()
+        say("kvack", "docbot what round are we on?")
+        assert "finished - all 3 rounds" in b.said[-1], b.said[-1]
+        # A restart mid-game is not amnesia: the state file has it all.
+        fresh = ongoing.Ongoing(b.cfg["ongoing_state_path"])
+        a = fresh.current()
+        assert a and a["round"] == 3 and a["done"] and \
+            len(fresh._questions(a)) == 3, a
+    finally:
+        llm.chat_reply = orig_reply
+        bot_mod.get_funfact = orig_fact
+    print("[PASS] the bot hosts the quiz it was asked to host, round by round")
+
+
+def test_a_count_survives_the_hour_and_is_never_guessed():
+    """Live-fire: 'keep count of Dirty Lepages and we will tell the bot
+    when we spot one' - the count reached 1; an hour later the bot had
+    no idea what a Dirty Lepage was. Nothing stored it: notes need
+    'take a mental note', the distill keeps only self-stated viewer
+    facts, and the room buffer had long rolled past it.
+
+    A count is arithmetic the bot does itself - no model near it: it
+    is opened by a mod, bumped by the mods (or anyone, with
+    chat_ai_count_anyone), read back by anyone, and it sits in every
+    persona prompt while it stands - and in ongoing.json across a
+    restart. The bot also cannot 'lose' it to a busy model: none of
+    these lines cost a model call."""
+    import ongoing
+    b = _bot(llm_api_key="k")
+    logs, prompts = [], []
+    b._log = logs.append
+    b._distill = lambda *a, **k: None
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c=None, **k: (
+        prompts.append(u) or "Two so far, and the night is young.")
+    MOD = "broadcaster/1"
+
+    def say(nick, text, badges=""):
+        b._on_message(nick, "#t", text, nick.lower(), badges)
+        _drain(b)
+
+    try:
+        say("kvack", "docbot keep count of dirty lepages")
+        assert b.said[-1] == "@kvack " + ongoing.NOT_A_MOD_LINE, b.said
+        say("Hardclaws", "docbot keep count of Dirty Lepages and we will "
+            "tell the bot when we spot one", MOD)
+        assert "counting Dirty Lepages" in b.said[-1] and "at 0" in b.said[-1]
+        say("Hardclaws", "docbot dirty lepage!", MOD)
+        assert b.said[-1] == "@Hardclaws Dirty Lepages: 1."
+        # A viewer's bump is refused but answered; the number holds.
+        b._ongoing_pace.clear()
+        say("kvack", "docbot spotted one")
+        assert "Dirty Lepages is at 1" in b.said[-1] and "mods" in b.said[-1]
+        assert b._ongoing.tallies["dirty lepage"]["count"] == 1
+        # ...unless the config opens the count to the room.
+        b.cfg["chat_ai_count_anyone"] = True
+        say("kvack", "docbot another dirty lepage")
+        assert b.said[-1] == "@kvack Dirty Lepages: 2."
+        b.cfg["chat_ai_count_anyone"] = False
+        assert not prompts, "a count line reached the model"
+        # An hour later. The count is still exact, and it is in the
+        # persona's prompt for anything else that gets asked.
+        for v in b._ongoing.tallies.values():
+            v["since"] -= 3600
+            v["updated"] -= 3600
+            v["last"] -= 3600
+        b._chat_ai_mention_by.clear()
+        b._chat_ai_mention_last = 0.0
+        say("Hardclaws", "docbot how many dirty lepages so far?", MOD)
+        assert b.said[-1].startswith("@Hardclaws Dirty Lepages: 2 so far"), b.said[-1]
+        assert "1h ago" in b.said[-1], b.said[-1]
+        assert not prompts
+        say("Hardclaws", "docbot hows the ride going", MOD)
+        assert prompts and "Counts you are keeping" in prompts[-1] and \
+            "Dirty Lepages: 2" in prompts[-1], prompts[-1]
+        # Corrections, and the end of it.
+        say("Hardclaws", "docbot scratch that", MOD)
+        assert b.said[-1] == "@Hardclaws Dirty Lepages: 1."
+        say("Hardclaws", "docbot set the dirty lepage count to 4", MOD)
+        assert b.said[-1] == "@Hardclaws Dirty Lepages set to 4."
+        # A restart keeps it.
+        fresh = ongoing.Ongoing(b.cfg["ongoing_state_path"])
+        assert fresh.tallies["dirty lepage"]["count"] == 4
+        say("Hardclaws", "docbot stop counting dirty lepages", MOD)
+        assert b.said[-1] == "@Hardclaws done counting Dirty Lepages - final count 4."
+        assert not b._ongoing.tallies
+        # With nothing running, 'how many so far?' is chat again.
+        assert ongoing.control("how many so far?", b._ongoing.snapshot(),
+                               b._chat_ai_names) is None
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a count survives the hour, exact, with no model near it")
+
+
 def main():
     test_a_mention_gets_one_bounded_reply()
+    test_game_and_count_controls_are_recognised()
+    test_the_bot_hosts_the_quiz_it_was_asked_to_host()
+    test_a_count_survives_the_hour_and_is_never_guessed()
     test_chime_ins_are_gated()
     test_ambient_attempts_use_the_ambient_clock_only()
     test_the_streamer_can_address_the_bot_but_it_never_butts_in()
@@ -2428,6 +3007,8 @@ def main():
     test_four_people_asking_at_once_all_get_answers()
     test_distilling_is_paced_per_viewer()
     test_news_questions_get_headlines_not_encyclopedia()
+    test_the_headlines_are_the_top_stories_not_a_page_title()
+    test_the_big_top_and_middle_earth_join_the_voices()
     test_leaked_reasoning_is_never_posted()
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()

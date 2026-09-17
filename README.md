@@ -205,6 +205,38 @@ needs a disk that survives restarts and a process that never sleeps, which
 rules out the "free web app" platforms); Google Cloud's `e2-micro` is the
 runner-up; the guide's Step 0 table has the 2026 fine print.
 
+### The admin panel
+
+Once the bot lives on a server there is no console window, so the bot can
+serve one: a small password-protected web page (`adminpanel.py`, standard
+library only, running inside the bot process) with a dashboard (connected or
+not, uptime and build, whether the bot is a mod, the AI provider and which
+models are resting, Twitch token health), the live log with a filter, the
+`!bot` / `!so` / `!cb` / `!beef` switches, speak-as-the-bot, the standing
+notice, reminders, custom commands, haul, sub goal and voice, viewer memory
+(view and `!forget`), a `config.json` editor with masked secrets that applies
+live where it can and says "restart" where it cannot, panel users, a Twitch
+re-login (the same device code flow, shown in the page) and a Restart button.
+
+```bash
+python3 bot.py --admin-user yourname               # set a password (10+ characters)
+python3 bot.py --admin-user modname --role mod     # optional moderator login
+# config.json: "admin_panel_enabled": true   ->  restart  ->  http://localhost:8477
+```
+
+Two roles: **admin** does everything; **mod** gets the switches, chat,
+reminders, commands and the stream tab but never config, secrets, memory,
+users or restart. Logins are salted PBKDF2 hashes in `admin_users.json`
+(gitignored), sessions are `HttpOnly; SameSite=Strict` cookies that expire
+after 12 idle hours, five wrong passwords lock a name for 15 minutes with a
+one-second cost per miss, every state change is a POST with a per-session
+CSRF token, and every action lands in the bot's log as `[admin] user: …`.
+
+The panel listens on `127.0.0.1` by default and **refuses** `0.0.0.0` or a
+public address unless `admin_panel_public` is set as well. On a server, reach
+it over Tailscale (bind it to the VM's `100.x` address) or an SSH tunnel -
+`deploy/DEPLOY.md` Step 7 walks through both.
+
 Quick-and-dirty local alternatives:
 
 - **`nohup`** — `nohup python3 bot.py >> bot.log 2>&1 &`
@@ -608,6 +640,43 @@ weather, not news), opinions aimed at the bot ("who's the best QB today")
 stay with the persona, and plain trivia ("who won the 1998 World Cup") stays
 with the encyclopedia.
 
+**"Whats the leading headlines for today"** — live-fire, that got `News |
+leading headlines: top news of the day september 16 2026 (thehindu.com,
+17h ago)`. Two things went wrong. The words *leading headlines* were
+treated as the **subject** and searched, and the best match for a search
+about headlines is a roundup page — a headline *about* headlines. Then the
+follow-up, *"that is not a headline where the news"*, had no "today" in
+it, so it was not a news question at all and went to the persona, which
+made a joke about not being a headline.
+
+Now a headline ask with **no subject** — *whats the news, headlines?, top
+stories, whats the leading headlines for today, whats going on in the
+world, what happened in the news today, where the news* — is answered
+from Google News' **top-stories feed** (the front page as RSS, no query,
+no key), or Tavily's news topic when the feed is down:
+
+- **Three real stories per message**, each with outlet and age, packed to
+  the message budget: `News | top headlines: Fed holds rates steady as
+  inflation cools (Reuters, 2h ago) | Hurricane Otis makes landfall near
+  Acapulco as Category 4 storm (AP News, 3h ago) | Senate passes stopgap
+  funding bill, averting shutdown (CNN, 4h ago)`. Asking again rotates to
+  the next three; every phrasing shares one ten-minute cache.
+- **Roundup page titles are never quoted** — *Top news of the day…*,
+  *Today's top stories*, *Morning briefing: what to know today*, *5 things
+  to know today*, *Live updates* — whatever feed they came from. A feed of
+  nothing but roundups is an honest "the top-stories feed came back empty
+  just now", not a page title.
+- The ask needs **no recency word**: "the headlines" are today's by
+  definition. Sharing news ("I got news, my truck is fixed"), the bot's
+  news ("whats your news source") and "the news said it would rain" are
+  not asks.
+- Asks **with** a subject — *news on the LA bus crash*, *whats the news in
+  Australia today*, *any news on the Big Bend fire* — still search for
+  that subject as before. A capitalised *Big*, *Top* or *World* mid-question
+  is a name and stays in the search; lowercase ask-words are dropped.
+- `news_country` (default `US`) picks whose front page it reads — `GB`,
+  `AU`, `CA`…
+
 ### "How long does it take to run 5k" — the model's question, not the encyclopedia's
 
 Live-fire, two rounds:
@@ -714,6 +783,65 @@ the time you drove to Alaska") is not one, and `chat_ai_notice_minutes: 0`
 turns the feature off. Every notice kept, repeated, or cleared is a line in
 the log.
 
+### "Lets do a 3 round cycling quiz" — it hosts, and remembers it is hosting
+
+Live-fire: "Docbot lets do a test run. Topic would be Cycling and lets make
+it 3 rounds" → the bot posed round one (the crankset), and then for "lets
+get Round 2 going" it asked chat *what the current temperature in Rolla,
+Missouri was*, explained that it was "just the on-stream info bot", and
+went "mangled in the gears" twice. Separately, "keep count of Dirty Lepages
+and we will tell the bot when we spot one" got the count to 1 — and an hour
+later the bot had no idea what a Dirty Lepage was.
+
+Both were the same missing thing. Every prompt was built from the last few
+*human* lines with the bot's own lines and every earlier ask stripped out
+(on purpose — old questions were hijacking new answers), the long-term
+memory keeps only what a viewer says about *themselves*, and a mod note
+needs the words "take a mental note". Nothing anywhere held **what we are
+doing right now**. That is `ongoing.py`, the chat AI's working memory:
+
+- **A game.** A mod or the broadcaster sets one up in plain chat — "docbot
+  lets do a test run, topic cycling, 3 rounds", "quiz us on world capitals",
+  "trivia time! topic: 80s music, 5 questions". The bot acknowledges it
+  (no model) and waits for "start the first round" / "round 1" / "go". A
+  round is a **job**, not a chat line: the model is told *your line IS the
+  round-2 question*, and what comes back must actually be a question and
+  not one it already asked, or it is asked again with the miss named — and
+  if it still cannot, the bot says so ("my round 2 question got stuck in the
+  gears — say 'round 2' again") instead of posting a stand-in. The question
+  is posted as `Round 2 of 3: …`. While a round is open, "docbot what part
+  of a bike holds the pedals?" is told to wait for the host rather than
+  looked up, and the persona's replies to everything else carry the game
+  state and the open question, so "is it the crankset?" gets "the host
+  calls time" and never a denial that it is hosting. The host (or a mod)
+  calls "whats the answer" / "times up" / "who got it right" — by name or,
+  from the host, without — and the model gives the answer as
+  `Round 1 answer: …`, naming only people who actually appear in chat. A
+  timing ask — "give 30 secs to answer then start round 3 30 secs after
+  that" — becomes a cadence the bot runs by itself, one scheduled step at a
+  time; "game over" / "cancel the game" ends it; "what round are we on?" /
+  "repeat the question" is answered from state by anyone; "another round"
+  after the last one extends it. A viewer cannot start a game or call its
+  rounds — they are told so, once, in plain words.
+- **Counts.** "keep count of dirty lepages" (mods / broadcaster) opens a
+  named counter; "dirty lepage!", "spotted one", "+1", "another one", "+2"
+  bump it; "scratch that", "false alarm", "-1" take one back; "set the count
+  to 5" corrects it; "how many dirty lepages so far?", "whats the count?"
+  read it back with when it started and when the last one was; "stop
+  counting dirty lepages" closes it with the final number. No model is
+  anywhere near a count — it is arithmetic, and the model is the one part
+  of the bot that cannot be trusted with it — so it costs nothing and is
+  exact an hour later. Bumping is for the mods, the broadcaster and whoever
+  opened it unless `chat_ai_count_anyone` is true; asking is for anyone.
+  Every open count sits in the persona's prompt, quoted exactly.
+
+Both live in `ongoing.json` (`ongoing_state_path`), so a restart mid-game
+is not amnesia. A game nobody has touched for `chat_ai_activity_minutes`
+(45) is dropped; counts stay until they are stopped. The admin panel shows
+the game and the counts on the dashboard and lets a mod end the game or
+drop a count from the Chat tab. Every step, refusal and count change is a
+line in the log.
+
 ### Changing the voice
 
 Mods can switch the persona at runtime — it reaches the model
@@ -721,13 +849,16 @@ immediately and survives restarts (`!persona` is mod-only):
 
 ```
 !persona            - which voice is active
-!persona list       - the voices
+!persona list       - the voices, one message per crew
 !persona set sarge  - switch
+!persona set gollum - names are forgiving: "Lot Lizard", "gollum", "Sam", "spin class" all land
 !persona custom <12-300 characters describing the voice>
 !persona reset      - back to Doc
 ```
 
-The built-in voices come in two crews. From the streamer's own world:
+There are twenty-eight built-in voices in four crews (`!persona list`
+reads them out one crew per message — the whole library no longer fits
+in one Twitch line). From the streamer's own world:
 **medic** (airborne combat medic from his army days — calm, clipped,
 counting everyone's water bottles like ammo), **cb** (1970s Citizens
 Band radio, breaker one-nine, hands out handles and calls the streamer
@@ -744,8 +875,48 @@ coffee refills, calls everybody "hon"), **commentator** (a posh British
 play-by-play voice treating a treadmill mile and a Warzone drop with
 equal gravity — disasters are "regrettable"), and **noir** (a
 hardboiled private eye narrating the stream like a case file — short,
-hard sentences). Every persona sits under the same hard rules — a
-voice changes the flavour, never the rails.
+hard sentences), and **lotlizard** — an *actual lizard*, a leathery old
+iguana who has lived under the fuel-island dumpster for eleven years,
+knows every rig by its brakes and sells warm rocks as prime real estate.
+The name is the whole joke and it is played dead straight; the prompt
+says "you are a reptile and only a reptile — nothing flirty, ever", and
+like every voice it sits under the output rails, so it cannot be turned
+into the other thing.
+
+The big top — voices that are pure fun: **clown** (Bumper, a honk-honk
+birthday-party clown, groan-worthy puns and balloon animals — the
+birthday kind, never the sewer kind), **spin** (a maxed-out indoor-cycling
+instructor who treats chat like a 6am class — ADD A TURN, every task is
+a hill and every hill is yours, capitals in bursts but never a whole
+line), **infomercial** (a late-night pitchman who cannot stop selling —
+"Tired of MERGING?", but wait, there's more; never a price, a link or a
+real brand), **pirate** (a skipper who has taken the semi for a ship and
+the interstate for the sea), **butler** (an unflappable English
+gentleman's gentleman — a bad drop is "perhaps not our finest hour,
+sir"), **grandma** (everyone's grandmother, proud of all of you, worried
+whether you have eaten, sharper than she lets on) and **painter** (the
+soft-spoken public-TV landscape painter — no mistakes, only happy little
+accidents).
+
+Middle-earth and beyond: **yoda** (object first, verb last, nine hundred
+years of truck-stop wisdom — do, or do not), **smeagol** (Smeagol *and*
+Gollum, arguing inside the same line about the precious — "we helps
+them, yes… no! nasty chatses!" — silly and pitiable, never menacing;
+`!persona set gollum` works too), **gandalf** (the grey wizard riding
+shotgun — counsel, proverbs, and YOU SHALL NOT PASS on the right),
+**gimli** (axe, ale, no indoor voice, a running tally against the
+elves — "that still only counts as one"), **samwise** (the loyal
+gardener, po-ta-toes, "Mister" and "Miss", carrying the snacks),
+**legolas** (sees everything first and says so — "they are taking the
+hobbits to the weigh station") and **treebeard** (the Ent, hoom hom,
+never hasty, halfway through a very long thought and deeply frustrated
+by a one-line limit).
+
+Every persona sits under the same hard rules — a voice changes the
+flavour, never the rails — and the same 240-character, one-line, one-emoji
+output gate; a voice that shouts (spin, gimli) still cannot post a wall
+of capitals. The admin panel's Voice drop-down lists all twenty-eight
+with the same short tags.
 
 Whichever voice is active — including a custom one — it also always
 receives the streamer's story: army veteran, airborne combat medic,
@@ -2323,6 +2494,7 @@ appends fake joke comments.
 | -------------------- | ---------------------------------------------- |
 | `bot.py`             | Twitch IRC bot (connection, chat, commands).    |
 | `auth.py`            | Twitch login (device-code flow) + auto-refresh. |
+| `adminpanel.py`      | The password-protected web admin panel.         |
 | `funfacts.py`        | Fact lookup + ranking, spice, rotation, caching.|
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
@@ -2336,6 +2508,7 @@ appends fake joke comments.
 | `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
+| `ongoing.py`         | The chat AI's working memory: the quiz it hosts, the counts it keeps. |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
 | `config.example.json`| Sample configuration.                           |
@@ -2351,6 +2524,7 @@ appends fake joke comments.
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_subgoal_test.py` | Offline !subgoal tests.                        |
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
+| `mock_adminpanel_test.py` | Offline admin-panel tests (real HTTP on loopback). |
 | `mock_beef_test.py`  | Offline `!beef` story tests.                    |
 | `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |
 | `mock_beefllm_test.py` | Offline LLM-pass tests, incl. a fake OpenAI server. |
@@ -2360,6 +2534,7 @@ appends fake joke comments.
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |
 | `beef_state.json`    | The beef leaderboard and !revenge windows.      |
+| `ongoing.json`       | The game being hosted and the counts kept; written at runtime. |
 | `custom_commands.json` | Mod-defined commands; written at runtime.     |
 | `names.json`         | Harvested `!smk` names; written at runtime.     |
 s.                        |

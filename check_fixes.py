@@ -34,6 +34,115 @@ def main() -> int:
 
     _cc = _fresh()
 
+    def _headlines_are_top_stories():
+        """'whats the leading headlines for today' was searched as the
+        words 'leading headlines' and quoted a roundup page's title.
+        A subject-less headline ask reads the top-stories feed, three
+        real titles a message, and roundup titles are never quoted."""
+        for fn in ("_news_generic", "_roundup", "_google_news_top",
+                   "_pack_headlines"):
+            if not callable(getattr(funfacts, fn, None)):
+                return False
+        if not (funfacts._news_generic("whats the leading headlines for today")
+                and funfacts._news_generic("that is not a headline where the news")
+                and funfacts._news_generic("whats the news")
+                and not funfacts._news_generic("any news on the LA bus crash")
+                and not funfacts.news_question("whats your news source")):
+            return False
+        if not funfacts._roundup("Top news of the day September 16 2026") \
+                or funfacts._roundup("Fed holds rates steady as inflation cools"):
+            return False
+        saved = (funfacts._google_news_top, funfacts._google_news_rss,
+                 funfacts._tavily_news)
+        funfacts._google_news_top = lambda limit=12, options=None: [
+            ("Top news of the day September 16 2026", "thehindu.com",
+             "Tue, 15 Sep 2026 20:00:00 GMT"),
+            ("Fed holds rates steady as inflation cools", "Reuters",
+             "Wed, 16 Sep 2026 14:07:49 GMT"),
+            ("Senate passes stopgap funding bill", "CNN",
+             "Wed, 16 Sep 2026 12:01:00 GMT")]
+        funfacts._google_news_rss = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("search feed used for a generic ask"))
+        funfacts._tavily_news = lambda *a, **k: []
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            got = funfacts.get_funfact("whats the leading headlines for today",
+                                       {"max_message_chars": 450})
+        except Exception:
+            return False
+        finally:
+            (funfacts._google_news_top, funfacts._google_news_rss,
+             funfacts._tavily_news) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+        return bool(got and got.get("news") and got.get("place") == "top headlines"
+                    and got["fact"].startswith("Fed holds rates steady")
+                    and "Senate passes" in got["fact"]
+                    and "Top news of the day" not in got["fact"])
+
+    def _working_memory_holds():
+        import ongoing as _og
+        import tempfile as _tf
+        names = ("doc", "docbot")
+        d = _tf.mkdtemp(prefix="clawfacts-check-")
+        og = _og.Ongoing(os.path.join(d, "og.json"))
+        start = _og.control("Docbot lets do a test run. Topic would be Cycling "
+                            "and lets make it 3 rounds", og.snapshot(), names)
+        if not (start and start.kind == "start" and start.rounds == 3):
+            return False
+        og.begin(start, "Hardclaws", 0.0)
+        r2 = _og.control("lets get Round 2 going. Give 30secs to answer then "
+                         "start round 3 30secs after that", og.snapshot(), names)
+        if not (r2 and r2.kind == "round" and r2.n == 2
+                and r2.cadence == (30.0, 30.0)):
+            return False
+        tally = _og.control("keep count of Dirty Lepages and we will tell the "
+                            "bot when we spot one", og.snapshot(), names)
+        if not (tally and tally.kind == "tally_start"
+                and tally.label == "Dirty Lepages"):
+            return False
+        og.apply_tally(tally, "Hardclaws", 0.0)
+        bump = _og.control("dirty lepage!", og.snapshot(), names)
+        if not (bump and bump.kind == "tally_add"):
+            return False
+        og.apply_tally(bump, "Hardclaws", 1.0)
+        prompt = _ch2.user_prompt([], "kvack", "hows it going",
+                                  ongoing=og.prompt_lines(now=2.0))
+        fresh = _og.Ongoing(og.path)
+        return ("WHAT IS GOING ON" in prompt and "Dirty Lepages: 1" in prompt
+                and "hosting a 3-round Cycling quiz" in prompt
+                and fresh.tallies.get("dirty lepage", {}).get("count") == 1
+                and _og.control("what is the current temperature in Rolla, "
+                                "Missouri?", og.snapshot(), names) is None
+                and hasattr(_bot.TwitchBot, "_do_step"))
+
+    def _admin_panel_is_locked_down():
+        import adminpanel as _ap
+        import tempfile as _tf
+        d = _tf.mkdtemp(prefix="clawfacts-check-")
+        users = _ap.Users(os.path.join(d, "u.json"))
+        ok, _ = users.set("doc", "correct horse battery", "admin")
+        raw = pathlib.Path(users.path).read_text(encoding="utf-8")
+        return (ok and "correct horse" not in raw
+                and users.verify("doc", "correct horse battery") == "admin"
+                and users.verify("doc", "nope") is None
+                and not users.set("x", "short", "mod")[0]
+                and _ap._bind_is_safe("127.0.0.1")[0]
+                and _ap._bind_is_safe("100.101.102.103")[0]
+                and not _ap._bind_is_safe("0.0.0.0")[0]
+                and not _ap._bind_is_safe("8.8.8.8")[0]
+                and _ap.start_panel({"admin_panel_enabled": True,
+                                     "admin_panel_bind": "0.0.0.0"},
+                                    _ap.BotControl(), users) is None
+                and _bot.DEFAULTS.get("admin_panel_enabled") is False
+                and _bot.DEFAULTS.get("admin_panel_bind") == "127.0.0.1"
+                and "mod" in _ap.ROLES
+                and "--admin-user" in pathlib.Path("bot.py").read_text(
+                    encoding="utf-8")
+                and "admin_users.json" in pathlib.Path(".gitignore").read_text(
+                    encoding="utf-8"))
+
     def _survives_restart():
         path = os.path.join(tempfile.mkdtemp(prefix="clawfacts-check-"),
                             "cc.json")
@@ -2710,6 +2819,27 @@ def main() -> int:
          and "nemotron" in _llm2._REASONING.pattern
          and "llm_fallback_model" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")),
+        ("the admin panel: hashed logins, loopback-only by default, mod role",
+         _admin_panel_is_locked_down()),
+        ("working memory: the quiz it hosts and the counts it keeps, in every prompt",
+         _working_memory_holds()),
+        ("'whats the headlines' is the day's top stories, never a roundup page title",
+         _headlines_are_top_stories()
+         and "news_country" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("the big top and middle-earth join the voices; the list goes out by crew",
+         len(_ch2.PERSONAS) >= 28
+         and all(_ch2.persona(v) for v in (
+             "clown", "lotlizard", "spin", "yoda", "smeagol", "gandalf",
+             "gimli", "samwise", "legolas", "treebeard"))
+         and set(_ch2.PERSONA_BLURBS) == set(_ch2.PERSONAS)
+         and callable(getattr(_ch2, "persona_name", None))
+         and _ch2.persona_name("Lot Lizard") == "lotlizard"
+         and _ch2.persona_name("gollum") == "smeagol"
+         and sorted(n for _, ns in getattr(_ch2, "PERSONA_GROUPS", ())
+                    for n in ns) == sorted(_ch2.PERSONAS)
+         and "PERSONA_GROUPS" in pathlib.Path("bot.py").read_text(
+             encoding="utf-8")),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

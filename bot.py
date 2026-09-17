@@ -45,6 +45,7 @@ import reminders as reminders_mod
 import chatai
 import haul as haul_mod
 import memory as memory_mod
+import ongoing as ongoing_mod
 import names as names_mod
 import trucker as trucker_mod
 import beef as beef_mod
@@ -52,6 +53,7 @@ import beefstats as beefstats_mod
 import beefllm
 import shoutout as shoutout_mod
 import customcmds as customcmds_mod
+import adminpanel
 import whois
 import funfacts
 from funfacts import get_funfact, trim_to_fit
@@ -236,6 +238,17 @@ DEFAULTS = {
     # window shows, plus crash tracebacks, survives the scrollback.
     # Empty = console only.
     "log_file": "",
+    # The admin panel: a password-protected web page served by the bot
+    # itself (see adminpanel.py). Off by default. Create a login first with
+    #   python3 bot.py --admin-user yourname
+    # then set admin_panel_enabled true. It binds to loopback, so reach it
+    # over an SSH tunnel (ssh -L 8477:127.0.0.1:8477 user@server) or set
+    # admin_panel_bind to the VM's Tailscale address. A public bind
+    # (0.0.0.0) is refused unless admin_panel_public is true as well.
+    "admin_panel_enabled": False,
+    "admin_panel_bind": "127.0.0.1",
+    "admin_panel_port": 8477,
+    "admin_panel_public": False,
     # Shout out whoever raids in, and let a moderator trigger one with !so.
     # Nothing in the message is invented: the name and viewer count come off
     # the raid notice, and the affiliate/follower line comes from Helix.
@@ -260,6 +273,16 @@ DEFAULTS = {
     # phone, radio silence') stands as the answer to 'your mic is muted' /
     # 'hello?' / 'is he afk?'. Each viewer is told once. 0 turns it off.
     "chat_ai_notice_minutes": 20,
+    # The chat AI's working memory: the game it was asked to host ('lets
+    # do a 3 round cycling quiz', 'round 2', 'whats the answer') and the
+    # counts it was asked to keep ('keep count of dirty lepages'). Both
+    # live in ongoing_state_path and survive a restart. A game nobody has
+    # touched for chat_ai_activity_minutes is dropped; counts stay until
+    # they are stopped. chat_ai_count_anyone lets any viewer bump a count
+    # (off: mods, the broadcaster and whoever opened it - anyone can ASK).
+    "ongoing_state_path": "ongoing.json",
+    "chat_ai_activity_minutes": 45,
+    "chat_ai_count_anyone": False,
     # Where the beef leaderboard and the !revenge windows live. Local file,
     # local logic: the game runs on what the bot already has even with no LLM
     # anywhere, so there is nothing else to configure.
@@ -522,6 +545,14 @@ class TwitchBot:
         self._subgoal_lock = threading.Lock()
         self._chat_ai_pending = []              # mentions held by cooldown
         self._last_performance = None           # (kind, subject) for 'encore'
+        # What the bot is in the middle of: the game it is hosting and the
+        # counts it is keeping. The one thing every prompt used to lack.
+        self._ongoing = ongoing_mod.Ongoing(
+            cfg.get("ongoing_state_path") or ongoing_mod.STATE_PATH,
+            cfg.get("chat_ai_activity_minutes", 45), log=self._log)
+        self._ongoing_timer = None              # the ONE scheduled cadence step
+        self._ongoing_busy = None               # ((kind, n), t): step just queued
+        self._ongoing_pace = {}                 # {login: t} state answers, 15s
         self._chat_ai_names = set(
             str(n).lower() for n in
             (cfg.get("chat_ai_names") or ["doc", "docbot"]))
@@ -561,6 +592,11 @@ class TwitchBot:
             or os.environ.get("TAVILY_API_KEY", ""),
             "weatherapi_key": cfg.get("weatherapi_key", "")
             or os.environ.get("WEATHERAPI_KEY", ""),
+            # The day's top headlines are packed three to a message, so
+            # the engine needs the message budget, and which country's
+            # front page to read (US unless told otherwise).
+            "max_message_chars": int(cfg.get("max_message_chars", 450)),
+            "news_country": cfg.get("news_country", "US"),
             "debug": bool(cfg.get("debug")),
         }
 
@@ -939,6 +975,14 @@ class TwitchBot:
             kind = self._chat_ai_kind(nick, badges, message)
             if kind:
                 self._maybe_chime(nick, login, kind, message, badges)
+            elif self.cfg.get("chat_ai_enabled", False) \
+                    and not (message or "").startswith(prefix) \
+                    and self._ongoing.host():
+                # The streamer's ordinary lines never chime - but while
+                # HE is hosting a game, 'whats the answer' / 'round 3' /
+                # 'game over' are the game's controls, name or no name.
+                self._ongoing_control(nick, login, badges, message,
+                                      addressed=False)
         if not message.startswith(prefix):
             return
         body = message[len(prefix):].strip()
@@ -2108,6 +2152,16 @@ class TwitchBot:
                     self._do_chime(nick, argument)
                     continue
 
+                # A step of the game the bot is hosting (ask round N,
+                # reveal the answer, close it out). Composed here, off
+                # the read loop; paced by the game, not by chat cooldowns.
+                if command == "step":
+                    self._do_step(nick, argument)
+                    continue
+                if command == "tally":
+                    self._do_tally(nick, argument)
+                    continue
+
                 # Every command shares the one per-user schedule: !joke and
                 # !funfact draw on the same budget, so the cheap commands
                 # cannot be used to flood either.
@@ -2228,12 +2282,26 @@ class TwitchBot:
                     ack = "Noted." if kept else "Already had that one."
                 self._jobs.put(("", "", "", "say", f"@{nick} {ack}"))
                 return
+            # 'keep count of dirty lepages' / 'spotted one' / 'lets do a
+            # 3 round cycling quiz' / 'round 2' / 'whats the answer':
+            # the bot's working memory. Counts are answered with no
+            # model at all; a game step goes to the worker as a job the
+            # model must PERFORM, framed as such - never as a chat line
+            # that happens to mention a round.
+            if self._ongoing_control(nick, login, badges, message):
+                return
             # 'docbot tell everyone that Doc is on the phone' - the
             # persona still answers in character below; the plain
             # notice is kept for whoever asks 'why is it so quiet?'.
             announced = self._take_notice(nick, badges, message)
         else:
             announced = False
+            # The host's own line while their game runs ('whats the
+            # answer', 'round 3') is aimed at the game even without the
+            # bot's name on it.
+            if self.cfg.get("chat_ai_enabled", False) and self._ongoing_control(
+                    nick, login, badges, message, addressed=False):
+                return
         now = time.time()
         # A standing notice answers the room's confusion on the spot.
         # Live-fire: a mod had the bot announce 'Doc is on the phone,
@@ -2361,6 +2429,255 @@ class TwitchBot:
         except Exception as exc:
             self._log(f"live data failed for {nick}: {exc!r}")
 
+    # ---- the working memory: the game being hosted, the counts kept ----
+    def _ongoing_control(self, nick: str, login: str, badges: str,
+                         message: str, addressed: bool = True) -> bool:
+        """'keep count of dirty lepages' / 'spotted one' / 'lets do a 3
+        round cycling quiz' / 'round 2' / 'whats the answer' - the bot's
+        working memory, recognised here on the read loop. True when the
+        line was taken (queued as a count job or a game step, answered
+        from state, or refused) - it is then not persona chatter.
+
+        Counts are pure arithmetic: applied and answered by the worker
+        with no model. A game step is queued for the worker as a job
+        the model must PERFORM, framed as such. Live-fire, both were
+        handed to the persona as ordinary chat: it improvised a 'round
+        2' that asked for the temperature in Rolla, MO, and an hour
+        after 'keep count of Dirty Lepages' it had no idea what one was.
+
+        `addressed` False is the host's own un-addressed line while
+        their game runs ('whats the answer', 'round 3', 'game over' said
+        to the room): the host is talking to the game, so it is taken -
+        steps only, never a new game or a count."""
+        if not self.cfg.get("chat_ai_enabled", False) or self.paused:
+            return False
+        who = (login or nick or "").lower()
+        host = (self._ongoing.host() or "").lower()
+        is_host = bool(host) and who == host
+        if not addressed and not is_host:
+            return False
+        ctl = ongoing_mod.control(message, self._ongoing.snapshot(),
+                                  self._chat_ai_names, strict=not addressed)
+        if ctl is None:
+            return False
+        kind = ctl.kind
+        if not addressed and kind not in ("round", "reveal", "end"):
+            return False
+        is_mod = access.tier_from_badges(badges) in ("broadcaster",
+                                                     "moderator")
+        now = time.time()
+
+        def say(line):
+            self._jobs.put(("", "", "", "say", self._fit(f"@{nick} ", line)))
+
+        # Setting things up is for the mods and the streamer: a viewer
+        # cannot make the bot host a game or open a count. Said plainly,
+        # once - never handed to the model, which would pretend to.
+        if kind in ongoing_mod.MOD_KINDS and not is_mod:
+            self._log(f"{kind} from {nick} refused - not a mod: "
+                      f"{message[:60]!r}")
+            if self._ongoing_paced(who, now, is_mod):
+                say(ongoing_mod.NOT_A_MOD_LINE)
+            return True
+        if kind == "status":
+            # Anyone may ask where things stand: exact, from state, no
+            # model - one line per person per 15s so it is not a toy.
+            if self._ongoing_paced(who, now, is_mod):
+                say(self._ongoing.status_line(ctl, now))
+                self._log(f"game status answered for {nick}")
+            else:
+                self._log(f"game status from {nick} paced")
+            return True
+        if kind in ongoing_mod.COUNT_KINDS:
+            owner = (self._ongoing.tally_owner(ctl.key) or "").lower()
+            allowed = (is_mod or who == owner or (nick or "").lower() == owner
+                       or bool(self.cfg.get("chat_ai_count_anyone", False)))
+            if not allowed:
+                # The count is the mods' to keep (chat_ai_count_anyone
+                # opens it up). The viewer is told where it stands, not
+                # ignored - and the number does not move.
+                self._log(f"{kind} from {nick} not applied - not a mod or "
+                          f"the count's owner")
+                if self._ongoing_paced(who, now, is_mod):
+                    say(f"{self._ongoing.tally_state(ctl.key)} - the mods "
+                        f"keep that count.")
+                return True
+        if kind.startswith("tally_"):
+            if kind == "tally_query" and not self._ongoing_paced(
+                    who, now, is_mod):
+                self._log(f"count query from {nick} paced")
+                return True
+            self._jobs.put((nick, who, badges, "tally", ctl))
+            return True
+        # A game step. The host and the mods call the rounds; a viewer
+        # saying 'next' or 'whats the answer' is told to hang tight.
+        if kind in ongoing_mod.HOST_KINDS and not is_mod and not is_host:
+            self._log(f"{kind} from {nick} refused - not the host or a mod")
+            if self._ongoing_paced(who, now, is_mod):
+                say(ongoing_mod.NOT_THE_HOST_LINE)
+            return True
+        if kind == "start":
+            self._cancel_step_timer()
+        # The same step asked twice inside a few seconds (a double-typed
+        # 'round 2') is one step, not two questions.
+        busy = self._ongoing_busy
+        if busy and busy[0] == (kind, ctl.n) and now - busy[1] < 20:
+            self._log(f"{kind} {ctl.n or ''} from {nick} already queued")
+            return True
+        self._ongoing_busy = ((kind, ctl.n), now)
+        self._jobs.put((nick, who, badges, "step", ctl))
+        self._log(f"game step {kind}{' ' + str(ctl.n) if ctl.n else ''} "
+                  f"queued for {nick}: {message[:60]!r}")
+        return True
+
+    def _ongoing_paced(self, who: str, now: float, is_mod: bool) -> bool:
+        """One state answer per viewer per 15s (mods unpaced): these
+        cost no model call, but they are still a line in chat."""
+        if is_mod:
+            return True
+        last = self._ongoing_pace.get(who, 0.0)
+        if now - last < 15.0:
+            return False
+        self._ongoing_pace[who] = now
+        if len(self._ongoing_pace) > 200:
+            self._ongoing_pace = {k: v for k, v in self._ongoing_pace.items()
+                                  if now - v < 60.0}
+        return True
+
+    def _do_tally(self, nick: str, ctl) -> None:
+        """A count changed or was asked for: arithmetic and one line,
+        on the worker so the state file is never written on the read
+        loop. No model anywhere near it."""
+        if self.paused:
+            return
+        line = self._ongoing.apply_tally(ctl, nick, time.time())
+        self._say(self._fit(f"@{nick} ", line))
+        self._log(f"count {ctl.kind[6:]} by {nick}: {line[:70]!r}")
+
+    def _lookup_blocked(self, nick: str, text: str) -> bool:
+        """While a round of the bot's own quiz is open, the fact engine
+        is not a back door to the answer: 'docbot what holds the pedals
+        on a bike?' thirty seconds into round 1 is told to wait for the
+        host. Anything that is not a lookup (a weather reading took the
+        fast lane already; smalltalk; the game's own controls) passes."""
+        n = self._ongoing.open_round()
+        if not n:
+            return False
+        if not (chatai.factual_question(text, self._chat_ai_names)
+                or chatai.knowledge_question(text, self._chat_ai_names)):
+            return False
+        self._say(self._fit(f"@{nick} ", f"no lookups while round {n} is "
+                            f"open - the host calls time, then ask me."))
+        self._log(f"lookup from {nick} held - round {n} is open: "
+                  f"{text[:60]!r}")
+        return True
+
+    def _cancel_step_timer(self) -> None:
+        t = getattr(self, "_ongoing_timer", None)
+        if t is not None:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        self._ongoing_timer = None
+
+    def _do_step(self, nick: str, ctl) -> None:
+        """One step of the game the bot is hosting, on the worker: ask
+        round N, reveal the answer, read the standings, close it out.
+        The model writes the question or the answer - it is the only
+        part of the bot that can - but the prompt leads with the job,
+        the line is checked against the job (a question must BE a
+        question and not one already asked), and a model that cannot
+        produce the step says so honestly instead of posting a stand-in.
+        A cadence ('30 secs to answer, then round 3') schedules ONE next
+        step from here; that step re-checks the game when it fires."""
+        import llm as llm_mod
+        self._ongoing_busy = None
+        if self.paused:
+            self._log(f"game step {ctl.kind} skipped - the bot is paused")
+            return
+        now = time.time()
+        auto = bool(ctl.auto)
+        step = self._ongoing.begin(ctl, nick, now)
+        if step is None:
+            if not auto:
+                self._say(self._fit(f"@{nick} ",
+                                    ongoing_mod.NOTHING_RUNNING_LINE))
+            else:
+                self._log(f"scheduled {ctl.kind} stood down - the game moved on")
+            return
+        if step.spoken:
+            head = f"@{nick} " if (nick and step.kind != "end") else ""
+            self._say(self._fit(head, step.cue))
+            self._ongoing.record(step, step.cue, now)
+            if step.kind == "end":
+                self._cancel_step_timer()
+            self._log(f"game {step.kind}: {step.cue[:70]!r}")
+            return
+        if not llm_mod.any_configured(self._opts):
+            self._say(self._fit(f"@{nick} ", "I need a chat model to write "
+                                "questions and I haven't got one right now."))
+            self._ongoing.failed(step, now)
+            return
+        snapshot = self._chat_ai_snapshot()
+        line = None
+        for attempt in range(2):
+            task = step.cue
+            if attempt:
+                task += (" Your previous attempt was not usable. Output the "
+                         + ("question itself - one line ending in '?', "
+                            "different from anything you asked before."
+                            if step.kind == "ask" else
+                            "line itself - plain text, in character."))
+            line = self._chat_ai_line(snapshot, nick or "chat", "", task=task)
+            if line == chatai.DIRECT_FAILURE_LINE:
+                line = None
+            if line and step.kind == "ask":
+                if not ongoing_mod.looks_like_question(line):
+                    self._log(f"round {step.round} line was not a question - "
+                              f"{'retry' if not attempt else 'giving up'}: "
+                              f"{line[:80]!r}")
+                    line = None
+                elif self._ongoing.repeats(line):
+                    self._log(f"round {step.round} question repeated an "
+                              f"earlier one - "
+                              f"{'retry' if not attempt else 'giving up'}")
+                    line = None
+            if line:
+                break
+        if not line:
+            self._ongoing.failed(step, now)
+            self._say(self._fit(f"@{nick} " if nick else "",
+                                ongoing_mod.step_failure_line(step)))
+            self._log(f"game step {step.kind} {step.round} failed - the "
+                      f"model gave nothing usable")
+            return
+        now = time.time()
+        self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
+        a = self._ongoing.current(now) or {}
+        of = f" of {a['rounds']}" if a.get("rounds") else ""
+        if step.kind == "ask":
+            self._say(self._fit(f"Round {step.round}{of}: ", line))
+        elif step.kind == "reveal":
+            self._say(self._fit(f"Round {step.round} answer: ", line))
+        else:
+            self._say(self._fit(f"@{nick} " if nick else "", line))
+        self._ongoing.record(step, line, now)
+        self._log(f"game step {step.kind} {step.round} posted")
+        nxt = self._ongoing.next_auto(step)
+        if nxt:
+            secs, ctl2 = nxt
+            self._cancel_step_timer()
+            host = self._ongoing.host() or nick
+            t = threading.Timer(
+                secs, self._jobs.put,
+                args=((host, (host or "").lower(), "", "step", ctl2),))
+            t.daemon = True
+            t.start()
+            self._ongoing_timer = t
+            self._log(f"next game step ({ctl2.kind} "
+                      f"{ctl2.n or step.round}) in {secs:g}s")
+
     def _mention_wait(self, nick: str, now: float = None) -> float:
         """Seconds until THIS viewer may get a persona reply: 0 = now.
 
@@ -2469,20 +2786,30 @@ class TwitchBot:
 
     def _chat_ai_line(self, lines: list, nick: str, text: str,
                       quiet: bool = False, vary: bool = False,
-                      overheard: bool = False):
-        """Compose one cleaned line, or None. Shared by chime, !ask and
-        the quiet-room opener. `vary` re-asks after a too-similar reply
-        (explicit commands get one redemption; ambient lines do not).
-        `overheard` frames the message as one the bot is jumping in on,
-        not one it was asked - the model holds a far higher bar."""
+                      overheard: bool = False, task: str = None):
+        """Compose one cleaned line, or None. Shared by chime, !ask, the
+        quiet-room opener and the game steps. `vary` re-asks after a
+        too-similar reply (explicit commands get one redemption; ambient
+        lines do not). `overheard` frames the message as one the bot is
+        jumping in on, not one it was asked - the model holds a far
+        higher bar. `task` is a step of the game the bot is hosting: the
+        line must DO it (ask round 2, give the answer), and the prompt
+        leads with the job rather than with the message."""
         import llm as llm_mod
         persona = self._persona_text()
         direct = not quiet and not overheard
         # The model gets human conversation, not commands, its own IRC output,
         # or older questions aimed at it. Those competing instructions caused
-        # both stale direct answers and generic quiet-room monologues.
+        # both stale direct answers and generic quiet-room monologues. A game
+        # step keeps the lines aimed at the bot: the guesses ARE the material.
         prompt_lines = chatai.direct_context(
-            lines, self._chat_ai_names, self.cfg.get("prefix", "!"), self.nick)
+            lines, self._chat_ai_names, self.cfg.get("prefix", "!"), self.nick,
+            keep_addressed=bool(task))
+        # What the bot is in the middle of - the game, the counts. Every
+        # prompt carries it while something is going on; it is what let a
+        # host mid-quiz forget it was hosting.
+        going_on = self._ongoing.prompt_lines(local=llm_mod._is_local(
+            (self._opts.get("llm_base_url") or "").strip()))
         speakers = [n for n, _ in prompt_lines[-6:]] + [nick]
         # ...and whoever the line itself is about: a recall question
         # names its subject ('when did @TruckingWithDoc last stop'),
@@ -2514,7 +2841,7 @@ class TwitchBot:
         # KNOWS the answer to. Live-fire it went to the fact engine
         # twice (a Reddit thread title, then the race's distance); now
         # it comes here, and the prompt says what kind of ask it is.
-        knowledge = direct and chatai.knowledge_question(
+        knowledge = direct and not task and chatai.knowledge_question(
             text, self._chat_ai_names)
         if knowledge:
             self._log("general-knowledge question - the model answers it, "
@@ -2526,10 +2853,11 @@ class TwitchBot:
                                    quiet=quiet,
                                    max_lines=8 if local else 15,
                                    max_memories=4 if local else 8,
-                                   own=list(self._chat_ai_own),
+                                   own=[] if task else list(self._chat_ai_own),
                                    overheard=overheard,
                                    notice=self._standing_notice(),
-                                   knowledge=knowledge),
+                                   knowledge=knowledge,
+                                   ongoing=going_on, task=task),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
@@ -2580,10 +2908,11 @@ class TwitchBot:
                                        quiet=quiet,
                                        max_lines=8 if local else 15,
                                        max_memories=4 if local else 8,
-                                       own=list(self._chat_ai_own),
+                                       own=[] if task else list(self._chat_ai_own),
                                        overheard=overheard,
                                        notice=self._standing_notice(),
-                                       knowledge=knowledge),
+                                       knowledge=knowledge,
+                                       ongoing=going_on, task=task),
                     self._opts)
             except Exception as exc:
                 self._log(f"chat ai error: {exc!r}")
@@ -2803,6 +3132,9 @@ class TwitchBot:
             self._chat_ai_times = [t for t in self._chat_ai_times
                                    if now - t < 3600] + [now]
             self._mark_mention_reply(nick, now)
+            return
+        if not quiet and addressed and self._lookup_blocked(nick, text):
+            self._mark_mention_reply(nick, time.time())
             return
         if not quiet and addressed \
                 and chatai.factual_question(text, self._chat_ai_names) \
@@ -3139,20 +3471,36 @@ class TwitchBot:
         verb = verb.lower()
         rest = rest.strip()
         if verb == "list":
-            names = ", ".join(
-                f"{n} ({chatai.PERSONA_BLURBS[n]})"
-                for n in sorted(chatai.PERSONAS))
-            self._say(f"@{nick} voices: {names} - {pre}persona set "
-                      f"<name>, or {pre}persona custom <description> for "
-                      f"your own.")
+            # One message per crew, through the queue like !help: the
+            # whole library in one line is longer than Twitch allows,
+            # and the read loop must not sit in _say's pacing four
+            # times over.
+            self._queue_fitted(
+                f"@{nick} ", f"{len(chatai.PERSONAS)} voices - {pre}persona "
+                f"set <name> to switch, {pre}persona custom <description> "
+                f"for your own:")
+            listed = set()
+            for label, names in chatai.PERSONA_GROUPS:
+                names = [n for n in names if n in chatai.PERSONAS]
+                listed.update(names)
+                self._queue_fitted(
+                    f"{label}: ", ", ".join(
+                        f"{n} ({chatai.PERSONA_BLURBS.get(n, '')})"
+                        for n in names))
+            stray = sorted(set(chatai.PERSONAS) - listed)
+            if stray:
+                self._queue_fitted("more: ", ", ".join(
+                    f"{n} ({chatai.PERSONA_BLURBS.get(n, '')})"
+                    for n in stray))
             return
         if verb == "set":
-            if chatai.persona(rest):
-                self._persona = {"name": rest.lower()}
+            name = chatai.persona_name(rest)
+            if name:
+                self._persona = {"name": name}
                 self._save_json_state(self.cfg.get(
                     "persona_state_path", "persona.json"), self._persona)
-                self._say(f"@{nick} voice set to {rest.lower()}.")
-                self._log(f"persona set to {rest.lower()} by {nick}")
+                self._say(f"@{nick} voice set to {name}.")
+                self._log(f"persona set to {name} by {nick}")
                 return
             self._say(f"@{nick} no voice called '{rest}'. {pre}persona "
                       f"list shows them all.")
@@ -3276,6 +3624,8 @@ class TwitchBot:
         q = (argument or "").strip()
         if not q:
             self._say(f"@{nick} ask me anything - a question or a topic.")
+            return
+        if self._lookup_blocked(nick, q):
             return
         # Factual questions get the engine's grounded answer FIRST: the
         # persona guesses on trivia, the engine looks it up. If the engine
@@ -3834,6 +4184,20 @@ def main() -> None:
     force_login = "--login" in sys.argv
     do_selftest = "--selftest" in sys.argv
     do_doctor = "--doctor" in sys.argv
+
+    # --admin-user NAME [--role mod]: create or reset a panel login, then
+    # exit. Done before the config is read so it works on a fresh server
+    # that has no config.json yet.
+    if "--admin-user" in sys.argv:
+        i = sys.argv.index("--admin-user")
+        name = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        if not name or name.startswith("--"):
+            raise SystemExit("usage: python3 bot.py --admin-user NAME [--role admin|mod]")
+        role = "admin"
+        if "--role" in sys.argv:
+            j = sys.argv.index("--role")
+            role = sys.argv[j + 1] if j + 1 < len(sys.argv) else "admin"
+        raise SystemExit(adminpanel.set_user_interactive(name, role))
     path = args[0] if args else "config.json"
 
     cfg = load_config(path, require=not do_doctor)
@@ -3860,6 +4224,15 @@ def main() -> None:
         sys.stdout = _Tee(sys.stdout, log_path)
         sys.stderr = _Tee(sys.stderr, log_path)
         print(f"[log] also writing everything to {log_path}")
+
+    # The admin panel's log tab shows what the console shows: keep the last
+    # few thousand lines in memory from here on (cheap, and off when the
+    # panel is off - the ring only exists so the panel has something to
+    # show from before it was opened).
+    log_ring = None
+    if cfg.get("admin_panel_enabled"):
+        log_ring = adminpanel.LogRing()
+        adminpanel.install_log_ring(log_ring)
 
     # Which build is this? A pasted log should never require guessing
     # whether a fix is actually running. Silent if git is unavailable.
@@ -3932,6 +4305,10 @@ def main() -> None:
         raise SystemExit(f"\n[auth] {exc}\n")
 
     bot = TwitchBot(cfg)
+    if cfg.get("admin_panel_enabled"):
+        adminpanel.start_panel(cfg, adminpanel.BotControl(
+            bot=bot, cfg=cfg, config_path=path, ring=log_ring,
+            restart=adminpanel.restart_process))
     try:
         bot.run()
     except KeyboardInterrupt:

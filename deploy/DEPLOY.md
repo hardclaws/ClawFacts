@@ -128,6 +128,74 @@ sudo journalctl -u funfact-bot -n 200      # last 200 lines
 To see exactly what's being sent to the AI, set `TWITCH_DEBUG=1` in `bot.env`,
 then `sudo systemctl restart funfact-bot`.
 
+## Step 7 — The admin panel (the console window, from your phone)
+
+The bot can serve a small password-protected web page: dashboard (connected,
+AI provider and which models are resting, Twitch login health), the live log,
+pause/resume and the `!so` / `!cb` / `!beef` switches, speak as the bot, the
+standing notice, reminders, custom commands, haul, sub goal, voice, viewer
+memory, a `config.json` editor with masked secrets, panel users, a Twitch
+re-login and a **Restart** button. Details and the security model are at the
+top of `adminpanel.py`.
+
+```bash
+cd /opt/funfact-bot
+sudo -u funfact python3 bot.py --admin-user yourname          # prompts for a password (10+ chars)
+sudo -u funfact python3 bot.py --admin-user modname --role mod  # optional: a moderator login
+sudo -u funfact nano config.json        # "admin_panel_enabled": true
+sudo systemctl restart funfact-bot
+sudo journalctl -u funfact-bot | grep '\[admin\]'   # "[admin] panel on http://127.0.0.1:8477 ..."
+```
+
+A **mod** login gets the operational switches, chat, reminders, commands and
+the stream tab; only an **admin** sees config, secrets, viewer memory, the
+system tab and the Restart button.
+
+### Reaching it — pick one
+
+The panel listens on `127.0.0.1` by default, so nothing on the internet can
+see it. That is deliberate: a login form on a public IP gets hammered by bots
+within the hour. Two good ways to reach it, both free:
+
+**A. Tailscale (recommended — works from your phone).** Tailscale is a free
+private network between your own devices; the VM gets a `100.x.y.z` address
+only your devices can reach, and Oracle's public firewall never sees the
+panel at all.
+
+```bash
+# on the VM
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up                       # prints a login URL - open it once
+tailscale ip -4                         # e.g. 100.101.102.103
+sudo -u funfact nano config.json        # "admin_panel_bind": "100.101.102.103"
+sudo systemctl restart funfact-bot
+```
+
+Install the Tailscale app on your PC/phone, log in with the same account, and
+open `http://100.101.102.103:8477` (or `http://<vm-name>:8477` with MagicDNS).
+Nothing to open in Oracle's security list, no domain, no certificate. If you
+want HTTPS on top, `sudo tailscale serve --bg 8477` gives you a
+`https://<vm-name>.<tailnet>.ts.net` URL with a real certificate, still
+private to your tailnet.
+
+**B. SSH tunnel (nothing to install on the VM).** Leave the bind on
+`127.0.0.1` and, on your PC:
+
+```bash
+ssh -L 8477:127.0.0.1:8477 ubuntu@YOUR-SERVER-IP
+```
+
+then open `http://localhost:8477` while that SSH session is open. Works from
+any laptop with an SSH client (Windows 10+ has one built in); awkward from a
+phone.
+
+**Not recommended: a public bind.** The panel refuses `0.0.0.0` / a public IP
+unless `admin_panel_public` is also `true`. If you really want it on the open
+internet, put a reverse proxy with HTTPS (Caddy is a two-line config) and a
+firewall rule in front of it - the panel itself speaks plain HTTP and its
+login cookie is only marked `Secure` when a proxy tells it the request came
+in over HTTPS (`X-Forwarded-Proto: https`).
+
 ## Updating later
 
 ```bash
@@ -145,3 +213,12 @@ sudo systemctl restart funfact-bot
 - **Spicy facts come out plain?** The LLM isn't configured — check `bot.env` was
   copied to `/opt/funfact-bot/bot.env` and `systemctl status` shows the env
   file loaded (no "EnvironmentFile" warnings).
+- **Panel says "could not write config.json" / state files never save?** The
+  unit's `ProtectSystem=strict` makes the disk read-only except for
+  `ReadWritePaths=/opt/funfact-bot` — if you installed to another folder,
+  change that line too (`sudo systemctl daemon-reload` afterwards).
+- **`[admin] panel enabled but admin_users.json has no users`?** Run
+  `python3 bot.py --admin-user yourname` as the `funfact` user, in
+  `/opt/funfact-bot`, so the file lands next to `bot.py`.
+- **Locked out of the panel?** Wait 15 minutes, or reset the password with
+  the same `--admin-user` command (it overwrites), then restart the service.

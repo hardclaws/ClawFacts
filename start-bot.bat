@@ -42,6 +42,14 @@ if "%EXITCODE%"=="0" (
     goto :stopped
 )
 
+rem Exit code 75 = the admin panel's Restart button. Come straight back.
+if "%EXITCODE%"=="75" (
+    echo.
+    echo  [INFO] Restart requested from the admin panel - restarting...
+    echo.
+    goto :loop
+)
+
 rem Exit code 2 = config.json is not valid JSON. Restarting cannot fix
 rem that, so do not offer to - the user has to edit the file.
 if "%EXITCODE%"=="2" (
