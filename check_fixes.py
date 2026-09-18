@@ -27,6 +27,7 @@ def main() -> int:
     import shoutout as _so
     import llm as _llm2
     import chatai as _ch2
+    _bot2 = pathlib.Path("bot.py").read_text(encoding="utf-8")
 
     def _fresh():
         return _cc_mod.CommandSet(
@@ -2919,6 +2920,33 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "held-question queue full - dropped" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("a direct answer is posted, not refused for reusing a word",
+         (lambda _live, _own, _q: (
+             # Live-fire: "Docbot tell us what a boomer is" was refused with
+             # "my answer got mangled in the gears" because the reply said
+             # "twenty years on the road" and the persona had said "years" in
+             # two of its last three lines. Anti-echo is for UNSOLICITED
+             # chatter, where declining is free; a person who asked is owed
+             # an answer, so the direct bar drops the motif rule and keeps
+             # only real duplication.
+             not _ch2.too_similar(_live, _own, source=_q, direct=True)
+             and _ch2.too_similar(_live, _own, source=_q)
+             # A verbatim echo is still caught on the direct path.
+             and _ch2.too_similar(
+                 "Midnight coffee, fresh donuts, and the road",
+                 ["Midnight coffee, fresh donuts, and the road"],
+                 source="doc whats up", direct=True)
+             # The apology path it replaced is gone, and the honest log
+             # line is in.
+             and "posted anyway rather than apologising" in _bot2
+             and "declined after repetition retry" not in _bot2))(
+             "A boomer is an old-school trucker - twenty years on the road, "
+             "set in his ways, and he has run every mile you are about to.",
+             ["@kvack Twenty years of nights and the coffee still does the "
+              "steering.",
+              "@tayfta Some roads you just eat and keep the wheels turning.",
+              "@marblehead9 Thirty years on the road and I still laugh."],
+             "Docbot tell us what a boomer is")),
         ("the bot cannot repeat itself or redirect to commands",
          _ch2.too_similar("Midnight snacks and that endless horizon",
                           ["Midnight coffee, fresh donuts, and the road",
