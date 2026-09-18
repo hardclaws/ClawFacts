@@ -30,6 +30,9 @@ import json
 import re
 import time
 import urllib.error
+
+# Only for auth.PY: the OS-correct way to say "run the bot again".
+import auth
 import urllib.parse
 import urllib.request
 
@@ -140,7 +143,7 @@ class Moderator:
         if not h.client_id:
             return "client_id is empty"
         if not self._token():
-            return "the bot is not logged in (run python3 bot.py --login)"
+            return f"the bot is not logged in (run {auth.PY} bot.py --login)"
         if not h.broadcaster_id:
             return "the channel's user id is not resolved yet"
         return ""
@@ -379,7 +382,7 @@ class Moderator:
                                        or exc.code == 401):
             if "scope" in low:
                 return (f"my login is missing the {BAN_SCOPE} scope - run "
-                        f"python3 bot.py --login once, then restart")
+                        f"{auth.PY} bot.py --login once, then restart")
             self.last_403 = time.time()
             return ("Twitch says I am not a moderator of this channel - "
                     f"ask the broadcaster to /mod {self.nick or 'the bot'}")

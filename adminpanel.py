@@ -48,6 +48,7 @@ browser over a tunnel.
 
 from __future__ import annotations
 
+import auth          # for auth.PY, the OS-correct "run the bot" command
 import base64
 import getpass
 import hashlib
@@ -1443,7 +1444,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
             '<p><button>Sign in</button></p></form>'
             + ('' if len(self.users) else
                '<p class="warn">No panel users yet. On the server run: '
-               '<code>python3 bot.py --admin-user yourname</code></p>')
+               f'<code>{auth.PY} bot.py --admin-user yourname</code></p>')
             + '</div>')
         return page("Sign in", body, None, "/login", flash)
 
@@ -1783,7 +1784,7 @@ def start_panel(cfg: dict, control: BotControl, users=None):
         users = Users(users or USERS_PATH)
     if len(users) == 0:
         print("[admin] panel enabled but admin_users.json has no users - run: "
-              "python3 bot.py --admin-user yourname   (the panel will not start)",
+              f"{auth.PY} bot.py --admin-user yourname   (the panel will not start)",
               flush=True)
         return None
     bind = str(cfg.get("admin_panel_bind") or DEFAULT_BIND).strip()

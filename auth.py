@@ -26,6 +26,15 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+#: The command that runs this bot, in the words of the OS it is running on.
+#: A stock Windows install has no ``python3`` - it gives ``python`` (or
+#: ``py -3``) - so every message telling the operator what to run next has
+#: to say the thing that is actually on their PATH. Live-fire: a Windows
+#: operator was handed "run python3 bot.py --login" at the exact moment
+#: their token was missing a scope, i.e. when following the instruction was
+#: the whole point. Docstrings and comments keep the canonical ``python3``.
+PY = "python" if os.name == "nt" else "python3"
+
 ID_HOST = "https://id.twitch.tv"
 DEVICE_ENDPOINT = ID_HOST + "/oauth2/device"
 TOKEN_ENDPOINT = ID_HOST + "/oauth2/token"
@@ -282,7 +291,7 @@ def describe_login(cfg: dict) -> list[str]:
     tokens = load_tokens()
     if not tokens:
         out.append(f"tokens.json    : MISSING or unreadable at {TOKENS_PATH}")
-        out.append("-> nothing can be renewed. Run: python3 bot.py --login")
+        out.append(f"-> nothing can be renewed. Run: {PY} bot.py --login")
         return out
 
     saved_id = tokens.get("client_id")
@@ -292,12 +301,12 @@ def describe_login(cfg: dict) -> list[str]:
         out.append("-> MISMATCH with config.json. The saved login can never be "
                    "renewed.")
         out.append("   Fix client_id in config.json, or re-run "
-                   "'python3 bot.py --login' for this app.")
+                   f"'{PY} bot.py --login' for this app.")
 
     out.append(f"  refresh token: {'present' if tokens.get('refresh_token') else 'MISSING'}")
     if not tokens.get("refresh_token"):
         out.append("-> without a refresh token the login cannot be renewed. "
-                   "Run: python3 bot.py --login")
+                   f"Run: {PY} bot.py --login")
 
     expires_at = float(tokens.get("expires_at") or 0)
     if expires_at:
@@ -322,7 +331,7 @@ def describe_login(cfg: dict) -> list[str]:
             missing = [w for w in SCOPES.split() if w not in scopes]
             if missing:
                 out.append("-> missing " + ", ".join(missing) + ". Run: "
-                           "python3 bot.py --login")
+                           f"{PY} bot.py --login")
                 if "moderator:manage:banned_users" in missing:
                     out.append("   (!ban / !timeout / !unban will be refused "
                                "by Twitch with 401 until the bot logs in "
@@ -353,7 +362,7 @@ def refresh_if_possible(cfg: dict) -> str | None:
                    "[auth] no saved login - tokens.json is missing or "
                    "unreadable, so the token can never be renewed and the "
                    "bot will start getting 401s when it expires. Run "
-                   "'python3 bot.py --login'.")
+                   f"'{PY} bot.py --login'.")
         return None
     if client_id and tokens.get("client_id") != client_id:
         # Silent here is what makes this so confusing: the bot runs fine for
@@ -364,7 +373,7 @@ def refresh_if_possible(cfg: dict) -> str | None:
                    f"{tokens.get('client_id')!r} but config.json has "
                    f"{client_id!r}. They must match, or the saved login can "
                    f"never be renewed. Fix client_id in config.json, or run "
-                   f"'python3 bot.py --login' to save tokens for this app.")
+                   f"'{PY} bot.py --login' to save tokens for this app.")
         return None
 
     access = tokens.get("access_token")
@@ -401,12 +410,12 @@ def refresh_if_possible(cfg: dict) -> str | None:
     if not refresh:
         _warn_once("no-refresh-token",
                    "[auth] the saved login has no refresh token, so it cannot "
-                   "be renewed. Run 'python3 bot.py --login'.")
+                   f"be renewed. Run '{PY} bot.py --login'.")
     elif not client_id:
         _warn_once("no-client-id",
                    "[auth] config.json has no client_id, so the saved login "
                    "cannot be renewed. Add it, or run "
-                   "'python3 bot.py --login'.")
+                   f"'{PY} bot.py --login'.")
     return None
 
 
@@ -433,7 +442,7 @@ def resolve_token(cfg: dict, force_login: bool = False) -> str:
         raise OAuthError(
             "No saved login and no client_id in config.json. Register a free "
             "app at https://dev.twitch.tv/console to get a Client ID, put it "
-            "in config.json, then run: python3 bot.py --login"
+            f"in config.json, then run: {PY} bot.py --login"
         )
 
     return run_device_login(client_id)

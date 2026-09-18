@@ -28,6 +28,7 @@ def main() -> int:
     import llm as _llm2
     import chatai as _ch2
     _bot2 = pathlib.Path("bot.py").read_text(encoding="utf-8")
+    _auth_src = pathlib.Path("auth.py").read_text(encoding="utf-8")
 
     def _fresh():
         return _cc_mod.CommandSet(
@@ -2115,6 +2116,49 @@ def main() -> int:
             _llm2.urllib.request.urlopen = _orig
             _llm2.reset_disable_state()
 
+    def _commands_match_the_operators_os():
+        """Every user-facing command comes from auth.PY.
+
+        A stock Windows install has no python3 - it has python - and a
+        Windows operator was told to "run python3 bot.py --login" at the
+        exact moment their token was missing a scope, which is to say at
+        the moment when following the instruction was the whole point.
+
+        Walks the AST rather than grepping: comments and docstrings keep
+        the canonical python3 spelling and are not shown to anybody, while
+        a real string literal is what gets printed. An f-string splits
+        into Constant pieces around the interpolation, so none of them can
+        hold the hardcoded command either.
+        """
+        import ast as _ast
+        a = __import__("auth")
+        if not (hasattr(a, "PY") and a.PY in ("python", "python3")):
+            return False
+        if "os.name" not in _auth_src:
+            return False
+        for name in ("access.py", "bot.py", "moderation.py",
+                     "adminpanel.py"):
+            src = pathlib.Path(name).read_text(encoding="utf-8")
+            if "auth.PY" not in src:
+                return False
+            tree = _ast.parse(src)
+            docstrings = set()
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.Module, _ast.FunctionDef,
+                                     _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    body = getattr(node, "body", None)
+                    if (body and isinstance(body[0], _ast.Expr)
+                            and isinstance(body[0].value, _ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        docstrings.add(id(body[0].value))
+            for node in _ast.walk(tree):
+                if (isinstance(node, _ast.Constant)
+                        and isinstance(node.value, str)
+                        and id(node) not in docstrings
+                        and "python3 bot.py" in node.value):
+                    return False
+        return True
+
     def _news_questions_get_headlines():
         """'Docbot who got into a helicopter crash today 15th September
         2026 in California' was answered with a Wikipedia line about a
@@ -2920,6 +2964,8 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "held-question queue full - dropped" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("a message names a command that exists on the operator's OS",
+         _commands_match_the_operators_os()),
         ("a dropped connection says why, not just that it dropped",
          # Live-fire: three drops in one evening, each logging only
          # "server closed the connection" - which cannot tell a PONG we

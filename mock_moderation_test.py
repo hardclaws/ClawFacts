@@ -84,6 +84,60 @@ def _bot(**over):
     return b
 
 
+def test_a_message_names_the_command_that_exists_on_the_os():
+    """Live-fire: a Windows operator was told to run "python3 bot.py
+    --login" at the exact moment their token was missing a scope - i.e.
+    when following the instruction was the whole point. A stock Windows
+    install has no python3; it has python.
+
+    Every user-facing command now comes from auth.PY. Driven through the
+    real ban path rather than a copied string, so a message that hardcodes
+    the wrong command fails here.
+
+    At module level on purpose: importing these modules inside main()
+    rebinds the name to a local for the whole function and breaks every
+    earlier reference to it.
+    """
+    import os
+    real = os.name
+    try:
+        for osname, want in (("posix", "python3"), ("nt", "python")):
+            os.name = osname
+            for name in ("auth", "moderation"):
+                sys.modules.pop(name, None)
+            import auth
+            import moderation
+            import mock_moderation_test as mm
+            assert auth.PY == want, (osname, auth.PY)
+            mm.CALLS.clear()
+            moderation.urllib.request.urlopen = mm._router(
+                fail={401: "moderation/bans"},
+                body={"error": "Unauthorized",
+                      "message": "Missing scope "
+                                 "moderator:manage:banned_users",
+                      "status": 401})
+            mod = moderation.Moderator(mm._helix(), nick="docbot")
+            mod.moderator_id = "777"
+            result = mod.ban("badguy", "spam")
+            assert result.ok is False and result.code == 401, (
+                result.ok, result.code)
+            assert "run %s bot.py --login" % want in result.note, result.note
+            if want != "python3":
+                assert "python3" not in result.note, result.note
+            # The ban really was attempted, so this is the real code path
+            # and not a message assembled somewhere else.
+            assert any("moderation/bans" in c["url"] for c in mm.CALLS), \
+                mm.CALLS
+    finally:
+        os.name = real
+        for name in ("auth", "moderation"):
+            sys.modules.pop(name, None)
+        import auth        # noqa: F401  restore for the rest of the suite
+        import moderation  # noqa: F401
+    print("[PASS] a message names the command that exists on the "
+          "operator's OS")
+
+
 def main():
     ok = True
     orig = moderation.urllib.request.urlopen
@@ -317,6 +371,8 @@ def main():
     assert moderation.parse_duration("banana") is None
     assert moderation.human_duration(600) == "10 min"
     print("[PASS] the ban scopes are in the login, and lengths parse")
+
+    test_a_message_names_the_command_that_exists_on_the_os()
 
     print("ALL PASSED \u2714" if ok else "SOME FAILED \u2718")
     return 0 if ok else 1

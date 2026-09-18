@@ -815,7 +815,7 @@ class TwitchBot:
             # quietly die mid-stream and then blaming something else.
             self._log("[auth] no client_secret in config.json - if your app is "
                       "a Confidential client the login expires in about 4 "
-                      "hours and will need 'python3 bot.py --login' again. "
+                      f"hours and will need '{auth.PY} bot.py --login' again. "
                       "Set the app's client type to Public, or add the "
                       "secret.")
         self._resolve_broadcaster(self.cfg.get("channel", ""))
@@ -833,12 +833,12 @@ class TwitchBot:
                       f"scopes={','.join(scopes) or '(none)'}")
         else:
             self._log("[access] Twitch would not validate the oauth token - it "
-                      "is probably expired. Run 'python3 bot.py --login'.")
+                      f"is probably expired. Run '{auth.PY} bot.py --login'.")
 
         problems = []
         if info and "moderator:read:followers" not in scopes:
             problems.append("the token is missing the moderator:read:followers "
-                            "scope - run 'python3 bot.py --login' to re-authorise")
+                            f"scope - run '{auth.PY} bot.py --login' to re-authorise")
         if login and login.lower() != self.nick.lower():
             problems.append(f"the token belongs to {login!r} but the bot "
                             f"connects as {self.nick!r} - /mod the token's "
@@ -2439,7 +2439,7 @@ class TwitchBot:
                     self._warned_401 = True
                     self._log("[access] Twitch rejected the oauth token "
                               f"({helix.unauthorized} x 401). Run "
-                              "'python3 bot.py --login', and add "
+                              f"'{auth.PY} bot.py --login', and add "
                               '"client_secret" to config.json so it can renew '
                               "itself instead of expiring every 4 hours.")
             else:
@@ -4605,7 +4605,7 @@ def main() -> None:
         i = sys.argv.index("--admin-user")
         name = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
         if not name or name.startswith("--"):
-            raise SystemExit("usage: python3 bot.py --admin-user NAME [--role admin|mod]")
+            raise SystemExit(f"usage: {auth.PY} bot.py --admin-user NAME [--role admin|mod]")
         role = "admin"
         if "--role" in sys.argv:
             j = sys.argv.index("--role")
