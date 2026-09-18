@@ -153,6 +153,12 @@ python3 bot.py          # macOS / Linux
 python bot.py           # Windows (or just double-click start-bot.bat)
 ```
 
+> **Throughout this document, `python3` means `python` on Windows.**
+> Wherever you see `python3 bot.py …`, run `python bot.py …` instead — or
+> double-click `start-bot.bat`, which finds Python for you. A stock Windows
+> install has no `python3`. The bot knows this: every command it prints in
+> chat or the log names the one that exists on your machine.
+
 **On Windows** you can double-click **`start-bot.bat`** — it finds Python, runs
 from the bot's own folder, and restarts the bot automatically if it ever
 crashes (press `N` at the prompt, or Ctrl+C, to stop). For verbose LLM logging
@@ -342,10 +348,11 @@ does nothing — so this is Helix: `POST /helix/moderation/bans`, with
 `moderator_id` set to the bot's own user id, which is why the bot has to
 be a moderator. That needs the `moderator:manage:banned_users` scope, and
 `user:manage:whispers` to answer a private ask privately. **Both are new
-scopes, so run `python3 bot.py --login` once after upgrading** — a token
-issued before them will get a 401, and the bot says exactly that instead
-of failing quietly. `python3 bot.py --doctor` lists the scopes the stored
-token actually has.
+scopes, so run `python3 bot.py --login` once after upgrading** — on Windows
+that is `python bot.py --login`. A token issued before them will get a 401,
+and the bot says exactly that instead of failing quietly.
+`python3 bot.py --doctor` (`python bot.py --doctor` on Windows) lists the
+scopes the stored token actually has.
 
 **A private message is best-effort, and here is the honest reason.**
 Twitch delivers whispers to bots through EventSub (a webhook endpoint),
