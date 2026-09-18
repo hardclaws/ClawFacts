@@ -285,6 +285,34 @@ Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
 keyless APIs and can be disabled with `"fun_commands": false`.
 
+### "on it — give me about 45 seconds"
+
+A direct question is never dropped: held by a rail (the asker's own
+minute, the channel pace, the hourly cap) it is answered to the right
+person the moment the rail clears. But until then the room sees nothing
+at all — and from chat, *a rail and a crash look exactly the same*. That
+is why the same question gets asked three times.
+
+So a held question is now acknowledged at once, with the wait quoted:
+
+```
+marblehead9: docbot how long is the tow rope?
+Docbot:      @marblehead9 on it - give me about 45 seconds to look that up.
+```
+
+The number is the rail's own remaining time (`chat_ai_mention_cooldown`
+for that viewer, or the channel pace — whichever is longer), rounded up.
+One promise per person: asking again inside the window gets no second
+"on it", which is the whole point. Nothing is said when the wait is under
+`chat_ai_ack_min_seconds` (5 s by default — the answer is on its way and a
+message about it would be noise), and the acknowledgement goes out on its
+own thread rather than through the worker queue, because a stuck worker is
+exactly when an "on it" matters most. If a held question is *lost* — the
+eight-deep queue filled, or it went stale — the asker is told
+(`I've lost the thread of your question - ask me again in a minute?`)
+instead of being left with a promise nothing kept. `chat_ai_ack_held:
+false` brings back the old silence.
+
 ## Moderation on request — !ban, !timeout, !unban
 
 The bot is a moderator of the channel, so a moderator can simply tell it

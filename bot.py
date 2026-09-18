@@ -188,6 +188,13 @@ DEFAULTS = {
     # chat_ai_mention_pace is the channel-wide floor between any two
     # persona replies - just enough that the bot cannot be made to flood.
     "chat_ai_mention_cooldown": 60,
+    # A question held by a rail is answered, but until then the room sees
+    # nothing - and from chat, a rail and a crash look exactly the same,
+    # which is why the same question gets asked three times. Acknowledge
+    # the hold with the wait quoted. Below chat_ai_ack_min_seconds the
+    # answer is close enough that a message about it would be noise.
+    "chat_ai_ack_held": True,
+    "chat_ai_ack_min_seconds": 5,
     "chat_ai_mention_pace": 8,
     # Memory distills (the model call that turns a viewer's lines into
     # remembered facts) run for a viewer only after they have said this
@@ -595,6 +602,9 @@ class TwitchBot:
         # sub goal; the lock keeps the two writers honest.
         self._subgoal_lock = threading.Lock()
         self._chat_ai_pending = []              # mentions held by cooldown
+        # login -> when we last promised this person an answer, so a held
+        # question asked three times gets one acknowledgement, not three.
+        self._ack_last = {}
         self._last_performance = None           # (kind, subject) for 'encore'
         # What the bot is in the middle of: the game it is hosting and the
         # counts it is keeping. The one thing every prompt used to lack.
@@ -2647,14 +2657,24 @@ class TwitchBot:
                 self._chat_ai_pending = [
                     p for p in self._chat_ai_pending
                     if (p[3] if len(p) > 3 else (p[0] or "").lower()) != who]
-                self._chat_ai_pending.append((nick, message, time.time(),
-                                              who))
+                # The entry carries its own expiry: at least the usual two
+                # minutes, and always long enough to cover a wait we are
+                # about to quote back to the person. A promise the queue
+                # then throws away is worse than no promise at all.
+                self._chat_ai_pending.append(
+                    (nick, message, time.time(), who,
+                     time.time() + max(120.0, mention_wait + 45.0)))
                 if len(self._chat_ai_pending) > 8:
                     dropped = self._chat_ai_pending.pop(0)
                     self._log(f"held-question queue full - dropped "
                               f"{dropped[0]}'s {dropped[1][:40]!r}")
+                    self._queue_say(
+                        f"@{dropped[0]} I've lost the thread of your "
+                        f"question - ask me again in a minute?")
                 self._log(f"mention from {nick} held {mention_wait:.0f}s - "
-                          f"their own cooldown (a rail, not a bug)")
+                          f"{'their own cooldown' if mention_wait > 0 else 'the hourly cap or a busy worker'}"
+                          f" (a rail, not a bug)")
+                self._ack_held(nick, who, mention_wait)
             return
         if kind == chatai.CHIME:
             # Mark an autonomous ATTEMPT at enqueue, not after the model call.
@@ -2663,6 +2683,62 @@ class TwitchBot:
             self._chat_ai_last = now
         self._jobs.put((nick, login or (nick or "").lower(), "",
                         "chime", message))
+
+    def _ack_held(self, nick: str, who: str, wait: float) -> None:
+        """Tell a held asker the bot heard them, and roughly when to expect it.
+
+        The number quoted is the rail's own remaining time, rounded up -
+        the same figure the log prints. The keeper answers on its next
+        tick, so the reply can land a few seconds after that; "about" is
+        doing honest work there, and a padded number ("a minute" for a
+        44-second wait) reads as the bot making things up.
+        """
+        if not self.cfg.get("chat_ai_ack_held", True):
+            return
+        try:
+            floor = float(self.cfg.get("chat_ai_ack_min_seconds", 5))
+        except (TypeError, ValueError):
+            floor = 5.0
+        if wait < floor:
+            return                       # seconds away; a message is noise
+        now = time.time()
+        if now - self._ack_last.get(who or "", 0.0) < 45.0:
+            # They were told once already. Answering the third copy of the
+            # same question with a third "on it" is the spam it is meant
+            # to prevent.
+            return
+        self._ack_last[who or ""] = now
+        if len(self._ack_last) > 200:
+            self._ack_last = {k: v for k, v in self._ack_last.items()
+                              if now - v < 120.0}
+        line = (f"@{nick} on it - give me about "
+                f"{self._human_wait(wait)} to look that up.")
+        # Posted on its own thread, NOT through the job queue: the queue is
+        # exactly what may be stuck behind a slow model call, and an "on it"
+        # that arrives after the answer is worth nothing. _say paces itself.
+        threading.Thread(target=self._say, args=(line,), name="ack",
+                         daemon=True).start()
+
+    @staticmethod
+    def _human_wait(seconds: float) -> str:
+        """59 -> '60 seconds', 74 -> 'a minute', 130 -> '2 minutes'.
+
+        Rounded UP to the next 5 seconds (and the next minute past that):
+        the wait quoted is a promise, and a promise that runs short is
+        what makes somebody ask again.
+        """
+        try:
+            secs = int(seconds)
+        except (TypeError, ValueError):
+            return "a moment"
+        secs = -((-secs) // 5) * 5       # round up to the next 5
+        if secs < 20:
+            return "a few seconds"
+        if secs < 60:
+            return f"{secs} seconds"
+        if secs < 90:
+            return "a minute"
+        return f"{-((-secs) // 60)} minutes"
 
     def _answer_live_data(self, nick: str, message: str) -> None:
         """Answer a weather / sunrise question from the live feed, off
@@ -3210,9 +3286,22 @@ class TwitchBot:
         # pacing holds even when several people asked in one window.
         # Two minutes staleness each: after that the moment has passed
         # and answering would be the non-sequitur, not the fix.
-        while self._chat_ai_pending \
-                and now - self._chat_ai_pending[0][2] > 120:
-            self._chat_ai_pending.pop(0)     # stale; the next may be live
+        while self._chat_ai_pending:
+            head = self._chat_ai_pending[0]
+            # Entries made before the expiry field (and any a test builds by
+            # hand) keep the old flat two minutes.
+            expires = head[4] if len(head) > 4 else head[2] + 120
+            if expires > now:
+                break
+            stale = self._chat_ai_pending.pop(0)   # the next may be live
+            self._log(f"held question from {stale[0]} went stale - not "
+                      f"answered")
+            if (stale[3] if len(stale) > 3 else "") in self._ack_last:
+                # We told them an answer was coming. Going quiet now is
+                # exactly the silence that reads as being ignored.
+                self._queue_say(
+                    f"@{stale[0]} that one got away from me - ask me again "
+                    f"and I'll get it.")
         # The first held question whose asker is clear to be answered -
         # not necessarily the oldest: with per-viewer clocks, Dani's
         # question does not wait for Yeyeboi's cooldown.

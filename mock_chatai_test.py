@@ -10,6 +10,7 @@ deterministic - the chime-in roll is injected, not drawn.
 import itertools
 import os
 import tempfile
+import threading
 import time
 
 import bot as bot_mod
@@ -44,6 +45,30 @@ def _bot(**over):
     b._log = lambda *a, **k: None
     b._access.helix = None
     return b
+
+
+ACK = "on it - give me"
+
+
+def _acks(lines):
+    """The 'on it - give me about ...' acknowledgements, on their own."""
+    return [l for l in lines if ACK in l]
+
+
+def _no_ack(lines):
+    """Everything the bot said that was NOT a held-question ack."""
+    return [l for l in lines if ACK not in l]
+
+
+def _join_acks(b, timeout=5.0):
+    """Wait for the held-question acknowledgements to reach the channel.
+
+    They are posted on their own thread on purpose - the job queue may be
+    stuck behind a slow model call, which is when an 'on it' matters most.
+    """
+    for t in threading.enumerate():
+        if t.name == "ack" and t is not threading.current_thread():
+            t.join(timeout)
 
 
 def _drain(b):
@@ -96,11 +121,16 @@ def test_a_mention_gets_one_bounded_reply():
                       "kvack", "")
         _drain(b)
         assert b.said == ["@kvack Graphics are free with the job."], b.said
-        # A second mention inside the cooldown stays quiet - the bot
-        # cannot be wound up like a toy.
+        # A second mention inside the cooldown gets no SECOND answer - the
+        # bot cannot be wound up like a toy - but it is told to wait, so
+        # the room can tell a rail from a crash.
         b._on_message("kvack", "#t", "doc you there?", "kvack", "")
         _drain(b)
-        assert len(b.said) == 1, b.said
+        _join_acks(b)
+        assert _no_ack(b.said) == [
+            "@kvack Graphics are free with the job."], b.said
+        assert _acks(b.said) == ["@kvack on it - give me about a minute to "
+                                 "look that up."], b.said
         # The reply is prefixed by the bot, never by the model: a model
         # line carrying an @mention of its own is dropped whole. A direct ask
         # gets the bot's safe acknowledgement instead of disappearing.
@@ -397,6 +427,89 @@ def test_emoji_walls_never_chime():
     print("[PASS] emoji walls never chime; real lines and mentions do")
 
 
+def test_a_held_question_is_acknowledged_with_the_wait():
+    """A mention held by a rail is announced, with the wait quoted.
+
+    From the room, a rail and a crash look identical - which is exactly
+    why the same question gets asked three times. Live-fire line:
+    'mention from marblehead9 held 44s - their own cooldown'.
+    """
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c: "Forty-two. Obviously."
+    try:
+        T0 = time.time()
+        b._mark_mention_reply("marblehead9", T0 - 16)   # 44s left of 60
+        b._on_message("marblehead9", "#t",
+                      "docbot how long is the tow rope?", "marblehead9", "")
+        _join_acks(b)
+        assert b.said == ["@marblehead9 on it - give me about 45 seconds "
+                          "to look that up."], b.said
+        assert len(b._chat_ai_pending) == 1, b._chat_ai_pending
+        assert b._jobs.empty(), "the question is still held, not answered"
+        assert any("held 44s" in l for l in logs), logs
+
+        # Asking again inside the window gets no second "on it": the ack
+        # exists to stop the repeat, so three copies get one promise.
+        b._on_message("marblehead9", "#t", "docbot???", "marblehead9", "")
+        b._on_message("marblehead9", "#t", "docbot hello", "marblehead9", "")
+        _join_acks(b)
+        assert len(_acks(b.said)) == 1, b.said
+        assert len(b._chat_ai_pending) == 1, b._chat_ai_pending
+
+        # The answer still lands, to the right person, when the rail clears.
+        b._chat_ai_mention_by["marblehead9"] = T0 - 200
+        b._chat_ai_mention_last = T0 - 200
+        assert b._chat_ai_tick(now=T0) is True
+        _drain(b)
+        assert _no_ack(b.said) == [
+            "@marblehead9 Forty-two. Obviously."], b.said
+
+        # A wait under the floor is not worth a message - the answer is
+        # seconds away, and the ack would arrive with it.
+        b2 = _bot(llm_api_key="k")
+        b2.cfg["chat_ai_ack_min_seconds"] = 20
+        b2._mark_mention_reply("kvack", time.time() - 56)   # 4s left
+        b2._on_message("kvack", "#t", "doc you there", "kvack", "")
+        _join_acks(b2)
+        assert b2.said == [], b2.said
+        assert len(b2._chat_ai_pending) == 1, b2._chat_ai_pending
+
+        # Switched off, the old silence is back.
+        b3 = _bot(llm_api_key="k", chat_ai_ack_held=False)
+        b3._mark_mention_reply("kvack", time.time() - 16)
+        b3._on_message("kvack", "#t", "doc you there", "kvack", "")
+        _join_acks(b3)
+        assert b3.said == [], b3.said
+
+        # A promise the queue then throws away is worse than none: a held
+        # question that goes stale is called back, not dropped silently.
+        b4 = _bot(llm_api_key="k")
+        b4._last_chat = time.time()              # quiet gate closed
+        b4._mark_mention_reply("tayfta", time.time() - 16)
+        b4._on_message("tayfta", "#t", "doc whats the payload limit",
+                       "tayfta", "")
+        _join_acks(b4)
+        assert len(_acks(b4.said)) == 1, b4.said
+        # The entry's own expiry always covers the wait it quoted.
+        assert b4._chat_ai_pending[0][4] > time.time() + 44, \
+            b4._chat_ai_pending[0]
+        b4._chat_ai_pending[0] = (b4._chat_ai_pending[0][0],
+                                  b4._chat_ai_pending[0][1],
+                                  time.time() - 900, "tayfta",
+                                  time.time() - 300)
+        assert b4._chat_ai_tick() is False
+        assert b4._chat_ai_pending == []
+        _drain(b4)
+        assert any("got away from me" in l for l in b4.said), b4.said
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a held question is acknowledged with its wait - one "
+          "promise per person, called back if it is lost")
+
+
 def test_a_held_mention_is_answered_late_to_the_right_person():
     """Live-fire: 'pick a number 1-100 @truckingwithdocbot' arrived
     inside the mention cooldown, was silently held, and a later chime
@@ -428,7 +541,11 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
         b._on_message("Yeyeboi", "#t",
                       "pick a number 1-100 @truckingwithdocbot",
                       "yeyeboi", "")
-        assert b._jobs.empty(), "should be held, not enqueued"
+        _join_acks(b)
+        assert _no_ack(b.said) == [], b.said
+        assert len(_acks(b.said)) == 1 and \
+            _acks(b.said)[0].startswith("@Yeyeboi on it - give me about "), b.said
+        assert b._jobs.empty(), "the question itself is held, not enqueued"
         assert len(b._chat_ai_pending) == 1
         assert any("held" in l and "their own cooldown" in l
                    for l in logs), logs
@@ -439,7 +556,8 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
                       "danilikesdonuts", "")
         assert not b._jobs.empty(), "Dani's own clock is clear - answer now"
         _drain(b)
-        assert b.said == ["@DaniLikesDonuts Forty-two. Obviously."], b.said
+        assert _no_ack(b.said) == [
+            "@DaniLikesDonuts Forty-two. Obviously."], b.said
         assert len(b._chat_ai_pending) == 1       # Yeyeboi still held
         # (a distill runs after that first reply and takes a line too)
         answers = iter(["Seventeen, and no refunds."])
@@ -451,7 +569,8 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
         b._chat_ai_mention_by["yeyeboi"] = T0 - 200
         b._chat_ai_mention_last = T0 - 200
         _drain(b)
-        assert b.said[-1] == "@Yeyeboi Seventeen, and no refunds.", b.said
+        assert _no_ack(b.said)[-1] == "@Yeyeboi Seventeen, and no " \
+            "refunds.", b.said
         assert b._chat_ai_pending == []
     finally:
         llm.chat_reply = orig
@@ -481,8 +600,15 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
     b4._chat_ai_mention_by["kvack"] = T4 - 200
     b4._chat_ai_mention_last = T4 - 200
     assert b4._chat_ai_tick(now=T4) is True
-    nick, login, badges, cmd, arg = b4._jobs.get()
-    assert (nick, cmd) == ("kvack", "chime"), (nick, cmd)
+    jobs = []
+    while not b4._jobs.empty():
+        jobs.append(b4._jobs.get())
+    chimes = [j for j in jobs if j[3] == "chime"]
+    assert len(chimes) == 1 and chimes[0][0] == "kvack", jobs
+    # The person the full queue pushed out is TOLD, rather than left
+    # believing the bot ignored them.
+    assert any(j[3] == "say" and "lost the thread" in j[4]
+               and j[4].startswith("@Yeyeboi ") for j in jobs), jobs
     # Stale pendings (over two minutes) are dropped, not answered.
     b2 = _bot(llm_api_key="k")
     b2._last_chat = time.time()            # quiet gate closed
@@ -3003,6 +3129,7 @@ def main():
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
+    test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_four_people_asking_at_once_all_get_answers()
     test_distilling_is_paced_per_viewer()

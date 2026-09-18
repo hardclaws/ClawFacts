@@ -1104,6 +1104,47 @@ def main() -> int:
         finally:
             _llm2.urllib.request.urlopen = original
 
+    def _held_question_is_acknowledged():
+        """A held question is announced with the wait quoted.
+
+        From the room a rail and a crash look identical, which is why the
+        same question gets asked three times. Live line: 'mention from
+        marblehead9 held 44s - their own cooldown'.
+        """
+        import threading as _th
+
+        cfg = dict(
+            _bot.DEFAULTS, nick="Docbot", channel="#t",
+            chat_ai_enabled=True, llm_api_key="k",
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        said = []
+        b._say = said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        t0 = time.time()
+        b._mark_mention_reply("marblehead9", t0 - 16)     # 44s of the 60
+        b._on_message("marblehead9", "#t", "docbot how long is the tow "
+                      "rope?", "marblehead9", "")
+        for t in _th.enumerate():
+            if t.name == "ack":
+                t.join(5)
+        if said != ["@marblehead9 on it - give me about 45 seconds to "
+                    "look that up."]:
+            return False
+        if len(b._chat_ai_pending) != 1 or not b._jobs.empty():
+            return False                       # held, not answered twice
+        # A repeat ask gets no second promise - that is the point.
+        b._on_message("marblehead9", "#t", "docbot???", "marblehead9", "")
+        for t in _th.enumerate():
+            if t.name == "ack":
+                t.join(5)
+        return len(said) == 1
+
     def _mods_can_ban():
         """A moderator's word bans somebody - a viewer's word does nothing.
 
@@ -1906,7 +1947,10 @@ def main() -> int:
                 nick, login, badges, command, argument = b._jobs.get()
                 if command == "chime":
                     b._do_chime(nick, argument)
-            ok_dani = said == ["@Dani Forty-two, final answer."]
+            # The held asker is now also told to wait, on its own thread;
+            # the point of this check is that DANI is answered at once.
+            ok_dani = [l for l in said if "on it - give me" not in l] == [
+                "@Dani Forty-two, final answer."]
             ok_log = any("their own cooldown" in l for l in logs)
             # Nine people asking: the queue holds eight and names the drop.
             b2 = _scratch_bot(llm_api_key="k")
@@ -2751,6 +2795,10 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("a held question is acknowledged, with the wait it quotes",
+         "chat_ai_ack_held" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and _held_question_is_acknowledged()),
         ("a moderator's word bans; a viewer's word does nothing",
          "moderator:manage:banned_users" in _auth.SCOPES
          and "user:manage:whispers" in _auth.SCOPES
