@@ -526,6 +526,14 @@ class TwitchBot:
         self._say_lock = threading.Lock()   # paces chat messages
         self._last_say = 0.0
         self._last_ping = 0.0               # keep-alive pacing
+        # Drop forensics: "server closed the connection" alone cannot say
+        # whether we were slow to answer a PING or Twitch let go for its
+        # own reasons, and the two need different fixes. These three are
+        # what tell them apart on the next drop.
+        self._irc_last_data = 0.0           # last time the server said anything
+        self._pong_due = False              # we sent PING, no PONG back yet
+        self._last_pong_at = 0.0            # last PONG the server sent us
+        self._irc_slowest_handle = 0.0      # longest stall inside _handle
         self._jobs = queue.Queue()          # (nick, login, badges, cmd, arg)
         # Whether *this* bot is a moderator of the channel. Learned from the
         # USERSTATE line Twitch sends on join, never from the API - see
@@ -705,6 +713,10 @@ class TwitchBot:
         # _read_loop), so this does not spam the server.
         self.sock.settimeout(1.0)
         self._last_ping = time.time()
+        self._irc_last_data = time.time()
+        self._pong_due = False
+        self._last_pong_at = 0.0
+        self._irc_slowest_handle = 0.0
         self._send("CAP REQ :twitch.tv/tags twitch.tv/commands")
         self._send(f"PASS {self.cfg['oauth_token']}")
         self._send(f"NICK {self.nick}")
@@ -907,6 +919,33 @@ class TwitchBot:
                     time.sleep(1)
                 backoff = min(backoff * 2, 60)
 
+    def _drop_forensics(self) -> str:
+        """What the connection looked like at the moment it closed.
+
+        Live-fire the bot lost its connection three times in one evening
+        and the log said only "server closed the connection" every time,
+        which cannot distinguish the causes: a PONG we were too slow to
+        send needs a fix here, while Twitch letting go on its own needs
+        nothing but the reconnect that already happens. These four
+        numbers settle it on the next drop.
+
+        `silent for` is how long the server had said nothing - a long
+        silence before the close points at our keep-alive, a short one at
+        a server-side decision. `pong outstanding` is True only if a PING
+        of ours went unanswered. `worst stall` is the longest time spent
+        inside _handle: a lookup running on this loop stops it reading
+        PINGs for that long, and that is a drop we caused.
+        """
+        now = time.time()
+        pong = ("yes - our PING was never answered" if self._pong_due
+                else f"no (last one {now - self._last_pong_at:.0f}s ago)"
+                if self._last_pong_at else "no (none received yet)")
+        return (f"[irc] drop forensics: silent for "
+                f"{now - self._irc_last_data:.0f}s, keep-alive sent "
+                f"{now - self._last_ping:.0f}s ago, pong outstanding: "
+                f"{pong}, worst stall in _handle "
+                f"{self._irc_slowest_handle:.1f}s")
+
     def _token_keeper(self) -> None:
         """Refresh the OAuth token every 30 minutes so it never expires while
         the bot is connected (Twitch access tokens are short-lived; the refresh
@@ -926,19 +965,29 @@ class TwitchBot:
                 if time.time() - self._last_ping > 240:
                     self._send("PING :tmi.twitch.tv")
                     self._last_ping = time.time()
+                    self._pong_due = True
                 continue
             except (OSError, ssl.SSLError):
                 raise
             if not data:
+                self._log(self._drop_forensics())
                 raise OSError("server closed the connection")
 
+            self._irc_last_data = time.time()
             self.buf += data
             while b"\r\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\r\n", 1)
+                started = time.time()
                 try:
                     self._handle(raw.decode("utf-8", "replace"))
                 except Exception as exc:  # never die on a malformed line
                     self._log(f"handle error: {exc!r}")
+                # A lookup that runs on this loop stops it reading PINGs
+                # for as long as it takes, which is one way a drop looks
+                # exactly like a server-side one. Record the worst stall.
+                took = time.time() - started
+                if took > self._irc_slowest_handle:
+                    self._irc_slowest_handle = took
 
     # ---- line handling ------------------------------------------------
     def _handle(self, line: str) -> None:
@@ -947,6 +996,12 @@ class TwitchBot:
             return
         if line.startswith("PING"):
             self._send("PONG :tmi.twitch.tv")
+            return
+        if line.startswith("PONG"):
+            # Answer to OUR keep-alive: it closes the outstanding PING and
+            # proves the server was alive that recently.
+            self._pong_due = False
+            self._last_pong_at = time.time()
             return
 
         tags = {}

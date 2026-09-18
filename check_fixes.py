@@ -2920,6 +2920,22 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "held-question queue full - dropped" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("a dropped connection says why, not just that it dropped",
+         # Live-fire: three drops in one evening, each logging only
+         # "server closed the connection" - which cannot tell a PONG we
+         # were too slow to send (our bug) from Twitch letting go on its
+         # own (needs nothing). The drop now reports the silence, the
+         # keep-alive age, whether a PING of ours went unanswered, and the
+         # longest stall inside _handle.
+         all(t in _bot2 for t in (
+             "def _drop_forensics",
+             "pong outstanding",
+             "worst stall in _handle",
+             "_irc_slowest_handle",
+             "_pong_due",
+             'startswith("PONG")',
+             "self._log(self._drop_forensics())"))
+         and "_pong_due = True" in _bot2),
         ("a direct answer is posted, not refused for reusing a word",
          (lambda _live, _own, _q: (
              # Live-fire: "Docbot tell us what a boomer is" was refused with

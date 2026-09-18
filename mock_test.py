@@ -229,7 +229,97 @@ def test_bad_config_is_reported_plainly():
     print("[PASS] a broken config.json names the line and stops the restart loop")
 
 
+def test_a_dropped_connection_explains_itself():
+    """Live-fire, 2026-09-18: the bot lost its connection three times in one
+    evening and every one logged only
+
+        connection lost: server closed the connection
+
+    That string cannot distinguish the causes, and they need different
+    fixes: a PONG we were too slow to send is a bug here, while Twitch
+    letting go on its own needs nothing but the reconnect that already
+    happens. Three held-question lines landed in the same second as a drop,
+    which hinted at the read loop stalling - but there was no way to tell
+    that from a coincidence, so the only honest move was to measure.
+
+    The drop now reports how long the server had been silent, how long
+    since our own keep-alive, whether a PING of ours went unanswered, and
+    the longest time spent inside _handle - a lookup running on this loop
+    stops it reading PINGs, and that is a drop we caused."""
+    import tempfile
+
+    cfg = {**DEFAULTS, "nick": "funfactbot", "oauth_token": "oauth:x",
+           "channel": "#test", "host": HOST, "port": PORT,
+           "use_tls": False, "memory_db_path": ":memory:"}
+    with tempfile.TemporaryDirectory() as d:
+        for k in ("beef_state_path", "persona_state_path",
+                  "subgoal_state_path"):
+            cfg[k] = os.path.join(d, k + ".json")
+        bot = TwitchBot(cfg)
+    logs = []
+    bot._log = logs.append
+    bot.running = True
+
+    def drop(lines=(), pong_due=False, stall=0.0):
+        """Close a real socket under the real read loop; return the
+        forensics line and anything the bot tried to send."""
+        del logs[:]
+        srv, cli = socket.socketpair()
+        bot.sock, bot.buf = cli, b""
+        bot.sock.settimeout(0.2)
+        now = time.time()
+        bot._last_ping = bot._irc_last_data = now
+        bot._pong_due, bot._last_pong_at = pong_due, 0.0
+        bot._irc_slowest_handle = 0.0
+        sent = []
+        bot._send = sent.append
+        bot._handle = ((lambda line: time.sleep(stall)) if stall
+                       else TwitchBot._handle.__get__(bot))
+        for line in lines:
+            srv.sendall((line + "\r\n").encode("utf-8"))
+        time.sleep(0.3)          # let it land BEFORE the close
+        srv.close()
+        try:
+            bot._read_loop()
+        except OSError:
+            pass
+        got = [l for l in logs if l.startswith("[irc] drop forensics")]
+        assert len(got) == 1, logs      # exactly one, on the way out
+        return got[0], sent
+
+    try:
+        # 1. Twitch let go while we were healthy - the common case, and
+        #    the one that needs no fix at all.
+        line, _ = drop()
+        assert "pong outstanding: no (none received yet)" in line, line
+        assert "worst stall in _handle 0.0s" in line, line
+
+        # 2. Our keep-alive went unanswered: that IS our bug, and the log
+        #    must say so rather than blaming the server.
+        line, _ = drop(pong_due=True)
+        assert "pong outstanding: yes - our PING was never answered" in line
+
+        # 3. A PONG closes the outstanding PING and dates the last proof
+        #    the server was alive.
+        line, _ = drop(["PONG :tmi.twitch.tv"], pong_due=True)
+        assert "pong outstanding: no (last one 0s ago)" in line, line
+
+        # 4. Instrumentation must not break the keep-alive itself: a
+        #    server PING is still answered, exactly once.
+        _, sent = drop(["PING :tmi.twitch.tv"])
+        assert sent == ["PONG :tmi.twitch.tv"], sent
+
+        # 5. A lookup stalling this loop is named, with its length - the
+        #    hypothesis the log could not previously test.
+        line, _ = drop(["PING :tmi.twitch.tv"], stall=1.4)
+        assert "worst stall in _handle 1.4s" in line, line
+    finally:
+        bot.running = False
+    print("[PASS] a dropped connection reports why, not just that it did")
+
+
 def main():
+    test_a_dropped_connection_explains_itself()
     test_bad_config_is_reported_plainly()
     cfg = {
         **DEFAULTS,
