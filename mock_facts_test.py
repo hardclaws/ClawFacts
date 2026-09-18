@@ -9,6 +9,7 @@ import time
 import json
 import pathlib
 
+import chatai
 import funfacts
 
 
@@ -1876,6 +1877,177 @@ def test_the_question_path_also_searches_wikipedia():
     print("[PASS] the question path searches Wikipedia by its subject")
 
 
+_WIKI_5K = (
+    "The 5K run is a long-distance road running competition over a distance "
+    "of five kilometres (3.107 mi). Also referred to as the 5K road race, 5 "
+    "km, or simply 5K, it is the shortest of the most common road running "
+    "distances. The 5 km road distance was introduced by IAAF as a world "
+    "record event in November 2017, with the inaugural record to be "
+    "recognised after 1 January 2018 if the performances were equal to or "
+    "better than 13:10 for men and 14:45 for women.")
+
+
+def _serve_5k(ddg_text=""):
+    def serve(url, params, timeout=8.0):
+        if "wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [{"title": "5K run"}]}}
+            return {"query": {"pages": [{"title": "5K run",
+                                         "extract": _WIKI_5K}]}}
+        return {"AbstractText": ddg_text, "RelatedTopics": [
+            {"Text": "Whats a good average time to do 5K? : r/C25K. "
+                     "Posted by u/runner"}]}
+    return serve
+
+
+def test_a_question_is_never_an_answer():
+    """Live-fire: 'Docbot whats the avg time for someone to run 5k' ->
+    'FunFact | ...: Whats a good average time to do 5K? : r/C25K.' A
+    Reddit thread title - the same question, asked back, with the
+    subreddit glued on after the question mark so the '?' check missed
+    it. A question is never a fact and never a source."""
+    import llm
+    for t in ("Whats a good average time to do 5K? : r/C25K.",
+              "How long does a 5K take? - Runner's World.",
+              "Is 30 minutes a good 5K time? | Reddit.",
+              "Posted by u/runner.",
+              "What is the dew point? It is the temperature at which air "
+              "becomes saturated."):
+        assert funfacts._is_forum_title(t), t
+        assert funfacts._is_fragment(t), t
+    for t in ("Most runners finish a 5K in 30 to 40 minutes.",
+              "The Roman Forum was the centre of public life in ancient Rome.",
+              "Wondering how fast you should run? Beginners average 12 "
+              "minutes per mile."):
+        assert not funfacts._is_forum_title(t), t
+    fed = []
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+            llm.any_configured)
+    funfacts._http_get_json = _serve_5k()
+    llm.is_configured = llm.any_configured = lambda o: True
+
+    def model(q, src, cfg):
+        fed.append(list(src))
+        return "Whats a good average time to do 5K? : r/C25K."
+
+    llm.answer_question = model
+    try:
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("whats the avg time for someone to run 5k",
+                                   {"llm_api_key": "k", "max_fact_chars": 200})
+        assert not any("r/C25K" in s or "Posted by" in s for s in fed[0]), \
+            fed[0]
+        assert not (got and "r/C25K" in got["fact"]), got
+    finally:
+        (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+         llm.any_configured) = orig
+        funfacts._cache.clear()
+    print("[PASS] a forum thread title is neither a source nor an answer")
+
+
+def test_the_answer_is_the_kind_of_figure_asked_for():
+    """Live-fire: 'Docbot how long it take to run 5k home boy?' ->
+    'FunFact | ...: The 5K run is a long-distance road running
+    competition over a distance of five kilometres (3.107 mi).' A
+    how-long question answered with a distance: the line has a figure,
+    so the specific-answer check passed it. Now a question that asks for
+    a duration / distance / cost / temperature / weight is answered only
+    by a line carrying that kind of figure - through the model path, the
+    records miner and the article-facts path alike - and when no source
+    has one the engine returns NOTHING, so the bot hands the question to
+    the chat model (which knows a 5K takes most people 30-40 minutes)
+    rather than post a fact of the wrong kind."""
+    import llm
+    Q = "how long it take to run 5k home boy?"
+    assert funfacts.answer_kind(Q)[0] == "duration"
+    assert funfacts.answer_kind("whats the avg time for someone to run 5k")[0] \
+        == "duration"
+    assert funfacts.answer_kind("how far is a 5k")[0] == "distance"
+    assert funfacts.answer_kind("how much does a peterbilt 389 cost")[0] \
+        == "cost"
+    assert funfacts.answer_kind("how heavy is a loaded semi")[0] == "weight"
+    for q in ("what is a bongo twist", "how long is the golden gate bridge",
+              "how long ago was the eiffel tower built",
+              "who won the 1998 world cup",
+              "what temperature does condensation stop"):   # 'dew point'
+        assert funfacts.answer_kind(q) is None, q
+    defn = ("The 5K run is a long-distance road running competition over a "
+            "distance of five kilometres (3.107 mi).")
+    assert not funfacts.answers_kind(defn, Q)
+    for ok in ("Most runners finish a 5K in 30 to 40 minutes.",
+               "Elite men run it in under 13:10.",
+               "It takes about half an hour for most people."):
+        assert funfacts.answers_kind(ok, Q), ok
+    assert funfacts.answers_kind(defn, "how far is a 5k")
+    orig = (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+            llm.any_configured)
+    llm.is_configured = llm.any_configured = lambda o: True
+    try:
+        # the model restates the definition (as it did live): rejected,
+        # retried with the kind named, and with nothing better in any
+        # source the engine returns None - the bot's cue to let the chat
+        # model answer. Never the distance, never a shrug in its way.
+        funfacts._http_get_json = _serve_5k()
+        asked = []
+
+        def restate(q, src, cfg):
+            asked.append(q)
+            return defn if len(asked) == 1 else "NOTHING RELIABLE"
+
+        llm.answer_question = restate
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(Q, {"llm_api_key": "k",
+                                       "max_fact_chars": 200})
+        assert got is None, got
+        assert len(asked) == 2 and "Answer with the duration" in asked[1], asked
+        # with no model at all, the article path must not post it either
+        llm.is_configured = llm.any_configured = lambda o: False
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(Q, {"max_fact_chars": 200})
+        assert got is None, got
+        # 'how far to the next stop' is a question for the streamer that
+        # merely looks encyclopedic: with nothing on the subject (a film
+        # that shares the words, a model that declines) the engine
+        # returns None so the persona can take it - the live-fire replay
+        # in mock_chatai_test depends on exactly that.
+        llm.is_configured = llm.any_configured = lambda o: True
+        llm.answer_question = lambda q, src, cfg: "NOTHING RELIABLE"
+        funfacts._http_get_json = lambda url, params, timeout=8.0: (
+            {"query": {"search": [{"title": "Next Stop (film)"}]}}
+            if params.get("list") == "search" else
+            {"query": {"pages": [{"title": "Next Stop (film)", "extract":
+                "Next Stop is a 2007 Canadian drama film directed by "
+                "Alain Desrochers."}]}} if "wikipedia" in url else
+            {"AbstractText": "", "RelatedTopics": []})
+        funfacts._cache.clear()
+        assert funfacts.get_funfact("how far to the next stop",
+                                    {"llm_api_key": "k",
+                                     "max_fact_chars": 200}) is None
+        funfacts._http_get_json = _serve_5k()
+        # a distance question IS answered by the distance line
+        funfacts._cache.clear()
+        got = funfacts.get_funfact("how far is a 5k", {"max_fact_chars": 200})
+        assert got and funfacts.answers_kind(got["fact"], "how far is a 5k"), got
+        # and when a source carries the duration, it goes straight through
+        llm.is_configured = llm.any_configured = lambda o: True
+        funfacts._http_get_json = _serve_5k(
+            "Most recreational runners finish a 5K in 30 to 40 minutes, with "
+            "an overall average around 34 minutes.")
+        llm.answer_question = lambda q, src, cfg: (
+            "Most recreational runners finish a 5K in 30 to 40 minutes, "
+            "around 34 minutes on average.")
+        funfacts._cache.clear()
+        got = funfacts.get_funfact(Q, {"llm_api_key": "k",
+                                       "max_fact_chars": 200})
+        assert got and "30 to 40 minutes" in got["fact"], got
+    finally:
+        (funfacts._http_get_json, llm.is_configured, llm.answer_question,
+         llm.any_configured) = orig
+        funfacts._cache.clear()
+    print("[PASS] how-long/how-far/how-much questions get that kind of "
+          "figure from the engine, or nothing - never the wrong kind")
+
+
 def test_skip_llm_declines_without_touching_the_model():
     """opts['_skip_llm'] (set by !ask when the chat call just timed out)
     must decline instantly - no model call, straight to the records."""
@@ -3177,8 +3349,284 @@ def test_sunrise_uses_live_clock_data_not_search_debris():
     print("[PASS] sunrise/sunset returns the actual local clock time")
 
 
+def test_weatherapi_answers_in_the_channels_sentence_when_a_key_is_set():
+    """The channel asked for weatherapi.com and one sentence to the asker:
+    '%user%, it is currently %condition% in %location%. %temp%. Feels like
+    %feelslike%. Wind is blowing from the %dir% at %wind%. %humidity%%
+    humidity. Visibility: %vis%. Precipitation: %precip%.' With
+    weatherapi_key set that is the reply - via a mention or !ask, whole
+    (max_fact_chars never trims a reading) and with metric alongside. No
+    key, a rejected key, an unknown place or an outage all fall back to
+    the keyless Open-Meteo path, so weather never goes quiet."""
+    import os
+    import tempfile
+    import urllib.error
+    import bot as bot_mod
+
+    wapi = {"location": {"name": "Wilkes-Barre", "region": "Pennsylvania",
+                         "country": "United States of America"},
+            "current": {"temp_c": 17.2, "temp_f": 63.0,
+                        "condition": {"text": "Clear", "code": 1000},
+                        "wind_mph": 4.3, "wind_kph": 6.8, "wind_dir": "SW",
+                        "precip_mm": 0.0, "precip_in": 0.0, "humidity": 61,
+                        "feelslike_c": 16.1, "feelslike_f": 61.0,
+                        "vis_km": 10.0, "vis_miles": 6.0}}
+    open_meteo = {"current": {
+        "temperature_2m": 63.0, "apparent_temperature": 61.0,
+        "relative_humidity_2m": 61, "precipitation": 0, "weather_code": 0,
+        "wind_speed_10m": 4.3, "wind_direction_10m": 230,
+        "wind_gusts_10m": 6}}
+    calls = []
+
+    def http(url, params=None, timeout=0):
+        calls.append((url, dict(params or {})))
+        if url == funfacts.WEATHERAPI_API:
+            return wapi
+        assert url == funfacts.OPEN_METEO_API, url
+        return open_meteo
+
+    def fresh(**over):
+        cfg = {**bot_mod.DEFAULTS, "nick": "TruckingWithDocBot",
+               "channel": "#t", "chat_ai_enabled": True,
+               "beef_state_path": os.path.join(tempfile.mkdtemp(), "b.json"),
+               "memory_db_path": os.path.join(tempfile.mkdtemp(), "m.db"),
+               "persona_state_path": os.path.join(tempfile.mkdtemp(),
+                                                  "p.json"),
+               "subgoal_state_path": os.path.join(tempfile.mkdtemp(),
+                                                  "s.json"), **over}
+        b = bot_mod.TwitchBot(cfg)
+        b.said = []
+        b._say = b.said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        return b
+
+    def clear():
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+
+    saved = (funfacts._http_get_json, funfacts._osm_geocode,
+             funfacts._lookup_all)
+    funfacts._http_get_json = http
+    funfacts._osm_geocode = lambda place: {
+        "name": "Wilkes-Barre", "state": "Pennsylvania",
+        "country": "United States", "lat": 41.25, "lon": -75.88}
+    funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a weather question reached generic search"))
+    want = ("it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F "
+            "(17°C). Feels like 61°F (16°C). Wind is blowing from the SW at "
+            "4 mph (7 km/h). 61% humidity. Visibility: 6 miles (10 km). "
+            "Precipitation: 0.0 in (0.0 mm).")
+    try:
+        clear()
+        # The exact live line, as a mention.
+        b = fresh(weatherapi_key="abc123")
+        b._do_chime("Hardclaws", "Docbot whats the weather in wilkes barre, pa")
+        assert b.said == [f"Hardclaws, {want}"], b.said
+        assert calls[-1][1] == {"key": "abc123", "q": "wilkes barre, pa",
+                                "aqi": "no"}, calls[-1]
+        # !ask reads the same (cached, 5 min) answer to its own asker,
+        # and terse phrasings reach the data too.
+        n = len(calls)
+        b._reply_ask("kvack", "whats the weather in wilkes barre, pa")
+        assert b.said[-1] == f"kvack, {want}" and len(calls) == n, b.said
+        b._reply_ask("kvack", "weather in wilkes barre, pa")
+        assert b.said[-1] == f"kvack, {want}", b.said
+        clear()
+        b = fresh(weatherapi_key="abc123", max_fact_chars=80)
+        b._do_chime("kvack", "docbot weather in wilkes barre, pa")
+        assert b.said == [f"kvack, {want}"], b.said
+        # A statement about weather is not hijacked by the data path.
+        assert not chatai.weather_question(
+            "doc the weather in texas is crazy", ["docbot", "doc"])
+        # Abroad the country is named; a city-state is not repeated.
+        clear()
+        wapi["location"].update(name="Paris", region="Ile-de-France",
+                                country="France")
+        b = fresh(weatherapi_key="abc123")
+        b._do_chime("kvack", "doc what's the weather in paris")
+        assert "in Paris, Ile-de-France, France. 63°F" in b.said[-1], b.said
+        clear()
+        wapi["location"].update(name="Singapore", region="Singapore",
+                                country="Singapore")
+        b = fresh(weatherapi_key="abc123")
+        b._do_chime("kvack", "doc weather in singapore?")
+        assert "Clear in Singapore. 63°F" in b.said[-1], b.said
+
+        # No key: the Open-Meteo reply exactly as before, headed.
+        clear()
+        b = fresh()
+        b._do_chime("Hardclaws", "Docbot whats the weather in wilkes barre, pa")
+        assert b.said == ["Weather | Wilkes-Barre, Pennsylvania: Currently "
+                          "63°F with clear skies; feels like 61°F; humidity "
+                          "61%; wind SW at 4 mph."], b.said
+        # A rejected key, an unknown place, a spent quota: same fallback.
+        for code, body in ((401, b'{"error":{"code":2006,"message":"API key '
+                                 b'is invalid."}}'),
+                           (400, b'{"error":{"code":1006,"message":"No '
+                                 b'matching location found."}}'),
+                           (403, b'{"error":{"code":2007,"message":"quota"}}')):
+            clear()
+
+            def failing(url, params=None, timeout=0, code=code, body=body):
+                if url == funfacts.WEATHERAPI_API:
+                    raise urllib.error.HTTPError(url, code, "x", {},
+                                                 io.BytesIO(body))
+                return http(url, params, timeout)
+
+            funfacts._http_get_json = failing
+            b = fresh(weatherapi_key="k")
+            b._do_chime("Hardclaws",
+                        "Docbot whats the weather in wilkes barre, pa")
+            assert b.said[-1].startswith(
+                "Weather | Wilkes-Barre, Pennsylvania: Currently 63°F"), \
+                (code, b.said)
+        # Everything down: the honest line, still headed Weather.
+        clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("down"))
+        b = fresh(weatherapi_key="k")
+        b._do_chime("Hardclaws", "Docbot whats the weather in wilkes barre, pa")
+        assert "couldn't fetch the current weather" in b.said[-1], b.said
+    finally:
+        (funfacts._http_get_json, funfacts._osm_geocode,
+         funfacts._lookup_all) = saved
+        clear()
+    print("[PASS] weatherapi.com answers as one sentence to the asker; "
+          "Open-Meteo stays the keyless fallback")
+
+
+def test_a_misspelt_town_in_a_named_state_is_that_town():
+    """Live-fire: 'Docbot what time is sunrise in Hintok, ok?' was
+    answered 'Sunrise | ไทรโยค: Sunrise is expected around 6:13 AM local
+    time today.' Three faults in one line. Nominatim has no town called
+    Hintok, so its best string match was 'Hintok Cut' - a FOOTPATH at
+    Hellfire Pass, Thailand - and the ', ok' (Oklahoma) was ignored; it
+    named the place in Thai; and nobody asked whether the hit was a
+    place at all. The viewer meant Hinton, Oklahoma.
+
+    Now the typed region is a hard constraint that pins the country,
+    a road/shop/trail is not a settlement, labels are English, and a
+    spelling that finds nothing gets Photon's fuzzy match on PLACES in
+    that region - logged as a correction."""
+    hintok_cut = [{"lat": "14.3655849", "lon": "98.9405573", "class": "highway",
+                   "type": "footway", "addresstype": "road", "name": "Hintok Cut",
+                   "display_name": "Hintok Cut, Sai Yok, Sai Yok District, "
+                                   "Kanchanaburi Province, Thailand",
+                   "address": {"road": "Hintok Cut", "municipality": "Sai Yok",
+                               "county": "Sai Yok District",
+                               "province": "Kanchanaburi Province",
+                               "country": "Thailand", "country_code": "th"}}]
+    hinton = [{"lat": "35.4715518", "lon": "-98.3556589", "class": "boundary",
+               "type": "administrative", "addresstype": "town", "name": "Hinton",
+               "display_name": "Hinton, Caddo County, Oklahoma, United States",
+               "address": {"town": "Hinton", "county": "Caddo County",
+                           "state": "Oklahoma", "country": "United States",
+                           "country_code": "us"}}]
+    photon = {"type": "FeatureCollection", "features": [
+        {"properties": {"osm_key": "place", "osm_value": "town", "name": "Hinton",
+                        "county": "Caddo", "state": "Oklahoma",
+                        "country": "United States", "countrycode": "US"},
+         "geometry": {"coordinates": [-98.3556589, 35.4715518]}},
+        {"properties": {"osm_key": "highway", "osm_value": "residential",
+                        "name": "West Oklahoma Street", "city": "Hinton",
+                        "state": "Oklahoma", "country": "United States",
+                        "countrycode": "US"},
+         "geometry": {"coordinates": [-98.368129, 35.4640245]}}]}
+    calls = []
+
+    def http(url, params, timeout=8.0):
+        calls.append((url, dict(params)))
+        if url == funfacts.OSM_API:
+            assert params.get("accept-language") == "en", params
+            q = params["q"].lower()
+            if "hinton" in q:
+                return hinton
+            if params.get("countrycodes") == "us":
+                return []               # what Nominatim really returns
+            return hintok_cut           # ...and without the pin
+        if url == funfacts.PHOTON_API:
+            return photon if "hintok" in params["q"].lower() else {"features": []}
+        if url == funfacts.OPEN_METEO_API:
+            assert abs(params["latitude"] - 35.47) < 0.05, params
+            return {"daily": {"sunrise": ["2026-09-17T07:19", "2026-09-18T07:20"],
+                              "sunset": ["2026-09-17T19:37", "2026-09-18T19:35"]}}
+        raise AssertionError(f"unexpected fetch: {url} {params}")
+
+    import contextlib
+    import io
+    saved = funfacts._http_get_json
+    funfacts._http_get_json = http
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):
+            got = funfacts.get_funfact("what time is sunrise in Hintok, ok?", {})
+        assert got == {"place": "Hinton, Oklahoma", "kind": "Sunrise",
+                       "fact": "Sunrise is expected around 7:19 AM local "
+                               "time today."}, got
+        assert "read 'Hintok, ok' as 'Hinton, Oklahoma, United States'" \
+            in console.getvalue(), console.getvalue()
+        hosts = [u.split("/")[2] for u, _ in calls]
+        assert hosts[0] == "nominatim.openstreetmap.org" and \
+            calls[0][1]["q"] == "Hintok, oklahoma" and \
+            calls[0][1]["countrycodes"] == "us", calls[0]
+        assert "photon.komoot.io" in hosts, hosts
+        # An exact, real place: one Nominatim call, no fuzzy step.
+        calls.clear()
+        geo = funfacts._osm_geocode("Hinton, OK")
+        assert geo["name"] == "Hinton" and geo["state"] == "Oklahoma", geo
+        assert [u.split("/")[2] for u, _ in calls] == \
+            ["nominatim.openstreetmap.org"], calls
+        # The region is a hard constraint even without a comma, and a
+        # Canadian province pins Canada.
+        assert funfacts._region_of("Hintok ok") == ("ok", "oklahoma", "us")
+        assert funfacts._region_of("Cuba Missouri") == ("missouri", "missouri", "us")
+        assert funfacts._region_of("Banff, AB") == ("ab", "alberta", "ca")
+        assert funfacts._region_of("Paris") == ("", "", "")
+        # A hit in the wrong country is not the place asked for.
+        thai = funfacts._parse_geocode(hintok_cut[0])
+        assert thai["state"] == "Kanchanaburi Province" and thai["kind"] == "road"
+        assert not funfacts._geo_in_region(thai, "oklahoma", "us")
+        assert funfacts._geo_in_region(funfacts._parse_geocode(hinton[0]),
+                                       "oklahoma", "us")
+        # The fuzzy step only accepts a plausible misspelling.
+        assert funfacts._close_name("Hinton", "Hintok")
+        assert funfacts._close_name("Terre Haute", "Terra Haute")
+        assert not funfacts._close_name("Red Rock", "Red Rock Canyon State Park")
+        assert not funfacts._close_name("Hilton", "Hintok")
+        # With no region typed, the trail is still not a town: Photon's
+        # place wins, and it is logged as a correction.
+        calls.clear()
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):
+            geo = funfacts._osm_geocode("Hintok")
+        assert geo["display_name"] == "Hinton, Oklahoma, United States", geo
+        assert "closest place by that name" in console.getvalue()
+        # Photon down and nothing in the region: an honest None, never
+        # the Thai footpath.
+        calls.clear()
+
+        def photon_down(url, params, timeout=8.0):
+            if url == funfacts.PHOTON_API:
+                raise OSError("down")
+            return http(url, params, timeout)
+
+        funfacts._http_get_json = photon_down
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert funfacts._osm_geocode("Hintok, ok") is None
+    finally:
+        funfacts._http_get_json = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] 'sunrise in Hintok, ok' is Hinton, Oklahoma - never a "
+          "footpath in Thailand")
+
+
 def main():
     test_trim()
+    test_a_misspelt_town_in_a_named_state_is_that_town()
     test_trim_keeps_whole_sentences()
     test_smk_game()
     test_rotation()
@@ -3246,6 +3694,8 @@ def main():
     test_a_question_is_answered_from_what_a_search_returned()
     test_a_one_typo_query_still_finds_the_article()
     test_the_question_path_also_searches_wikipedia()
+    test_a_question_is_never_an_answer()
+    test_the_answer_is_the_kind_of_figure_asked_for()
     test_skip_llm_declines_without_touching_the_model()
     test_a_dead_model_still_gets_the_records()
     test_a_misspelled_dish_still_gets_its_facts()
@@ -3281,6 +3731,7 @@ def main():
     test_spicy_mode_still_answers_questions()
     test_the_geocoder_may_not_substitute_a_different_place()
     test_weather_uses_current_data_not_an_archive_search_snippet()
+    test_weatherapi_answers_in_the_channels_sentence_when_a_key_is_set()
     test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0

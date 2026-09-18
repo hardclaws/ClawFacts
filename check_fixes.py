@@ -8,6 +8,7 @@ False (or `_EXTRACT_PAGE_CAP` is not 4), the copy you are running is older than
 the fix it names — no need to guess from chat behaviour.
 """
 import pathlib
+import time
 import sys
 
 import funfacts
@@ -19,11 +20,15 @@ def main() -> int:
     import os
     import tempfile
 
+    import auth as _auth
+    import access as access_mod
     import bot as _bot
     import customcmds as _cc_mod
     import shoutout as _so
     import llm as _llm2
     import chatai as _ch2
+    _bot2 = pathlib.Path("bot.py").read_text(encoding="utf-8")
+    _auth_src = pathlib.Path("auth.py").read_text(encoding="utf-8")
 
     def _fresh():
         return _cc_mod.CommandSet(
@@ -32,6 +37,157 @@ def main() -> int:
             reserved=_bot.RESERVED_COMMANDS)
 
     _cc = _fresh()
+
+    def _headlines_are_top_stories():
+        """'whats the leading headlines for today' was searched as the
+        words 'leading headlines' and quoted a roundup page's title.
+        A subject-less headline ask reads the top-stories feed, three
+        real titles a message, and roundup titles are never quoted."""
+        for fn in ("_news_generic", "_roundup", "_google_news_top",
+                   "_pack_headlines"):
+            if not callable(getattr(funfacts, fn, None)):
+                return False
+        if not (funfacts._news_generic("whats the leading headlines for today")
+                and funfacts._news_generic("that is not a headline where the news")
+                and funfacts._news_generic("whats the news")
+                and not funfacts._news_generic("any news on the LA bus crash")
+                and not funfacts.news_question("whats your news source")):
+            return False
+        if not funfacts._roundup("Top news of the day September 16 2026") \
+                or funfacts._roundup("Fed holds rates steady as inflation cools"):
+            return False
+        saved = (funfacts._google_news_top, funfacts._google_news_rss,
+                 funfacts._tavily_news)
+        funfacts._google_news_top = lambda limit=12, options=None: [
+            ("Top news of the day September 16 2026", "thehindu.com",
+             "Tue, 15 Sep 2026 20:00:00 GMT"),
+            ("Fed holds rates steady as inflation cools", "Reuters",
+             "Wed, 16 Sep 2026 14:07:49 GMT"),
+            ("Senate passes stopgap funding bill", "CNN",
+             "Wed, 16 Sep 2026 12:01:00 GMT")]
+        funfacts._google_news_rss = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("search feed used for a generic ask"))
+        funfacts._tavily_news = lambda *a, **k: []
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            got = funfacts.get_funfact("whats the leading headlines for today",
+                                       {"max_message_chars": 450})
+        except Exception:
+            return False
+        finally:
+            (funfacts._google_news_top, funfacts._google_news_rss,
+             funfacts._tavily_news) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+        return bool(got and got.get("news") and got.get("place") == "top headlines"
+                    and got["fact"].startswith("Fed holds rates steady")
+                    and "Senate passes" in got["fact"]
+                    and "Top news of the day" not in got["fact"])
+
+    def _misspelt_town_is_that_town():
+        """'sunrise in Hintok, ok' was answered for a footpath in
+        Thailand, labelled in Thai. The typed state pins the search,
+        a road is not a settlement, labels are English, and a
+        misspelling gets a fuzzy match on places in that state."""
+        for fn in ("_region_of", "_geo_in_region", "_photon_geocode",
+                   "_close_name"):
+            if not callable(getattr(funfacts, fn, None)):
+                return False
+        if funfacts._region_of("Hintok, ok") != ("ok", "oklahoma", "us"):
+            return False
+        thai = [{"lat": "14.36", "lon": "98.94", "type": "footway",
+                 "addresstype": "road", "name": "Hintok Cut",
+                 "display_name": "Hintok Cut, Sai Yok, Thailand",
+                 "address": {"road": "Hintok Cut", "municipality": "Sai Yok",
+                             "province": "Kanchanaburi Province",
+                             "country": "Thailand", "country_code": "th"}}]
+        photon = {"features": [{"properties": {
+            "osm_key": "place", "osm_value": "town", "name": "Hinton",
+            "state": "Oklahoma", "country": "United States",
+            "countrycode": "US"}, "geometry": {"coordinates": [-98.36, 35.47]}}]}
+
+        def http(url, params, timeout=8.0):
+            if url == funfacts.OSM_API:
+                if params.get("accept-language") != "en":
+                    raise AssertionError("labels must be asked for in English")
+                return [] if params.get("countrycodes") == "us" else thai
+            if url == funfacts.PHOTON_API:
+                return photon
+            raise AssertionError(url)
+
+        saved = funfacts._http_get_json
+        funfacts._http_get_json = http
+        try:
+            geo = funfacts._osm_geocode("Hintok, ok")
+        except Exception:
+            return False
+        finally:
+            funfacts._http_get_json = saved
+        return bool(geo and geo.get("name") == "Hinton"
+                    and geo.get("state") == "Oklahoma")
+
+    def _working_memory_holds():
+        import ongoing as _og
+        import tempfile as _tf
+        names = ("doc", "docbot")
+        d = _tf.mkdtemp(prefix="clawfacts-check-")
+        og = _og.Ongoing(os.path.join(d, "og.json"))
+        start = _og.control("Docbot lets do a test run. Topic would be Cycling "
+                            "and lets make it 3 rounds", og.snapshot(), names)
+        if not (start and start.kind == "start" and start.rounds == 3):
+            return False
+        og.begin(start, "Hardclaws", 0.0)
+        r2 = _og.control("lets get Round 2 going. Give 30secs to answer then "
+                         "start round 3 30secs after that", og.snapshot(), names)
+        if not (r2 and r2.kind == "round" and r2.n == 2
+                and r2.cadence == (30.0, 30.0)):
+            return False
+        tally = _og.control("keep count of Dirty Lepages and we will tell the "
+                            "bot when we spot one", og.snapshot(), names)
+        if not (tally and tally.kind == "tally_start"
+                and tally.label == "Dirty Lepages"):
+            return False
+        og.apply_tally(tally, "Hardclaws", 0.0)
+        bump = _og.control("dirty lepage!", og.snapshot(), names)
+        if not (bump and bump.kind == "tally_add"):
+            return False
+        og.apply_tally(bump, "Hardclaws", 1.0)
+        prompt = _ch2.user_prompt([], "kvack", "hows it going",
+                                  ongoing=og.prompt_lines(now=2.0))
+        fresh = _og.Ongoing(og.path)
+        return ("WHAT IS GOING ON" in prompt and "Dirty Lepages: 1" in prompt
+                and "hosting a 3-round Cycling quiz" in prompt
+                and fresh.tallies.get("dirty lepage", {}).get("count") == 1
+                and _og.control("what is the current temperature in Rolla, "
+                                "Missouri?", og.snapshot(), names) is None
+                and hasattr(_bot.TwitchBot, "_do_step"))
+
+    def _admin_panel_is_locked_down():
+        import adminpanel as _ap
+        import tempfile as _tf
+        d = _tf.mkdtemp(prefix="clawfacts-check-")
+        users = _ap.Users(os.path.join(d, "u.json"))
+        ok, _ = users.set("doc", "correct horse battery", "admin")
+        raw = pathlib.Path(users.path).read_text(encoding="utf-8")
+        return (ok and "correct horse" not in raw
+                and users.verify("doc", "correct horse battery") == "admin"
+                and users.verify("doc", "nope") is None
+                and not users.set("x", "short", "mod")[0]
+                and _ap._bind_is_safe("127.0.0.1")[0]
+                and _ap._bind_is_safe("100.101.102.103")[0]
+                and not _ap._bind_is_safe("0.0.0.0")[0]
+                and not _ap._bind_is_safe("8.8.8.8")[0]
+                and _ap.start_panel({"admin_panel_enabled": True,
+                                     "admin_panel_bind": "0.0.0.0"},
+                                    _ap.BotControl(), users) is None
+                and _bot.DEFAULTS.get("admin_panel_enabled") is False
+                and _bot.DEFAULTS.get("admin_panel_bind") == "127.0.0.1"
+                and "mod" in _ap.ROLES
+                and "--admin-user" in pathlib.Path("bot.py").read_text(
+                    encoding="utf-8")
+                and "admin_users.json" in pathlib.Path(".gitignore").read_text(
+                    encoding="utf-8"))
 
     def _survives_restart():
         path = os.path.join(tempfile.mkdtemp(prefix="clawfacts-check-"),
@@ -905,7 +1061,10 @@ def main() -> int:
         try:
             _llm2.reset_disable_state()
             got = _llm2.chat_reply("s", "u" * 20, cfg)
+            # Groq's spare model (its own daily bucket) is tried before
+            # the second provider; both 429 here, so OpenRouter answers.
             ok1 = got == "Line." and hits == [
+                "https://api.groq.com/openai/v1/chat/completions",
                 "https://api.groq.com/openai/v1/chat/completions",
                 "https://openrouter.ai/api/v1/chat/completions"]
             hits.clear()
@@ -946,6 +1105,207 @@ def main() -> int:
             return False
         finally:
             _llm2.urllib.request.urlopen = original
+
+    def _held_question_is_acknowledged():
+        """A held question is announced with the wait quoted.
+
+        From the room a rail and a crash look identical, which is why the
+        same question gets asked three times. Live line: 'mention from
+        marblehead9 held 44s - their own cooldown'.
+        """
+        import threading as _th
+
+        cfg = dict(
+            _bot.DEFAULTS, nick="Docbot", channel="#t",
+            chat_ai_enabled=True, llm_api_key="k",
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        said = []
+        b._say = said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        t0 = time.time()
+        b._mark_mention_reply("marblehead9", t0 - 16)     # 44s of the 60
+        b._on_message("marblehead9", "#t", "docbot how long is the tow "
+                      "rope?", "marblehead9", "")
+        for t in _th.enumerate():
+            if t.name == "ack":
+                t.join(5)
+        if said != ["@marblehead9 on it - give me about 45 seconds to "
+                    "look that up."]:
+            return False
+        if len(b._chat_ai_pending) != 1 or not b._jobs.empty():
+            return False                       # held, not answered twice
+        # A repeat ask gets no second promise - that is the point.
+        b._on_message("marblehead9", "#t", "docbot???", "marblehead9", "")
+        for t in _th.enumerate():
+            if t.name == "ack":
+                t.join(5)
+        return len(said) == 1
+
+    def _mods_can_ban():
+        """A moderator's word bans somebody - a viewer's word does nothing.
+
+        Twitch switched the IRC /ban commands off in Feb 2023, so this is
+        a Helix POST naming the bot as moderator_id; a lead moderator's
+        badge counts, and a private ask is answered privately.
+        """
+        import io as _io
+        import json as _json
+        import threading as _th
+        import urllib.error as _ue
+
+        import moderation as _mod
+
+        calls = []
+
+        def _fake(req, timeout=8):
+            calls.append((req.get_method(), req.full_url,
+                          (req.data or b"").decode("utf-8")))
+            if "/helix/users" in req.full_url:
+                login = req.full_url.split("login=")[-1]
+                return _io.BytesIO(_json.dumps(
+                    {"data": [{"id": "999", "login": login}]}
+                ).encode("utf-8"))
+            return _io.BytesIO(_json.dumps({"data": [{
+                "user_id": "999", "end_time": None}]}).encode("utf-8"))
+
+        cfg = dict(
+            _bot.DEFAULTS, nick="Docbot", channel="#doc",
+            mod_logins=["Leadmod"],
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        b._distill = lambda *a, **k: None
+        b._log = lambda line: None
+        said = []
+        b._say = said.append
+        b._moderator = _mod.Moderator(
+            access_mod.Helix("cid", "tok", "111"), nick="docbot")
+        b._moderator.moderator_id = "777"
+        _orig = _mod.urllib.request.urlopen
+        _mod.urllib.request.urlopen = _fake
+        try:
+            if not b._mod_authorised("leadmod", "lead_moderator/1"):
+                return False
+            if b._mod_authorised("viewer", "subscriber/3"):
+                return False
+            if not b._mod_authorised("leadmod", "", private=True):
+                return False
+            if b._mod_authorised("stranger", "", private=True):
+                return False
+
+            def _join():
+                for t in _th.enumerate():
+                    if t.name == "mod-action":
+                        t.join(5)
+
+            b._on_message("Viewer", "#doc", "!ban spammer", "viewer",
+                          "subscriber/3")
+            _join()
+            if calls or said:
+                return False
+            b._on_message("Leadmod", "#doc", "!ban Spammer link spam",
+                          "leadmod", "lead_moderator/1")
+            _join()
+            bans = [c for c in calls if "moderation/bans" in c[1]]
+            if len(bans) != 1 or bans[0][0] != "POST":
+                return False
+            if "broadcaster_id=111&moderator_id=777" not in bans[0][1]:
+                return False
+            body = _json.loads(bans[0][2])
+            if body != {"data": {"user_id": "999",
+                                 "reason": "link spam"}}:
+                return False
+            if not any("banned" in line for line in said):
+                return False
+            # A private ask stays private: no line in the room.
+            said.clear()
+            calls.clear()
+            whispers = []
+            b._moderator.whisper = lambda login, text: (
+                whispers.append((login, text)), True)[1]
+            b._pm_last.clear()
+            b._on_message("Leadmod", "docbot", "!unban spammer", "leadmod",
+                          "")
+            _join()
+            if said or not whispers:
+                return False
+            return [c[0] for c in calls
+                    if "moderation/bans" in c[1]] == ["DELETE"]
+        finally:
+            _mod.urllib.request.urlopen = _orig
+
+    def _provider_chain_walks():
+        """An ordered list of providers: one dead key is skipped, not fatal.
+
+        Groq spent -> NVIDIA NIM key rejected -> Gemini answers; and on the
+        NEXT line NIM is not asked again, because its own breaker is open
+        while Gemini's is not. Each provider also gets its own request
+        shape (NIM wants max_tokens; Gemini 3.x gets the reasoning budget).
+        """
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+
+        nim = "https://integrate.api.nvidia.com/v1"
+        gem = "https://generativelanguage.googleapis.com/v1beta/openai"
+        groq = "https://api.groq.com/openai/v1"
+        cfg = {"llm_api_key": "gsk", "llm_base_url": groq,
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_providers": [
+                   {"base_url": nim, "key": "nvapi-x",
+                    "model": "openai/gpt-oss-120b"},
+                   {"base_url": gem, "key": "gem-x",
+                    "model": "gemini-3.8-flash"}]}
+        bodies, hits = [], []
+
+        def _fake(req, timeout=60):
+            hits.append(req.full_url)
+            bodies.append(req.data.decode("utf-8"))
+            if req.full_url.startswith(groq):
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b"{}"))
+            if req.full_url.startswith(nim):
+                raise _ue.HTTPError(req.full_url, 401, "bad key", {},
+                                    _io.BytesIO(b"{}"))
+            return _io.BytesIO(_json.dumps({"choices": [{"message": {
+                "content": "Gemini line."}}]}).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fake
+        try:
+            _llm2.reset_disable_state()
+            if [p[0] for p in _llm2.fallback_providers(cfg)] != [nim, gem]:
+                return False
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            if got != "Gemini line." or hits != [
+                    groq + "/chat/completions", groq + "/chat/completions",
+                    nim + "/chat/completions", gem + "/chat/completions"]:
+                return False
+            gem_body = _json.loads(bodies[-1])
+            if not (gem_body.get("reasoning_effort") == "low"
+                    and "max_completion_tokens" in gem_body
+                    and "temperature" not in gem_body):
+                return False
+            if not (_llm2._fallback_unavailable(nim)
+                    and not _llm2._fallback_unavailable(gem)):
+                return False
+            # Next line: NIM is skipped for the session, Gemini answers.
+            hits.clear()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            return got == "Gemini line." and hits == [
+                gem + "/chat/completions"]
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
 
     def _bot_forwards_chat_options():
         """The provider test can pass while the real bot still drops the
@@ -1081,6 +1441,7 @@ def main() -> int:
         b._access.helix = SimpleNamespace(follow_total=lambda: 1372)
         b._follows_start = 1368
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._do_chime("Hardclaws",
                     "docbot how many follows have we received this stream")
         return (len(said) == 1 and "1,372 followers" in said[0]
@@ -1278,6 +1639,788 @@ def main() -> int:
         return getattr(_bot.TwitchBot, "_BEEF_GAPS", None) is None \
             and hasattr(_bot.TwitchBot, "_beef_gap")
 
+    def _reminder_clock_zones_are_self_contained():
+        """'01:30PDT' and '01:30 UTC-7' are fixed offsets that reminders.py
+        resolves on its own; they must never depend on zoneinfo. Windows
+        ships no IANA database, so ZoneInfo("America/Los_Angeles") raises
+        there unless tzdata was pip-installed, and asserting on that name
+        made this line read as a missing fix on every Windows box. zoneinfo
+        is switched off for the duration so the abbreviation and numeric
+        paths are proven self-contained even on a machine that has it."""
+        import datetime as _dt
+        import reminders as _rem
+
+        def utc_clock(stamp):
+            return _dt.datetime.fromtimestamp(
+                stamp, _dt.timezone.utc).strftime("%H:%M")
+
+        saved = _rem.zoneinfo
+        _rem.zoneinfo = None
+        try:
+            for spec, label, clock in (
+                    ("01:30PDT", "PDT", "08:30"),        # PDT is UTC-7
+                    ("1:30pm PDT", "PDT", "20:30"),      # meridiem, then zone
+                    ("01:30 UTC-7", "UTC-7", "08:30"),   # numeric offset
+                    ("01:30 +0930", "+0930", "16:00")):  # half-hour offset
+                due, got, _ = _rem.parse_clock(spec)
+                if due is None or got != label or utc_clock(due) != clock:
+                    return False
+            # An IANA name is still told apart from "am". Without tz data
+            # it is refused with a reason - never misread, never a crash.
+            due, why, _ = _rem.parse_clock("01:30 America/Los_Angeles")
+            return due is None and "not a timezone I know" in str(why)
+        finally:
+            _rem.zoneinfo = saved
+
+    def _state_files_are_written_atomically():
+        """storage.save_json() lands the file through a temp + os.replace().
+        tempfile.mkstemp() returns an OPEN descriptor as well as a path; the
+        old one-liner kept it open, and Windows will not replace a file that
+        another handle holds (WinError 32), so the save failed there - and
+        it leaked one temp file per run everywhere. Close the descriptor
+        first, save, read it back, then remove everything that was made."""
+        import json
+        import shutil
+        import storage as _storage
+        folder = tempfile.mkdtemp(prefix="clawfacts-check-")
+        fd, path = tempfile.mkstemp(dir=folder, suffix=".json")
+        os.close(fd)
+        try:
+            if not _storage.save_json(path, {"ok": 1}):
+                return False
+            with open(path, encoding="utf-8") as fh:
+                if json.load(fh) != {"ok": 1}:
+                    return False
+            # The swap must leave no .tmp-* file beside the real one.
+            return os.listdir(folder) == [os.path.basename(path)]
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def _sing_me_a_song_is_a_song():
+        """'Docbot sing me a song' / 'make me a poem' used to get one
+        rambling line ABOUT a song. A performance ask is recognised,
+        written whole at a bigger completion budget, cleaned line by
+        line under the same rails as any chat line, and delivered over
+        several messages a gap apart - the first tagged to the asker.
+        Questions about real songs and narration are never performances,
+        and an overheard 'sing me a song' never starts one."""
+        import chatai as _ch
+        import llm as _llm
+        names = ("doc", "docbot")
+        if _ch.performance_request("Docbot sing me a song", names) != \
+                ("song", ""):
+            return False
+        if _ch.performance_request("doc make me a poem about kvack",
+                                   names) != ("poem", "kvack"):
+            return False
+        for text in ("doc who sang that song", "doc I wrote a song yesterday",
+                     "doc what's the story with the lights", "doc tell them"):
+            if _ch.performance_request(text, names) is not None:
+                return False
+        song = ("Sure! Here's a song:\nRolling down the I-80 line,\n"
+                "Coffee's cold but the load's on time,\nChorus:\n"
+                "Oh the night shift hums,\nWhere the diesel goes.")
+        if _ch.clean_performance(song, "song") != [
+                "Rolling down the I-80 line,",
+                "Coffee's cold but the load's on time,",
+                "Oh the night shift hums,", "Where the diesel goes."]:
+            return False
+        if _ch.clean_performance("@kvack line\nline two\nline three",
+                                 "song"):
+            return False
+        if getattr(_llm, "PERFORMANCE_MAX_TOKENS", 0) <= getattr(
+                _llm, "CHAT_MAX_TOKENS", 999):
+            return False
+        if "max_tokens" not in _llm.chat_reply.__code__.co_varnames:
+            return False
+        if not hasattr(_bot.TwitchBot, "_perform") \
+                or not hasattr(_bot.TwitchBot, "_drip"):
+            return False
+        # End to end, off the network: four paced messages, first tagged.
+        import os as _os
+        import tempfile as _tf
+        b = _bot.TwitchBot(dict(
+            _bot.DEFAULTS, nick="n", channel="#c", chat_ai_enabled=True,
+            llm_api_key="k", chat_ai_perform_delay=0,
+            beef_state_path=_os.path.join(_tf.mkdtemp(), "bs.json"),
+            memory_db_path=_os.path.join(_tf.mkdtemp(), "m.db"),
+            persona_state_path=_os.path.join(_tf.mkdtemp(), "p.json"),
+            subgoal_state_path=_os.path.join(_tf.mkdtemp(), "sg.json")))
+        said = []
+        b._say = said.append
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        orig = _llm.chat_reply
+        _llm.chat_reply = lambda s, u, c, max_tokens=None: song
+        try:
+            b._on_message("kvack", "#c", "doc sing me a song", "kvack", "")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+                elif command == "say":
+                    b._say(argument)
+        finally:
+            _llm.chat_reply = orig
+        return said[:1] == ["@kvack Rolling down the I-80 line,"] \
+            and len(said) == 4 and not said[1].startswith("@")
+
+    def _scratch_bot(**over):
+        """A TwitchBot on scratch state files, mute and off the network."""
+        import os as _os
+        import tempfile as _tf
+        import bot as _bot
+        b = _bot.TwitchBot(dict(
+            _bot.DEFAULTS, nick="TruckingWithDocBot", channel="#c",
+            chat_ai_enabled=True,
+            beef_state_path=_os.path.join(_tf.mkdtemp(), "bs.json"),
+            memory_db_path=_os.path.join(_tf.mkdtemp(), "m.db"),
+            persona_state_path=_os.path.join(_tf.mkdtemp(), "p.json"),
+            subgoal_state_path=_os.path.join(_tf.mkdtemp(), "sg.json"),
+            **over))
+        b._say = lambda *a, **k: None
+        b._log = lambda *a, **k: None
+        b._access.helix = None
+        return b
+
+    def _weather_is_one_sentence_from_weatherapi():
+        """With weatherapi_key set, a weather question is answered from
+        weatherapi.com as one sentence to the asker - 'kvack, it is
+        currently Clear in Wilkes-Barre, Pennsylvania. 63°F (17°C). Feels
+        like ... Wind is blowing from the SW at ... humidity. Visibility:
+        ... Precipitation: ...' - never trimmed by max_fact_chars. No key
+        (or a rejected one) keeps the Open-Meteo path exactly as it was."""
+        import io as _io
+        import urllib.error as _ue
+        import chatai as _ch
+        if not _ch.factual_question("docbot weather in paris?",
+                                    ("doc", "docbot")):
+            return False
+        wapi = {"location": {"name": "Wilkes-Barre", "region": "Pennsylvania",
+                             "country": "United States of America"},
+                "current": {"temp_c": 17.2, "temp_f": 63.0,
+                            "condition": {"text": "Clear"},
+                            "wind_mph": 4.3, "wind_kph": 6.8, "wind_dir": "SW",
+                            "precip_mm": 0.0, "precip_in": 0.0,
+                            "humidity": 61, "feelslike_c": 16.1,
+                            "feelslike_f": 61.0, "vis_km": 10.0,
+                            "vis_miles": 6.0}}
+        meteo = {"current": {
+            "temperature_2m": 63.0, "apparent_temperature": 61.0,
+            "relative_humidity_2m": 61, "precipitation": 0,
+            "weather_code": 0, "wind_speed_10m": 4.3,
+            "wind_direction_10m": 230, "wind_gusts_10m": 6}}
+
+        def live(url, params=None, timeout=0):
+            if url == funfacts.WEATHERAPI_API:
+                if params.get("key") != "good":
+                    raise _ue.HTTPError(url, 401, "x", {}, _io.BytesIO(
+                        b'{"error":{"code":2006,"message":"invalid"}}'))
+                return wapi
+            if url == funfacts.OPEN_METEO_API:
+                return meteo
+            raise AssertionError(url)
+
+        saved = (funfacts._http_get_json, funfacts._osm_geocode,
+                 funfacts._lookup_all)
+        funfacts._http_get_json = live
+        funfacts._osm_geocode = lambda _p: {
+            "name": "Wilkes-Barre", "state": "Pennsylvania",
+            "country": "United States", "lat": 41.25, "lon": -75.88}
+        funfacts._lookup_all = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("weather reached search"))
+        said = []
+        try:
+            out = []
+            for key, limit in (("good", 80), ("", 200), ("bad", 200)):
+                with funfacts._cache_lock:
+                    funfacts._cache.clear()
+                b = _scratch_bot(weatherapi_key=key, max_fact_chars=limit)
+                said.clear()
+                b._say = said.append
+                b._do_chime("kvack",
+                            "Docbot whats the weather in wilkes barre, pa")
+                out.append(said[-1] if said else "")
+        finally:
+            (funfacts._http_get_json, funfacts._osm_geocode,
+             funfacts._lookup_all) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+        want = ("kvack, it is currently Clear in Wilkes-Barre, Pennsylvania. "
+                "63°F (17°C). Feels like 61°F (16°C). Wind is blowing from "
+                "the SW at 4 mph (7 km/h). 61% humidity. Visibility: 6 miles "
+                "(10 km). Precipitation: 0.0 in (0.0 mm).")
+        meteo_line = ("Weather | Wilkes-Barre, Pennsylvania: Currently 63°F "
+                      "with clear skies; feels like 61°F; humidity 61%; wind "
+                      "SW at 4 mph.")
+        return out == [want, meteo_line, meteo_line]
+
+    def _live_data_takes_the_fast_lane():
+        """'Docbot whats the weather currently in Brewster, NY' got nothing
+        live: a different mention answered 40s earlier had the 60s
+        cooldown holding it, and the one worker can drop a held reading
+        without a trace. Weather/sunrise questions are answered at once
+        on their own thread, no model, no mention clock, paced per viewer."""
+        import threading as _th
+        import chatai as _ch
+        import llm as _llm
+        import bot as _bot_mod
+        if not hasattr(_ch, "live_data_question") \
+                or not hasattr(_bot_mod.TwitchBot, "_answer_live_data"):
+            return False
+        wapi = {"location": {"name": "Brewster", "region": "New York",
+                             "country": "United States of America"},
+                "current": {"temp_f": 65.0, "temp_c": 18.3,
+                            "condition": {"text": "Partly cloudy"},
+                            "humidity": 55}}
+        saved = (funfacts._http_get_json, funfacts._osm_geocode,
+                 _llm.chat_reply)
+        funfacts._http_get_json = lambda url, params=None, timeout=0: wapi
+        funfacts._osm_geocode = lambda _p: None
+        _llm.chat_reply = lambda s, u, c, **k: "Copy that, hon - still here."
+        said = []
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            b = _scratch_bot(llm_api_key="k", weatherapi_key="abc")
+            b._say = said.append
+
+            def pump():
+                while not b._jobs.empty():
+                    nick, login, badges, command, argument = b._jobs.get()
+                    if command == "chime":
+                        b._do_chime(nick, argument)
+                    elif command == "say":
+                        b._say(argument)
+
+            b._on_message("Hardclaws", "#c", "docbot you there?",
+                          "hardclaws", "moderator/1")
+            pump()
+            b._on_message("Hardclaws", "#c", "Docbot whats the weather "
+                          "currently in Brewster, NY", "hardclaws",
+                          "moderator/1")
+            for t in _th.enumerate():
+                if t.name == "live-data":
+                    t.join(5)
+            pump()
+        finally:
+            (funfacts._http_get_json, funfacts._osm_geocode,
+             _llm.chat_reply) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+        return said == ["@Hardclaws Copy that, hon - still here.",
+                        "Hardclaws, it is currently Partly cloudy in "
+                        "Brewster, New York. 65°F (18°C). 55% humidity."]
+
+    def _mention_cooldown_is_per_viewer():
+        """Live-fire 14:07-14:14: ten direct questions from four people,
+        four answered. One 60s mention clock for the whole channel held
+        everyone behind the last person's reply, the held queue kept
+        three and dropped the oldest silently, and the worker dropped a
+        released question without a word. Now the cooldown is per viewer
+        with an 8s channel pace, the queue holds eight (one per person)
+        and every drop is logged."""
+        import llm as _llm
+        import bot as _bot_mod
+        if not hasattr(_bot_mod.TwitchBot, "_mention_wait") \
+                or _bot_mod.DEFAULTS.get("chat_ai_mention_pace") != 8:
+            return False
+        src = pathlib.Path("bot.py").read_text(encoding="utf-8")
+        if "dropped at the worker" not in src:
+            return False
+        saved = _llm.chat_reply
+        answers = iter(["Forty-two, final answer.",
+                        "Seventeen, no refunds on that one."])
+        _llm.chat_reply = lambda s, u, c, **k: next(answers)
+        said, logs = [], []
+        try:
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+            b._log = logs.append
+            t0 = time.time()
+            b._mark_mention_reply("yeyeboi", t0 - 30)   # his reply 30s ago
+            b._on_message("Yeyeboi", "#c", "docbot pick a number", "yeyeboi",
+                          "")
+            held = b._jobs.empty() and len(b._chat_ai_pending) == 1
+            # Another viewer inside Yeyeboi's minute: her own clock is
+            # clear, so she is answered now.
+            b._on_message("Dani", "#c", "docbot pick one for me", "dani", "")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+            # The held asker is now also told to wait, on its own thread;
+            # the point of this check is that DANI is answered at once.
+            ok_dani = [l for l in said if "on it - give me" not in l] == [
+                "@Dani Forty-two, final answer."]
+            ok_log = any("their own cooldown" in l for l in logs)
+            # Nine people asking: the queue holds eight and names the drop.
+            b2 = _scratch_bot(llm_api_key="k")
+            logs2 = []
+            b2._log = logs2.append
+            names = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8", "i9"]
+            for n in names:
+                b2._mark_mention_reply(n, t0 - 30)
+            for n in names:
+                b2._on_message(n, "#c", "docbot pick a number", n, "")
+            ok_queue = len(b2._chat_ai_pending) == 8 and any(
+                "queue full - dropped a1" in l for l in logs2)
+            return held and ok_dani and ok_log and ok_queue
+        finally:
+            _llm.chat_reply = saved
+
+    def _distilling_is_paced():
+        """Every persona reply used to spend a second model call (~400
+        prompt tokens) distilling the same twenty lines into memory -
+        that is how the day's Groq budget was gone before the stream.
+        A viewer is distilled on first contact, then only after ten
+        minutes AND four new lines of theirs."""
+        import llm as _llm
+        import bot as _bot_mod
+        if _bot_mod.DEFAULTS.get("chat_ai_distill_lines") != 4 \
+                or _bot_mod.DEFAULTS.get("chat_ai_distill_minutes") != 10:
+            return False
+        saved = _llm.chat_reply
+        calls = {"distill": 0}
+        words = ("diesel chrome sunrise kansas coffee weigh station polka "
+                 "windshield cruise showers payday moon fuel cargo snacks "
+                 "gravel thunder ledger biscuit canyon lantern harbor velvet "
+                 "pepper walnut saddle meadow copper anchor ribbon tundra "
+                 "orbit falcon marble cactus timber glacier pickle trumpet "
+                 "quartz badger nickel willow comet dagger fossil helmet"
+                 ).split()
+        n = len(words) // 4
+        state = {"i": 0}
+
+        def _model(s, u, c, **k):
+            if "extract durable facts" in s:
+                calls["distill"] += 1
+                return "NOTHING WORTH KEEPING"
+            i = state["i"]
+            state["i"] += 1
+            group = words[(i % 4) * n:(i % 4 + 1) * n]
+            return " ".join(group[(i // 4 + j) % n]
+                            for j in range(5)).capitalize() + "."
+
+        _llm.chat_reply = _model
+        try:
+            b = _scratch_bot(llm_api_key="k", chat_ai_mention_cooldown=0,
+                             chat_ai_mention_pace=0)
+            b._say = lambda _l: None
+
+            def pump():
+                while not b._jobs.empty():
+                    nick, login, badges, command, argument = b._jobs.get()
+                    if command == "chime":
+                        b._do_chime(nick, argument)
+
+            for i in range(8):
+                b._on_message("kvack", "#c", f"docbot thing {i} about my rig",
+                              "kvack", "")
+                pump()
+            first_only = calls["distill"] == 1
+            last_t, seen = b._distilled["kvack"]
+            b._distilled["kvack"] = (last_t - 601, seen)   # 10 min pass
+            b._on_message("kvack", "#c", "docbot and my dog", "kvack", "")
+            pump()
+            again = calls["distill"] == 2
+            last_t, seen = b._distilled["kvack"]
+            b._distilled["kvack"] = (last_t - 601, seen)   # 10 more min,
+            b._on_message("kvack", "#c", "docbot lol", "kvack", "")  # 1 line
+            pump()
+            return first_only and again and calls["distill"] == 2
+        finally:
+            _llm.chat_reply = saved
+
+    def _rate_limits_walk_the_chain():
+        """Groq's 429 is per MODEL (gpt-oss-120b's 200k/day is not
+        gpt-oss-20b's own bucket), and 'tokens per day' means hours, not
+        two minutes. A 429 now rests THAT model for as long as the error
+        says and the line moves on: the same-provider spare first, then
+        each model of the fallback chain (llm_fallback_model takes a
+        comma-separated list)."""
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+        if not hasattr(_llm2, "_rate_limit_window") \
+                or not hasattr(_llm2, "fallback_models"):
+            return False
+        tpd = (b'{"error":{"message":"Rate limit reached for model '
+               b'openai/gpt-oss-120b on tokens per day (TPD): Limit 200000, '
+               b'Used 199706, Requested 392. Please try again in '
+               b'2h7m3.5s."}}')
+        if not 7000 < _llm2._rate_limit_window(tpd.decode()) < 8000:
+            return False
+        if _llm2._rate_limit_window("tokens per minute (TPM) ... 3s") != 120:
+            return False
+        cfg = {"llm_api_key": "gsk",
+               "llm_base_url": "https://api.groq.com/openai/v1",
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_key": "or",
+               "llm_fallback_base_url": "https://openrouter.ai/api/v1",
+               "llm_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free,"
+                                     " nex-agi/nex-n2.5-pro:free"}
+        if _llm2.fallback_models(cfg) != [
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "nex-agi/nex-n2.5-pro:free"]:
+            return False
+        models = []
+
+        def _fake(req, timeout=60):
+            model = _json.loads(req.data.decode("utf-8"))["model"]
+            models.append(model)
+            if model in ("openai/gpt-oss-120b",
+                         "nvidia/nemotron-3-super-120b-a12b:free"):
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(tpd))
+            if model == "openai/gpt-oss-20b":
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b'{"error":{"message":'
+                                                b'"tokens per minute (TPM)'
+                                                b' try again in 4s"}}'))
+            return _io.BytesIO(_json.dumps(
+                {"choices": [{"message": {"content": "Line from " + model}}]}
+            ).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fake
+        try:
+            _llm2.reset_disable_state()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok1 = got == "Line from nex-agi/nex-n2.5-pro:free" and models == [
+                "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                "nvidia/nemotron-3-super-120b-a12b:free",
+                "nex-agi/nex-n2.5-pro:free"]
+            # The spent models rest on their own clocks; the next line
+            # goes straight to the one that answered - one request.
+            models.clear()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok2 = got == "Line from nex-agi/nex-n2.5-pro:free" and models == [
+                "nex-agi/nex-n2.5-pro:free"]
+            # llama's TPM rest (2 min) is shorter than gpt-oss's TPD rest:
+            # when it clears, chat comes back to Groq's fast lane first.
+            _llm2._MODEL_DISABLED_UNTIL[
+                ("https://api.groq.com/openai/v1",
+                 "openai/gpt-oss-20b")] = 0.0
+            _llm2._DISABLED_UNTIL = 0.0
+            models.clear()
+            _llm2.urllib.request.urlopen = lambda req, timeout=60: (
+                models.append(_json.loads(req.data.decode())["model"])
+                or _io.BytesIO(_json.dumps({"choices": [{"message": {
+                    "content": "Back on Groq."}}]}).encode()))
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            ok3 = got == "Back on Groq." and models == [
+                "openai/gpt-oss-20b"]
+            return ok1 and ok2 and ok3
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
+
+    def _commands_match_the_operators_os():
+        """Every user-facing command comes from auth.PY.
+
+        A stock Windows install has no python3 - it has python - and a
+        Windows operator was told to "run python3 bot.py --login" at the
+        exact moment their token was missing a scope, which is to say at
+        the moment when following the instruction was the whole point.
+
+        Walks the AST rather than grepping: comments and docstrings keep
+        the canonical python3 spelling and are not shown to anybody, while
+        a real string literal is what gets printed. An f-string splits
+        into Constant pieces around the interpolation, so none of them can
+        hold the hardcoded command either.
+        """
+        import ast as _ast
+        a = __import__("auth")
+        if not (hasattr(a, "PY") and a.PY in ("python", "python3")):
+            return False
+        if "os.name" not in _auth_src:
+            return False
+        for name in ("access.py", "bot.py", "moderation.py",
+                     "adminpanel.py"):
+            src = pathlib.Path(name).read_text(encoding="utf-8")
+            if "auth.PY" not in src:
+                return False
+            tree = _ast.parse(src)
+            docstrings = set()
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.Module, _ast.FunctionDef,
+                                     _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    body = getattr(node, "body", None)
+                    if (body and isinstance(body[0], _ast.Expr)
+                            and isinstance(body[0].value, _ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        docstrings.add(id(body[0].value))
+            for node in _ast.walk(tree):
+                if (isinstance(node, _ast.Constant)
+                        and isinstance(node.value, str)
+                        and id(node) not in docstrings
+                        and "python3 bot.py" in node.value):
+                    return False
+        return True
+
+    def _news_questions_get_headlines():
+        """'Docbot who got into a helicopter crash today 15th September
+        2026 in California' was answered with a Wikipedia line about a
+        2012 airworthiness certificate. What happened lately is looked
+        up in a headline feed, quoted with outlet and age, on the
+        weather fast lane - no model, no encyclopedia."""
+        import threading as _th
+        import urllib.request as _ur
+        import llm as _llm
+        if not hasattr(funfacts, "news_question"):
+            return False
+        if not funfacts.news_question("who got into a helicopter crash today "
+                                      "15th September 2026 in California") \
+                or funfacts.news_question("whats the weather today in scranton") \
+                or funfacts.news_question("what is a bongo twist"):
+            return False
+        rss = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>x'
+               b"</title><item><title>Three dead in Los Angeles helicopter "
+               b"crash - BBC</title><pubDate>Wed, 16 Sep 2026 03:20:20 GMT"
+               b'</pubDate><source url="https://www.bbc.com">BBC</source>'
+               b"</item></channel></rss>")
+
+        class _Resp:
+            def read(self):
+                return rss
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        saved = (_ur.urlopen, _llm.chat_reply)
+        _ur.urlopen = lambda req, timeout=8: _Resp()
+        _llm.chat_reply = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no model on the news path"))
+        said = []
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+            b._on_message("Hardclaws", "#c", "Docbot who got into a helicopter "
+                          "crash today 15th September 2026 in California",
+                          "hardclaws", "moderator/1")
+            for t in _th.enumerate():
+                if t.name == "live-data":
+                    t.join(5)
+            return len(said) == 1 and said[0].startswith(
+                "News | helicopter crash California: Three dead in Los "
+                "Angeles helicopter crash (BBC, ")
+        except AssertionError:
+            return False
+        finally:
+            _ur.urlopen, _llm.chat_reply = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+
+    def _leaked_reasoning_is_caught():
+        """'The user is asking me (Docbot) who my favorite NFL team is. I
+        need to answer as the Commentator persona...' three times in a
+        row, 44 s, no answer: a thinking model's reasoning delivered as
+        the reply. It is recognised, never recovered as a trimmed slice,
+        and the retry is told not to narrate."""
+        import chatai as _ch
+        import llm as _llm
+        if not hasattr(_ch, "is_narration"):
+            return False
+        leak = ("The user Hardclaws is asking me (Docbot) who my favorite "
+                "NFL team is. I need to answer as the Commentator persona - "
+                "a veteran British sports broadcaster. Let me craft a witty "
+                "line about the Bills. " * 2)
+        if not _ch.is_narration(leak) or _ch.recover_direct_line(leak) \
+                or _ch.is_narration("Chiefs, and I will not be taking "
+                                    "questions at this time."):
+            return False
+        prompts = []
+        replies = iter([leak, "Bills. Next question."])
+
+        def _model(s, u, c, **k):
+            if "extract durable facts" in s:
+                return "NOTHING WORTH KEEPING"
+            prompts.append(s)
+            return next(replies)
+
+        saved = _llm.chat_reply
+        _llm.chat_reply = _model
+        said, logs = [], []
+        try:
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+            b._log = logs.append
+            b._on_message("Hardclaws", "#c", "docbot who is your favorite "
+                          "NFL team", "hardclaws", "moderator/1")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+            return (said == ["@Hardclaws Bills. Next question."]
+                    and len(prompts) == 2
+                    and "Do not narrate, plan or explain" in prompts[1]
+                    and any("narrated its reasoning" in l for l in logs))
+        finally:
+            _llm.chat_reply = saved
+
+    def _general_knowledge_goes_to_the_model():
+        """'whats the avg time for someone to run 5k' / 'how long it
+        take to run 5k' are general knowledge the chat model answers
+        from what it knows - not encyclopedia lookups. They were routed
+        at the fact engine (a Reddit thread title, then the race's
+        distance). Now they reach the model, told what kind of ask it
+        is; named things and live data still go to the engine first."""
+        import chatai as _ch
+        import bot as _bot
+        import llm as _llm
+        if not callable(getattr(_ch, "knowledge_question", None)):
+            return False
+        names = ("doc", "docbot")
+        for q in ("whats the avg time for someone to run 5k",
+                  "how long it take to run 5k home boy?",
+                  "why is the sky blue", "how do air brakes work"):
+            if not _ch.knowledge_question(q, names) \
+                    or _ch.factual_question(q, names):
+                return False
+        for q in ("what is a bongo twist", "how tall is Mount Everest",
+                  "how many trailers can a truck pull",
+                  "docbot weather in paris?"):
+            if _ch.knowledge_question(q, names) \
+                    or not _ch.factual_question(q, names):
+                return False
+        b = _scratch_bot(llm_api_key="k")
+        b._distill = lambda *a, **k: None
+        said, prompts, engine = [], [], []
+        b._say = said.append
+        saved = (_bot.get_funfact, _llm.chat_reply)
+        _bot.get_funfact = lambda q, o: (engine.append(q) or None)
+        _llm.chat_reply = lambda s, u, c=None, **k: (
+            prompts.append(u) or "Most people finish a 5K in 30 to 40 "
+                                 "minutes; around 34 is typical.")
+        try:
+            b._on_message("kvack", "#c", "Docbot how long it take to run "
+                          "5k home boy?", "kvack", "")
+            while not b._jobs.empty():
+                nick, login, badges, command, argument = b._jobs.get()
+                if command == "chime":
+                    b._do_chime(nick, argument)
+            return (said == ["@kvack Most people finish a 5K in 30 to 40 "
+                             "minutes; around 34 is typical."]
+                    and engine == []
+                    and any("general-knowledge question" in p
+                            for p in prompts))
+        finally:
+            _bot.get_funfact, _llm.chat_reply = saved
+
+    def _answers_are_the_kind_asked_for():
+        """'whats the avg time to run 5k' -> a Reddit thread title (the
+        same question, asked back); 'how long it take to run 5k' -> the
+        race's DISTANCE. A question is never a source or an answer, and
+        the engine posts for a how-long / how-far / how-much question
+        only a line carrying that kind of figure - else nothing, so the
+        chat model gets the question."""
+        import llm as _llm
+        if not hasattr(funfacts, "answer_kind") \
+                or not hasattr(funfacts, "_is_forum_title"):
+            return False
+        if not funfacts._is_forum_title(
+                "Whats a good average time to do 5K? : r/C25K."):
+            return False
+        Q = "how long it take to run 5k home boy?"
+        defn = ("The 5K run is a long-distance road running competition "
+                "over a distance of five kilometres (3.107 mi).")
+        if funfacts.answers_kind(defn, Q) or not funfacts.answers_kind(
+                "Most runners finish a 5K in 30 to 40 minutes.", Q):
+            return False
+        if funfacts.answer_kind("what temperature does condensation stop"):
+            return False                    # 'the dew point' stays legal
+        wiki = defn + (" The 5 km road distance was introduced by IAAF as "
+                       "a world record event in November 2017.")
+
+        def serve(url, params, timeout=8.0):
+            if "wikipedia.org" in url:
+                if params.get("list") == "search":
+                    return {"query": {"search": [{"title": "5K run"}]}}
+                return {"query": {"pages": [{"title": "5K run",
+                                             "extract": wiki}]}}
+            return {"AbstractText": "", "RelatedTopics": [
+                {"Text": "Whats a good average time to do 5K? : r/C25K."}]}
+
+        saved = (funfacts._http_get_json, _llm.is_configured,
+                 _llm.any_configured, _llm.answer_question)
+        funfacts._http_get_json = serve
+        _llm.is_configured = _llm.any_configured = lambda o: True
+        _llm.answer_question = lambda q, src, cfg: defn
+        try:
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+            got = funfacts.get_funfact(Q, {"llm_api_key": "k",
+                                           "max_fact_chars": 200})
+            return got is None
+        finally:
+            (funfacts._http_get_json, _llm.is_configured,
+             _llm.any_configured, _llm.answer_question) = saved
+            with funfacts._cache_lock:
+                funfacts._cache.clear()
+
+    def _a_notice_answers_the_confused_room():
+        """A mod had the bot announce 'Doc is on the phone, radio silence';
+        two lines later 'Your mic is muted' got nothing - not addressed,
+        so an ambient chime behind a 10% roll and a cooldown the
+        announcement itself had started. Now the announcement stands as
+        a notice: anyone confused about the quiet stream gets it once,
+        no roll, no cooldown; the persona sees it; 'doc is back' clears
+        it; a plain viewer cannot plant one."""
+        import chatai as _ch
+        import llm as _llm
+        orig = _llm.chat_reply
+        _llm.chat_reply = lambda s, u, c, **k: "Copy that, radio silence."
+        said = []
+        try:
+            b = _scratch_bot(llm_api_key="k")
+            b._say = said.append
+
+            def pump():
+                while not b._jobs.empty():
+                    nick, login, badges, command, argument = b._jobs.get()
+                    if command == "chime":
+                        b._do_chime(nick, argument)
+                    elif command == "say":
+                        b._say(argument)
+
+            b._on_message("Hardclaws", "#c",
+                          "Docbot can you tell every one that @TruckingWithDoc"
+                          " is currently on the phone so we are in radio "
+                          "silence", "hardclaws", "moderator/1")
+            pump()
+            b._on_message("Etched", "#c", "Your mic is muted", "etched", "")
+            pump()
+            b._on_message("Etched", "#c",
+                          "I assume because your codriver is sleeping",
+                          "etched", "")
+            b._on_message("someone", "#c", "great climb earlier",
+                          "someone", "")
+            pump()
+            if said != ["@Hardclaws Copy that, radio silence.",
+                        "@Etched heads up: TruckingWithDoc is currently on "
+                        "the phone so we are in radio silence"]:
+                return False
+            b._on_message("Hardclaws", "#c", "docbot tell everyone doc is "
+                          "back", "hardclaws", "moderator/1")
+            pump()
+            if b._chat_ai_notice is not None:
+                return False
+            b = _scratch_bot(llm_api_key="k")
+            b._on_message("troll", "#c", "docbot tell everyone that the "
+                          "stream is over go home", "troll", "")
+            pump()
+            return b._chat_ai_notice is None \
+                and _ch.stream_confusion("hello? no audio") \
+                and not _ch.stream_confusion("the baby is sleeping")
+        finally:
+            _llm.chat_reply = orig
+
     checks = [
         ("wikipedia extract paging (excontinue)",
          getattr(funfacts, "_EXTRACT_PAGE_CAP", None) == 4),
@@ -1427,13 +2570,18 @@ def main() -> int:
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_diagnose_access")),
         ("only scopes Twitch actually has are requested at login",
-         # "moderation:read:moderators" is not a Twitch scope. One invented
-         # name aborts the whole device flow with "invalid scope requested",
-         # so the bot could not log in at all.
+         # "moderation:read:moderators" is not a Twitch scope, and neither
+         # is "user:write:whispers" - Send Whisper wants user:MANAGE:
+         # whispers (dev.twitch.tv/docs/api/reference#send-whisper). One
+         # invented name aborts the whole device flow with "invalid scope
+         # requested", so the bot could not log in at all.
          "moderation:read:moderators" not in __import__("auth").SCOPES
+         and "user:write:whispers" not in __import__("auth").SCOPES
          and all(x in {"chat:read", "chat:edit", "moderator:read:followers",
                        "moderation:read", "channel:moderate",
-                       "moderator:read:chatters"}
+                       "moderator:read:chatters",
+                       "moderator:manage:banned_users",
+                       "user:manage:whispers"}
                  for x in __import__("auth").SCOPES.split())),
         ("the bot learns its own moderator status from chat, not the API",
          hasattr(__import__("bot").TwitchBot(
@@ -1443,9 +2591,7 @@ def main() -> int:
          __import__("reminders").parse_delay("60mins")[0] == 3600.0
          and __import__("reminders").parse_delay("1h30m")[0] == 5400.0),
         ("!reminder takes a clock time with a timezone (01:30PDT)",
-         __import__("reminders").parse_clock("01:30PDT")[1] == "PDT"
-         and __import__("reminders").parse_clock(
-             "01:30 America/Los_Angeles")[1] == "America/Los_Angeles"),
+         _reminder_clock_zones_are_self_contained()),
         ("reminders survive a restart",
          hasattr(__import__("reminders").ReminderSet, "save")
          and hasattr(__import__("bot").TwitchBot(
@@ -1694,6 +2840,24 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("a held question is acknowledged, with the wait it quotes",
+         "chat_ai_ack_held" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and _held_question_is_acknowledged()),
+        ("a moderator's word bans; a viewer's word does nothing",
+         "moderator:manage:banned_users" in _auth.SCOPES
+         and "user:manage:whispers" in _auth.SCOPES
+         and "mod_logins" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and _mods_can_ban()),
+        ("an ordered provider list: one dead key is skipped, not fatal",
+         callable(_llm2.fallback_providers)
+         and _llm2.fallback_providers({}) == []
+         and "llm_fallback_providers" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and "NVIDIA_API_KEY" in pathlib.Path(
+             "deploy/bot.env.example").read_text(encoding="utf-8")
+         and _provider_chain_walks()),
         ("OpenRouter HTTP-200 errors keep their code and explanation",
          _openrouter_200_error_is_explicit()
          and "fallback NOT READY" in pathlib.Path(
@@ -1796,12 +2960,77 @@ def main() -> int:
         ("held mentions queue up and are answered late, in order",
          "_chat_ai_pending" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
-         and "will answer when" in pathlib.Path(
-             "bot.py").read_text(encoding="utf-8")
          and "answering" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
-         and "del self._chat_ai_pending[:-3]" in pathlib.Path(
+         and "held-question queue full - dropped" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),
+        ("a message names a command that exists on the operator's OS",
+         _commands_match_the_operators_os()),
+        ("a dropped connection says why, not just that it dropped",
+         # Live-fire: three drops in one evening, each logging only
+         # "server closed the connection" - which cannot tell a PONG we
+         # were too slow to send (our bug) from Twitch letting go on its
+         # own (needs nothing). The drop now reports the silence, the
+         # keep-alive age, whether a PING of ours went unanswered, and the
+         # longest stall inside _handle.
+         all(t in _bot2 for t in (
+             "def _drop_forensics",
+             "worst stall in _handle",
+             "_irc_slowest_handle",
+             "_pong_due",
+             "self._log(self._drop_forensics())"))
+         and "_pong_due = True" in _bot2
+         # Behavioural, not textual: Twitch answers our keep-alive with its
+         # own source prefixed (":tmi.twitch.tv PONG ..."), so a handler
+         # testing line.startswith("PONG") never sees it and the flag never
+         # clears. Asserted on the verb parser itself, because a substring
+         # search for the old code matched its own docstring and passed
+         # vacuously.
+         and _bot.TwitchBot._irc_command(
+             ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
+         and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"),
+        ("an answered keep-alive is recognised as answered",
+         # Live-fire: the first real drop logged "pong outstanding: yes" -
+         # claiming Twitch ignored our PING - when it had in fact answered
+         # it seconds earlier. Twitch prefixes its reply with its own
+         # source, ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv", and
+         # the handler tested line.startswith("PONG"), so it never matched
+         # and the flag never cleared. The field was a false alarm, and a
+         # false alarm is worse than no field: it points the operator at
+         # their own keep-alive when the answer is Twitch letting go.
+         # Both spellings must clear it, because only the prefixed one
+         # occurs in production.
+         _bot.TwitchBot._irc_command(
+             ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
+         and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
+         and 'command == "PONG"' in _bot2),
+        ("a direct answer is posted, not refused for reusing a word",
+         (lambda _live, _own, _q: (
+             # Live-fire: "Docbot tell us what a boomer is" was refused with
+             # "my answer got mangled in the gears" because the reply said
+             # "twenty years on the road" and the persona had said "years" in
+             # two of its last three lines. Anti-echo is for UNSOLICITED
+             # chatter, where declining is free; a person who asked is owed
+             # an answer, so the direct bar drops the motif rule and keeps
+             # only real duplication.
+             not _ch2.too_similar(_live, _own, source=_q, direct=True)
+             and _ch2.too_similar(_live, _own, source=_q)
+             # A verbatim echo is still caught on the direct path.
+             and _ch2.too_similar(
+                 "Midnight coffee, fresh donuts, and the road",
+                 ["Midnight coffee, fresh donuts, and the road"],
+                 source="doc whats up", direct=True)
+             # The apology path it replaced is gone, and the honest log
+             # line is in.
+             and "posted anyway rather than apologising" in _bot2
+             and "declined after repetition retry" not in _bot2))(
+             "A boomer is an old-school trucker - twenty years on the road, "
+             "set in his ways, and he has run every mile you are about to.",
+             ["@kvack Twenty years of nights and the coffee still does the "
+              "steering.",
+              "@tayfta Some roads you just eat and keep the wheels turning.",
+              "@marblehead9 Thirty years on the road and I still laugh."],
+             "Docbot tell us what a boomer is")),
         ("the bot cannot repeat itself or redirect to commands",
          _ch2.too_similar("Midnight snacks and that endless horizon",
                           ["Midnight coffee, fresh donuts, and the road",
@@ -1920,8 +3149,82 @@ def main() -> int:
          hasattr(__import__("access").Helix("c", "t", "1"), "channel_info")
          and _last_seen_is_sourced()),
         ("state files are written atomically",
-         __import__("storage").save_json(
-             __import__("tempfile").mkstemp(suffix=".json")[1], {"ok": 1})),
+         _state_files_are_written_atomically()),
+        ("'docbot sing me a song' gets a song, over several messages",
+         _sing_me_a_song_is_a_song()
+         and "chat_ai_perform_delay" in _bot_src
+         and "chat_ai_perform_delay" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("weather is one sentence to the asker from weatherapi.com",
+         _weather_is_one_sentence_from_weatherapi()
+         and "weatherapi_key" in _bot_src
+         and "weatherapi_key" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("a mod's announcement answers 'your mic is muted'",
+         _a_notice_answers_the_confused_room()
+         and "chat_ai_notice_minutes" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("weather/sunrise questions are answered at once, ahead of the "
+         "chat AI's cooldown", _live_data_takes_the_fast_lane()),
+        ("the mention cooldown is per viewer; held questions are not "
+         "dropped silently", _mention_cooldown_is_per_viewer()),
+        ("memory distilling is paced, not run after every reply",
+         _distilling_is_paced()),
+        ("what-happened questions are answered from today's headlines",
+         _news_questions_get_headlines()
+         and "GOOGLE_NEWS_RSS" in pathlib.Path(
+             "funfacts.py").read_text(encoding="utf-8")),
+        ("a how-long question gets a duration, never a distance or a "
+         "question", _answers_are_the_kind_asked_for()),
+        ("general knowledge ('how long to run 5k') is the chat model's "
+         "question, not the fact engine's", _general_knowledge_goes_to_the_model()),
+        ("a retired Groq slug is skipped for the session; the spare is "
+         "gpt-oss-20b",
+         getattr(_llm2, "DEFAULT_GROQ_FALLBACK", "") == "openai/gpt-oss-20b"
+         and callable(getattr(_llm2, "_retire_model", None))
+         and callable(getattr(_llm2, "check_models", None))
+         and "llama-3.3-70b-versatile" in getattr(_llm2, "GROQ_RETIRED", {})
+         and "check_models" in pathlib.Path("bot.py").read_text(
+             encoding="utf-8")),
+        ("one emoji with a skin tone or a ZWJ sequence counts as one",
+         _ch2.clean_line("Clueless is my default setting, hon - keeps the "
+                         "warranty valid. \U0001f937\u200d\u2642\ufe0f")
+         is not None
+         and _ch2.clean_line("Road trip then, pal \U0001f1fa\U0001f1f8")
+         is not None
+         and _ch2.clean_line("Two here \U0001f600 and \U0001f60e") is None),
+        ("a model narrating its reasoning is caught, retried and never posted",
+         _leaked_reasoning_is_caught()
+         and "Never narrate, plan or explain" in __import__(
+             "chatai").system_prompt("")),
+        ("a rate-limited model rests alone; chat walks the fallback chain",
+         _rate_limits_walk_the_chain()
+         and "nemotron" in _llm2._REASONING.pattern
+         and "llm_fallback_model" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("the admin panel: hashed logins, loopback-only by default, mod role",
+         _admin_panel_is_locked_down()),
+        ("working memory: the quiz it hosts and the counts it keeps, in every prompt",
+         _working_memory_holds()),
+        ("'whats the headlines' is the day's top stories, never a roundup page title",
+         _headlines_are_top_stories()
+         and "news_country" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")),
+        ("'sunrise in Hintok, ok' is Hinton, Oklahoma - never a footpath in Thailand",
+         _misspelt_town_is_that_town()),
+        ("the big top and middle-earth join the voices; the list goes out by crew",
+         len(_ch2.PERSONAS) >= 28
+         and all(_ch2.persona(v) for v in (
+             "clown", "lotlizard", "spin", "yoda", "smeagol", "gandalf",
+             "gimli", "samwise", "legolas", "treebeard"))
+         and set(_ch2.PERSONA_BLURBS) == set(_ch2.PERSONAS)
+         and callable(getattr(_ch2, "persona_name", None))
+         and _ch2.persona_name("Lot Lizard") == "lotlizard"
+         and _ch2.persona_name("gollum") == "smeagol"
+         and sorted(n for _, ns in getattr(_ch2, "PERSONA_GROUPS", ())
+                    for n in ns) == sorted(_ch2.PERSONAS)
+         and "PERSONA_GROUPS" in pathlib.Path("bot.py").read_text(
+             encoding="utf-8")),
     ]
     width = max(len(name) for name, _ in checks)
     missing = 0

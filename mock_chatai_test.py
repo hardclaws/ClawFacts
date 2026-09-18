@@ -7,12 +7,15 @@ fallback is monkeypatched at bot.py's own imported name. Everything is
 deterministic - the chime-in roll is injected, not drawn.
 """
 
+import itertools
 import os
 import tempfile
+import threading
 import time
 
 import bot as bot_mod
 import chatai
+import funfacts
 import llm
 
 
@@ -34,6 +37,7 @@ def _bot(**over):
            "memory_db_path": os.path.join(tempfile.mkdtemp(), "mem.db"),
            "persona_state_path": os.path.join(tempfile.mkdtemp(), "p.json"),
            "subgoal_state_path": os.path.join(tempfile.mkdtemp(), "sg.json"),
+           "ongoing_state_path": os.path.join(tempfile.mkdtemp(), "og.json"),
            **over}
     b = bot_mod.TwitchBot(cfg)
     b.said = []
@@ -43,12 +47,40 @@ def _bot(**over):
     return b
 
 
+ACK = "on it - give me"
+
+
+def _acks(lines):
+    """The 'on it - give me about ...' acknowledgements, on their own."""
+    return [l for l in lines if ACK in l]
+
+
+def _no_ack(lines):
+    """Everything the bot said that was NOT a held-question ack."""
+    return [l for l in lines if ACK not in l]
+
+
+def _join_acks(b, timeout=5.0):
+    """Wait for the held-question acknowledgements to reach the channel.
+
+    They are posted on their own thread on purpose - the job queue may be
+    stuck behind a slow model call, which is when an 'on it' matters most.
+    """
+    for t in threading.enumerate():
+        if t.name == "ack" and t is not threading.current_thread():
+            t.join(timeout)
+
+
 def _drain(b):
     """Route chime and ask jobs the way the worker thread would."""
     while not b._jobs.empty():
         nick, login, badges, command, argument = b._jobs.get()
         if command == "chime":
             b._do_chime(nick, argument)
+        elif command == "step":
+            b._do_step(nick, argument)
+        elif command == "tally":
+            b._do_tally(nick, argument)
         elif command == "ask":
             b._reply_ask(nick, argument)
         elif command == "say":
@@ -62,6 +94,24 @@ def _make_room_light(b, count=6):
         b._chat_human_times = [now - 40 * (i + 1) for i in range(count)]
 
 
+_LINE_WORDS = ("diesel chrome sunrise kansas coffee weigh station polka "
+               "windshield cruise showers payday moon fuel cargo snacks "
+               "gravel thunder ledger biscuit canyon lantern harbor velvet "
+               "pepper walnut saddle meadow copper anchor ribbon tundra "
+               "orbit falcon marble cactus timber glacier pickle trumpet "
+               "quartz badger nickel willow comet dagger fossil helmet").split()
+
+
+def _distinct_line(i: int) -> str:
+    """A reply with no content word in common with the previous few:
+    the cleaner refuses a line that recycles the bot's recent wording,
+    so a stub that varies only a number posts once and then fails."""
+    n = len(_LINE_WORDS) // 4                   # 4 disjoint word groups
+    group = _LINE_WORDS[(i % 4) * n:(i % 4 + 1) * n]
+    picked = [group[(i // 4 + j) % n] for j in range(5)]
+    return " ".join(picked).capitalize() + "."
+
+
 def test_a_mention_gets_one_bounded_reply():
     b = _bot(llm_api_key="k")
     orig = llm.chat_reply
@@ -71,16 +121,22 @@ def test_a_mention_gets_one_bounded_reply():
                       "kvack", "")
         _drain(b)
         assert b.said == ["@kvack Graphics are free with the job."], b.said
-        # A second mention inside the cooldown stays quiet - the bot
-        # cannot be wound up like a toy.
+        # A second mention inside the cooldown gets no SECOND answer - the
+        # bot cannot be wound up like a toy - but it is told to wait, so
+        # the room can tell a rail from a crash.
         b._on_message("kvack", "#t", "doc you there?", "kvack", "")
         _drain(b)
-        assert len(b.said) == 1, b.said
+        _join_acks(b)
+        assert _no_ack(b.said) == [
+            "@kvack Graphics are free with the job."], b.said
+        assert _acks(b.said) == ["@kvack on it - give me about a minute to "
+                                 "look that up."], b.said
         # The reply is prefixed by the bot, never by the model: a model
         # line carrying an @mention of its own is dropped whole. A direct ask
         # gets the bot's safe acknowledgement instead of disappearing.
         llm.chat_reply = lambda s, u, c: "@kvack you would not believe it"
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc honestly", "kvack", "")
         _drain(b)
         assert b.said[-1] == "@kvack " + chatai.DIRECT_FAILURE_LINE, b.said
@@ -138,6 +194,7 @@ def test_chime_ins_are_gated():
         # chatter, so it must not turn a direct question into silence.
         b._chat_ai_times = []
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b.paused = True
         b._on_message("kvack", "#t", "doc tell them", "kvack", "")
         assert b._jobs.empty(), "spoke while paused"
@@ -370,14 +427,107 @@ def test_emoji_walls_never_chime():
     print("[PASS] emoji walls never chime; real lines and mentions do")
 
 
-def test_a_held_mention_is_answered_late_to_the_right_person():
-    """Live-fire: 'pick a number 1-100 @truckingwithdocbot' arrived
-    inside the mention cooldown, was silently held, and a later chime
-    answered the number game TO SOMEONE ELSE ('@Etchedchampion Pick
-    42...'). A direct question never dangles: it is held, and the keeper
-    answers it to the right person the moment the cooldown clears - or
-    drops it after two minutes, when answering would be the
-    non-sequitur."""
+def test_a_direct_answer_is_never_refused_for_reusing_a_word():
+    """Live-fire, 2026-09-18: 'Docbot tell us what a boomer is' came back
+    'I heard you, but my answer got mangled in the gears. Try me once more.'
+
+    The answer was fine. It said 'twenty years on the road', Doc had said
+    'years' in two of his last three lines, and the anti-echo motif rule
+    treats a word reused across two lines as a template - so a correct
+    answer to a direct question was thrown away and the asker got an
+    apology. It happened often enough that the room learned not to trust
+    the bot.
+
+    Anti-echo exists to stop the bot sounding like a broken record in
+    UNSOLICITED chatter, where declining costs nothing. A direct answer is
+    the opposite: someone asked, and silence is the failure. So a direct
+    line is only refused for real duplication - a chained run of shared
+    words, or near-identical wording - and when even the retry is close,
+    the answer is posted rather than replaced by an apology.
+    """
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    b._distill = lambda *a, **k: None
+    orig = llm.chat_reply
+    # The persona's own recent lines: ordinary Doc, narrow vocabulary.
+    b._chat_ai_own = [
+        "@kvack Twenty years of nights and the coffee still does the "
+        "steering.",
+        "@tayfta Some roads you just eat and keep the wheels turning.",
+        "@marblehead9 Thirty years on the road and I still laugh at it.",
+    ]
+    # Snapshot BEFORE the reply: posting appends the line to _chat_ai_own,
+    # so comparing against it afterwards compares the answer to itself.
+    own_before = list(b._chat_ai_own)
+    llm.chat_reply = lambda s, u, c=None, **k: (
+        "A boomer is an old-school trucker - twenty years on the road, set "
+        "in his ways, and he has run every mile you are about to.")
+    try:
+        b._on_message("Hardclaws", "#t", "Docbot tell us what a boomer is",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert len(b.said) == 1 and b.said[0].startswith("@Hardclaws "), b.said
+        assert "old-school trucker" in b.said[0], b.said
+        assert chatai.DIRECT_FAILURE_LINE not in b.said[0], b.said
+        # An unsolicited chime in the same words is still refused: the
+        # strict rule is unchanged, only the direct bar moved.
+        line_only = b.said[0].split(" ", 1)[1]
+        assert chatai.too_similar(
+            line_only, own_before,
+            source="Docbot tell us what a boomer is"), "ambient bar moved"
+        assert not chatai.too_similar(
+            line_only, own_before,
+            source="Docbot tell us what a boomer is", direct=True), b.said
+
+        # A retry that comes back empty must not REPLACE the answer: it used
+        # to, which is how a good answer became an apology.
+        b2 = _bot(llm_api_key="k")
+        b2._log = logs.append
+        b2._distill = lambda *a, **k: None
+        # Genuine duplication (a verbatim echo of a recent line) still
+        # triggers the re-ask - and when the re-ask comes back EMPTY, the
+        # original answer must survive. It used to be replaced by the
+        # apology, which is how a good answer became "mangled in the gears".
+        dup = "Midnight coffee, fresh donuts, and the road that never ends"
+        b2._chat_ai_own = [dup]
+        calls = []
+
+        def flaky(system, user, cfg=None, **kw):
+            calls.append(system)
+            if "COMPLETELY different" in system:
+                return ""          # the re-ask produces nothing
+            return dup
+
+        llm.chat_reply = flaky
+        b2._on_message("kvack", "#t", "docbot what is a boomer", "kvack", "")
+        _drain(b2)
+        assert len(calls) == 2, calls            # it did re-ask
+        assert len(b2.said) == 1, b2.said
+        assert dup in b2.said[0], b2.said
+        assert chatai.DIRECT_FAILURE_LINE not in b2.said[0], b2.said
+        assert any("posted anyway" in l for l in logs), logs
+
+        # Real duplication is still caught on the direct path - the point is
+        # not to let the bot parrot itself, only to stop punishing a person
+        # who asked a question.
+        assert chatai.too_similar(
+            "Midnight coffee, fresh donuts, and the road that never ends",
+            ["Midnight coffee, fresh donuts, and the road that never ends"],
+            source="doc whats up", direct=True)
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a direct answer is posted, never refused for reusing a "
+          "word the persona says anyway")
+
+
+def test_a_held_question_is_acknowledged_with_the_wait():
+    """A mention held by a rail is announced, with the wait quoted.
+
+    From the room, a rail and a crash look identical - which is exactly
+    why the same question gets asked three times. Live-fire line:
+    'mention from marblehead9 held 44s - their own cooldown'.
+    """
     b = _bot(llm_api_key="k")
     logs = []
     b._log = logs.append
@@ -385,54 +535,862 @@ def test_a_held_mention_is_answered_late_to_the_right_person():
     llm.chat_reply = lambda s, u, c: "Forty-two. Obviously."
     try:
         T0 = time.time()
-        b._chat_ai_mention_last = T0 - 30      # a reply 30s ago: held
+        b._mark_mention_reply("marblehead9", T0 - 16)   # 44s left of 60
+        b._on_message("marblehead9", "#t",
+                      "docbot how long is the tow rope?", "marblehead9", "")
+        _join_acks(b)
+        assert b.said == ["@marblehead9 on it - give me about 45 seconds "
+                          "to look that up."], b.said
+        assert len(b._chat_ai_pending) == 1, b._chat_ai_pending
+        assert b._jobs.empty(), "the question is still held, not answered"
+        assert any("held 44s" in l for l in logs), logs
+
+        # Asking again inside the window gets no second "on it": the ack
+        # exists to stop the repeat, so three copies get one promise.
+        b._on_message("marblehead9", "#t", "docbot???", "marblehead9", "")
+        b._on_message("marblehead9", "#t", "docbot hello", "marblehead9", "")
+        _join_acks(b)
+        assert len(_acks(b.said)) == 1, b.said
+        assert len(b._chat_ai_pending) == 1, b._chat_ai_pending
+
+        # The answer still lands, to the right person, when the rail clears.
+        b._chat_ai_mention_by["marblehead9"] = T0 - 200
+        b._chat_ai_mention_last = T0 - 200
+        assert b._chat_ai_tick(now=T0) is True
+        _drain(b)
+        assert _no_ack(b.said) == [
+            "@marblehead9 Forty-two. Obviously."], b.said
+
+        # A wait under the floor is not worth a message - the answer is
+        # seconds away, and the ack would arrive with it.
+        b2 = _bot(llm_api_key="k")
+        b2.cfg["chat_ai_ack_min_seconds"] = 20
+        b2._mark_mention_reply("kvack", time.time() - 56)   # 4s left
+        b2._on_message("kvack", "#t", "doc you there", "kvack", "")
+        _join_acks(b2)
+        assert b2.said == [], b2.said
+        assert len(b2._chat_ai_pending) == 1, b2._chat_ai_pending
+
+        # Switched off, the old silence is back.
+        b3 = _bot(llm_api_key="k", chat_ai_ack_held=False)
+        b3._mark_mention_reply("kvack", time.time() - 16)
+        b3._on_message("kvack", "#t", "doc you there", "kvack", "")
+        _join_acks(b3)
+        assert b3.said == [], b3.said
+
+        # A promise the queue then throws away is worse than none: a held
+        # question that goes stale is called back, not dropped silently.
+        b4 = _bot(llm_api_key="k")
+        b4._last_chat = time.time()              # quiet gate closed
+        b4._mark_mention_reply("tayfta", time.time() - 16)
+        b4._on_message("tayfta", "#t", "doc whats the payload limit",
+                       "tayfta", "")
+        _join_acks(b4)
+        assert len(_acks(b4.said)) == 1, b4.said
+        # The entry's own expiry always covers the wait it quoted.
+        assert b4._chat_ai_pending[0][4] > time.time() + 44, \
+            b4._chat_ai_pending[0]
+        b4._chat_ai_pending[0] = (b4._chat_ai_pending[0][0],
+                                  b4._chat_ai_pending[0][1],
+                                  time.time() - 900, "tayfta",
+                                  time.time() - 300)
+        assert b4._chat_ai_tick() is False
+        assert b4._chat_ai_pending == []
+        _drain(b4)
+        assert any("got away from me" in l for l in b4.said), b4.said
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a held question is acknowledged with its wait - one "
+          "promise per person, called back if it is lost")
+
+
+def test_a_held_mention_is_answered_late_to_the_right_person():
+    """Live-fire: 'pick a number 1-100 @truckingwithdocbot' arrived
+    inside the mention cooldown, was silently held, and a later chime
+    answered the number game TO SOMEONE ELSE ('@Etchedchampion Pick
+    42...'). A direct question never dangles: it is held, and the keeper
+    answers it to the right person the moment the cooldown clears - or
+    drops it after two minutes, when answering would be the
+    non-sequitur.
+
+    Second live-fire (14:07-14:14): ten direct questions from four
+    people, four answered. The 60s cooldown was one clock for the whole
+    channel, so everyone waited for the last person's reply; the held
+    queue held three and dropped the oldest without a word. The cooldown
+    is now PER VIEWER (Yeyeboi's minute is not Dani's), with an 8s
+    channel pace between any two replies; the queue holds eight people
+    (one entry each) and every drop is logged."""
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    orig = llm.chat_reply
+    # Distinct lines per call: the cleaner (rightly) refuses to post the
+    # same sentence twice in a row.
+    answers = iter(["Forty-two. Obviously.", "Seventeen, and no refunds.",
+                    "Eighty-eight, like the keys on a piano."])
+    llm.chat_reply = lambda s, u, c: next(answers)
+    try:
+        T0 = time.time()
+        b._mark_mention_reply("yeyeboi", T0 - 30)   # HIS reply 30s ago: held
         b._on_message("Yeyeboi", "#t",
                       "pick a number 1-100 @truckingwithdocbot",
                       "yeyeboi", "")
-        assert b._jobs.empty(), "should be held, not enqueued"
+        _join_acks(b)
+        assert _no_ack(b.said) == [], b.said
+        assert len(_acks(b.said)) == 1 and \
+            _acks(b.said)[0].startswith("@Yeyeboi on it - give me about "), b.said
+        assert b._jobs.empty(), "the question itself is held, not enqueued"
         assert len(b._chat_ai_pending) == 1
-        assert any("held" in l for l in logs), logs
-        # A second viewer asks inside the same window: QUEUED, not
-        # overwritten - the single-slot version lost their question.
+        assert any("held" in l and "their own cooldown" in l
+                   for l in logs), logs
+        # Another viewer asks inside Yeyeboi's window: THEIR clock is
+        # clear (only the 8s channel pace applies, and that has passed),
+        # so Dani is answered now, not held behind Yeyeboi's minute.
         b._on_message("DaniLikesDonuts", "#t", "doc pick one for me too",
                       "danilikesdonuts", "")
-        assert len(b._chat_ai_pending) == 2
-        # The cooldown clears: answered, oldest first, to Yeyeboi.
+        assert not b._jobs.empty(), "Dani's own clock is clear - answer now"
+        _drain(b)
+        assert _no_ack(b.said) == [
+            "@DaniLikesDonuts Forty-two. Obviously."], b.said
+        assert len(b._chat_ai_pending) == 1       # Yeyeboi still held
+        # (a distill runs after that first reply and takes a line too)
+        answers = iter(["Seventeen, and no refunds."])
+        # Yeyeboi's cooldown clears: the keeper answers him, to him.
         assert b._chat_ai_tick(now=T0 + 40) is True
-        # _do_chime re-checks the cooldown against real time; the tick
-        # above ran at synthetic T0+40, so move the last-reply timestamp
-        # with it, exactly as the wall clock would have.
+        # _do_chime re-checks the clocks against real time; the tick
+        # above ran at synthetic T0+40, so move the timestamps with it,
+        # exactly as the wall clock would have.
+        b._chat_ai_mention_by["yeyeboi"] = T0 - 200
         b._chat_ai_mention_last = T0 - 200
         _drain(b)
-        assert b.said == ["@Yeyeboi Forty-two. Obviously."], b.said
-        assert len(b._chat_ai_pending) == 1      # Dani still queued
+        assert _no_ack(b.said)[-1] == "@Yeyeboi Seventeen, and no " \
+            "refunds.", b.said
+        assert b._chat_ai_pending == []
     finally:
         llm.chat_reply = orig
-    # A spammer cannot build a queue: the cap is three, and overflow
-    # drops the OLDEST - the freshest questions are the ones still live.
+    # One entry per person: a repeat inside the cooldown REPLACES the
+    # earlier question (one answer, the latest one), and eight different
+    # people fit; the ninth pushes the oldest out - and the log says who.
     b4 = _bot(llm_api_key="k")
+    logs4 = []
+    b4._log = logs4.append
     T4 = time.time()
-    b4._chat_ai_mention_last = T4 - 30
-    for who in ("Yeyeboi", "DaniLikesDonuts", "kvack", "tayfta"):
+    names = ["Yeyeboi", "DaniLikesDonuts", "kvack", "tayfta", "Etched",
+             "Roadrunner", "Bobby", "Marge", "Ninth"]
+    for who in names:
+        b4._mark_mention_reply(who.lower(), T4 - 30)
+    b4._on_message("Yeyeboi", "#t", "doc pick a number", "yeyeboi", "")
+    b4._on_message("Yeyeboi", "#t", "doc pick a BIG number", "yeyeboi", "")
+    assert len(b4._chat_ai_pending) == 1, b4._chat_ai_pending
+    assert b4._chat_ai_pending[0][1] == "doc pick a BIG number"
+    for who in names[1:]:
         b4._on_message(who, "#t", "doc pick a number", who.lower(), "")
-    assert len(b4._chat_ai_pending) == 3, b4._chat_ai_pending
+    assert len(b4._chat_ai_pending) == 8, len(b4._chat_ai_pending)
     assert b4._chat_ai_pending[0][0] == "DaniLikesDonuts"
+    assert any("queue full - dropped Yeyoboi".replace("Yeyoboi", "Yeyeboi")
+               in l for l in logs4), logs4
+    # The keeper answers whoever is CLEAR first, not the oldest: with
+    # per-viewer clocks kvack's minute ending early frees kvack.
+    b4._chat_ai_mention_by["kvack"] = T4 - 200
+    b4._chat_ai_mention_last = T4 - 200
+    assert b4._chat_ai_tick(now=T4) is True
+    jobs = []
+    while not b4._jobs.empty():
+        jobs.append(b4._jobs.get())
+    chimes = [j for j in jobs if j[3] == "chime"]
+    assert len(chimes) == 1 and chimes[0][0] == "kvack", jobs
+    # The person the full queue pushed out is TOLD, rather than left
+    # believing the bot ignored them.
+    assert any(j[3] == "say" and "lost the thread" in j[4]
+               and j[4].startswith("@Yeyeboi ") for j in jobs), jobs
     # Stale pendings (over two minutes) are dropped, not answered.
     b2 = _bot(llm_api_key="k")
     b2._last_chat = time.time()            # quiet gate closed
     b2._chat_ai_pending = [("kvack", "doc hello there",
-                            time.time() - 300)]
+                            time.time() - 300, "kvack")]
     assert b2._chat_ai_tick() is False
     assert b2._chat_ai_pending == []
     # The autonomous hourly cap never strands a direct pending question.
     b3 = _bot(llm_api_key="k")
     b3._last_chat = time.time()
-    b3._chat_ai_pending = [("kvack", "doc hello there", time.time())]
+    b3._chat_ai_pending = [("kvack", "doc hello there", time.time(), "kvack")]
     b3._chat_ai_times = [time.time()] * bot_mod.DEFAULTS["chat_ai_max_hour"]
     assert b3._chat_ai_tick() is True
     assert b3._chat_ai_pending == []
     print("[PASS] held mentions queue up and are answered late, each to "
           "the right person")
+
+
+def test_four_people_asking_at_once_all_get_answers():
+    """The 14:07-14:14 live-fire, replayed: four viewers, ten direct
+    questions in seven minutes. The old channel-wide 60s clock answered
+    four. With per-viewer cooldowns + an 8s pace, nine are answered
+    (the tenth was tayfta asking again 13s after her own reply - her
+    minute holds it, and her next question replaces it: one entry per
+    person). Nothing is dropped silently: every held or dropped question
+    leaves a log line."""
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    orig = llm.chat_reply
+    orig_time = time.time
+    counter = itertools.count()
+
+    def model(s, u, c=None, **k):
+        if "extract durable facts" in s:
+            return "NOTHING WORTH KEEPING"
+        return _distinct_line(next(counter))
+
+    llm.chat_reply = model
+    T0 = orig_time()
+    script = [  # (seconds, nick, message) - the real timeline, condensed
+        (0, "Yeyeboi", "docbot pick a number 1-100"),
+        (5, "tayfta", "doc what's your favorite truck stop"),
+        (13, "tayfta", "doc no really, favorite one"),
+        (30, "DaniLikesDonuts", "docbot do you like donuts"),
+        (48, "kvack", "doc where are we headed"),
+        (86, "tayfta", "docbot are you ignoring me"),
+        (140, "Yeyeboi", "doc pick another number"),
+        (200, "kvack", "docbot how far to the next stop"),
+        (260, "DaniLikesDonuts", "doc tell dani a fact about donuts"),
+        (330, "Yeyeboi", "doc one more number please"),
+    ]
+    try:
+        for at, nick, msg in script:
+            now = T0 + at
+            time.time = lambda now=now: now
+            b._on_message(nick, "#t", msg, nick.lower(), "")
+            _drain(b)
+            b._chat_ai_tick(now=now)
+            _drain(b)
+        # a last keeper pass well after the script, for anything held
+        for at in (345, 360, 400):
+            now = T0 + at
+            time.time = lambda now=now: now
+            b._chat_ai_tick(now=now)
+            _drain(b)
+    finally:
+        time.time = orig_time
+        llm.chat_reply = orig
+    answered = [l for l in b.said if l.startswith("@")]
+    assert len(answered) == 9, (len(answered), b.said, logs)
+    by = {}
+    for l in answered:
+        by[l.split()[0]] = by.get(l.split()[0], 0) + 1
+    assert by == {"@Yeyeboi": 3, "@tayfta": 2, "@DaniLikesDonuts": 2,
+                  "@kvack": 2}, by
+    assert any("held" in l for l in logs), logs
+    assert not any("dropped" in l for l in logs), logs
+    print("[PASS] four people asking at once: nine of ten answered, "
+          "the tenth held with a log line (was four of ten)")
+
+
+def test_distilling_is_paced_per_viewer():
+    """Every persona reply used to run a second model call to distil
+    the room into memory - ~400 tokens of prompt each time, ~40% of the
+    daily token budget on a busy night, mostly re-reading the same
+    twenty lines. Now a viewer is distilled on first contact and then
+    only when BOTH ten minutes have passed AND they have said four new
+    lines since; the first exchange still lands in memory at once."""
+    b = _bot(llm_api_key="k", chat_ai_mention_cooldown=0,
+             chat_ai_mention_pace=0)
+    orig = llm.chat_reply
+    counter = itertools.count()
+    calls = {"distill": 0}
+
+    def model(s, u, c=None, **k):
+        if "extract durable facts" in s:
+            calls["distill"] += 1
+            return "NOTHING WORTH KEEPING"
+        return _distinct_line(next(counter))
+
+    llm.chat_reply = model
+    try:
+        for i in range(10):
+            b._on_message("kvack", "#t", f"docbot thing {i} about my truck",
+                          "kvack", "")
+            _drain(b)
+        assert len(b.said) == 10, b.said
+        assert calls["distill"] == 1, calls      # first contact only
+        # Ten minutes pass with plenty of new lines: distilled again.
+        last_t, seen = b._distilled["kvack"]
+        b._distilled["kvack"] = (last_t - 601, seen)
+        b._on_message("kvack", "#t", "docbot and my dog", "kvack", "")
+        _drain(b)
+        assert calls["distill"] == 2, calls
+        # Ten more minutes but ONE new line: not worth a model call.
+        last_t, seen = b._distilled["kvack"]
+        b._distilled["kvack"] = (last_t - 601, seen)
+        b._on_message("kvack", "#t", "docbot lol", "kvack", "")
+        _drain(b)
+        assert calls["distill"] == 2, calls
+        # A different viewer is their own clock: first contact distils.
+        b._on_message("tayfta", "#t", "docbot hi from tayfta", "tayfta", "")
+        _drain(b)
+        assert calls["distill"] == 3, calls
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] the room is distilled on first contact, then every "
+          "10 min and 4 new lines - not after every reply")
+
+
+def test_news_questions_get_headlines_not_encyclopedia():
+    """Live-fire: 'Docbot who got into a helicopter crash today 15th
+    September 2026 in California' was answered 'FunFact | ...: The
+    Interstate Aviation Committee (MAK) investigation found out that the
+    Certificate of Airworthiness of the aircraft had expired in 2012.' -
+    a Wikipedia line about a different crash on a different continent.
+    What HAPPENED lately is news: a keyless headline feed (or Tavily's
+    news topic when a key is set), quoted with outlet and age, on the
+    same fast lane as weather. No model, no encyclopedia, no mention
+    clock - and an empty feed is an honest 'nothing', never a 2012 fact."""
+    import threading
+    import urllib.request
+    rss = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>x</title>'
+           b"<item><title>NBC4 helicopter crashes in Chatsworth, killing 3 - "
+           b"Los Angeles Times</title><pubDate>Wed, 16 Sep 2026 05:07:49 GMT"
+           b'</pubDate><source url="https://www.latimes.com">Los Angeles Times'
+           b"</source></item><item><title>Three dead in Los Angeles helicopter "
+           b"crash - BBC</title><pubDate>Wed, 16 Sep 2026 03:20:20 GMT</pubDate>"
+           b'<source url="https://www.bbc.com">BBC</source></item>'
+           b"</channel></rss>")
+    empty = (b'<?xml version="1.0"?><rss version="2.0"><channel><title>x'
+             b"</title></channel></rss>")
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    urls = []
+    feed = {"body": rss}
+
+    def fake_open(req, timeout=8):
+        urls.append(req.full_url)
+        if "news.google.com/rss" in req.full_url:
+            return _Resp(feed["body"])
+        raise AssertionError("unexpected fetch: " + req.full_url)
+
+    # the classifier: recency + an event word; weather/sunrise/opinion
+    # and plain trivia stay on their own paths
+    for q in ("who got into a helicopter crash today 15th September 2026 "
+              "in California", "what happened in the news today",
+              "who won the game last night", "any news on the LA bus crash",
+              "was there an earthquake this morning in LA"):
+        assert funfacts.news_question(q), q
+    for q in ("whats the weather today in scranton", "who is the best QB today",
+              "what is a bongo twist", "when was the eiffel tower built",
+              "who won the 1998 world cup", "did you sleep last night",
+              "what time is sunrise today in vandalia"):
+        assert not funfacts.news_question(q), q
+    assert funfacts._news_query("who got into a helicopter crash today 15th "
+                                "September 2026 in California") == \
+        "helicopter crash California"
+    orig_open, orig_reply = urllib.request.urlopen, llm.chat_reply
+    urllib.request.urlopen = fake_open
+
+    def no_model(*a, **k):
+        raise AssertionError("a news question must never reach the model")
+
+    llm.chat_reply = no_model
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        b = _bot(llm_api_key="k")
+        logs = []
+        b._log = logs.append
+        b._on_message("Hardclaws", "#t", "Docbot who got into a helicopter "
+                      "crash today 15th September 2026 in California",
+                      "hardclaws", "moderator/1")
+        for th in threading.enumerate():
+            if th.name == "live-data":
+                th.join(5)
+        _drain(b)
+        assert b.said == ["News | helicopter crash California: NBC4 helicopter "
+                          "crashes in Chatsworth, killing 3 (Los Angeles Times, "
+                          + funfacts._age("Wed, 16 Sep 2026 05:07:49 GMT")
+                          + ")"], b.said
+        assert "when%3A2d" in urls[0], urls      # a named date: two days
+        assert b._mention_wait("hardclaws") == 0, "not a persona reply"
+        assert any("live data answered" in l for l in logs), logs
+        # a repeat rotates to the next headline, like any fact pool
+        again = funfacts.get_funfact("who got into a helicopter crash today "
+                                     "15th September 2026 in California",
+                                     b._opts)
+        assert again["fact"].startswith("Three dead in Los Angeles helicopter "
+                                        "crash (BBC, "), again
+        # !ask takes the same path
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        b.said.clear()
+        b._on_message("kvack", "#t", "!ask who died in the LA helicopter "
+                      "crash today", "kvack", "")
+        _drain(b)
+        assert b.said and b.said[0].startswith("News | "), b.said
+        # an empty feed: honest, dated, and never an encyclopedia line
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        feed["body"] = empty
+        got = funfacts.get_funfact("who got arrested yesterday in Scranton",
+                                   b._opts)
+        assert got["fact"] == ("Nothing in the headlines about that in the "
+                               "last 2 days."), got
+    finally:
+        urllib.request.urlopen = orig_open
+        llm.chat_reply = orig_reply
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] what-happened questions are answered from today's "
+          "headlines, never the encyclopedia")
+
+
+def test_the_headlines_are_the_top_stories_not_a_page_title():
+    """Live-fire: 'Docbot whats the leading headlines for today' got
+    'News | leading headlines: top news of the day september 16 2026
+    (thehindu.com, 17h ago)' - the words 'leading headlines' were
+    SEARCHED and the best match was a roundup page's title, a headline
+    about headlines. The follow-up 'that is not a headline where the
+    news' had no recency word, so it went to the persona, which made a
+    joke about not being a headline. A headline ask with no subject is
+    the day's TOP STORIES feed, three real titles per message with
+    outlet and age; roundup page titles are never quoted; 'where the
+    news' / 'whats the news' / 'headlines?' need no 'today'; and a
+    repeat of the ask rotates to the next three."""
+    import threading
+    # The classifier: subject-less headline asks, however phrased.
+    for q in ("whats the leading headlines for today",
+              "that is not a headline where the news", "whats the news",
+              "news?", "headlines", "headlines please", "top stories",
+              "any news", "give us the top stories",
+              "whats going on in the world", "what happened in the news today",
+              "what's the biggest story today", "hows the news looking",
+              "tell me the news", "what are todays headlines",
+              "read me the headlines", "whats new in the news",
+              "whats the latest news", "any breaking news",
+              "Whats The Top Stories Today"):
+        assert funfacts.news_question(q), q
+        assert funfacts._news_generic(q), q
+    # ...and asks WITH a subject still search for it.
+    for q, topic in (("whats the news on the LA helicopter crash",
+                      "LA helicopter crash"),
+                     ("any news on the LA bus crash", "LA bus crash"),
+                     ("whats the news in Australia today", "Australia"),
+                     ("whats the sports news today", "sports"),
+                     ("any news on the Big Bend fire today", "Big Bend fire"),
+                     ("who got into a helicopter crash today 15th September "
+                      "2026 in California", "helicopter crash California")):
+        assert funfacts.news_question(q), q
+        assert not funfacts._news_generic(q), q
+        assert funfacts._news_query(q) == topic, (q, funfacts._news_query(q))
+    # Not news at all: sharing news, the bot's news, weather, opinion.
+    for q in ("did you hear the news, I got a new truck", "good news everyone",
+              "whats your news source", "the news said it would rain",
+              "im watching the news", "no news is good news",
+              "whats the weather today in scranton", "who is the best QB today",
+              "what a day, the news is wild", "tell us a story",
+              "whats the story with your dog", "whats new", "whats going on"):
+        assert not funfacts.news_question(q), q
+    # A page title is not a story.
+    for t in ("Top news of the day September 16 2026", "Today's top stories",
+              "News headlines for September 16", "Latest news",
+              "Morning briefing: what to know today", "5 things to know today",
+              "Weekend wrap-up: five stories you missed", "Live updates",
+              "The latest headlines - Sept. 16, 2026", "leading headlines"):
+        assert funfacts._roundup(t), t
+    for t in ("News Corp shares fall 5% after the split",
+              "Breaking news: quake hits Tokyo",
+              "Live updates: Hurricane Otis makes landfall in Mexico",
+              "Top Gun 3 announced for summer 2027",
+              "Fed holds rates steady as inflation cools",
+              "World leaders gather in New York for UN week"):
+        assert not funfacts._roundup(t), t
+
+    top = [("Top news of the day September 16 2026", "thehindu.com",
+            "Tue, 15 Sep 2026 20:00:00 GMT"),
+           ("Fed holds rates steady as inflation cools", "Reuters",
+            "Wed, 16 Sep 2026 14:07:49 GMT"),
+           ("Hurricane Otis makes landfall near Acapulco as Category 4 "
+            "storm", "AP News", "Wed, 16 Sep 2026 13:20:20 GMT"),
+           ("Senate passes stopgap funding bill, averting shutdown", "CNN",
+            "Wed, 16 Sep 2026 12:01:00 GMT"),
+           ("Apple unveils iPhone 18 lineup at Cupertino event", "The Verge",
+            "Wed, 16 Sep 2026 11:00:00 GMT"),
+           ("Eagles beat Cowboys 27-24 on last-second field goal", "ESPN",
+            "Wed, 16 Sep 2026 04:00:00 GMT"),
+           ("Fed holds rates steady as inflation cools", "Bloomberg",
+            "Wed, 16 Sep 2026 14:10:00 GMT"),          # a duplicate
+           ("Today's top stories", "example.com",
+            "Wed, 16 Sep 2026 14:10:00 GMT")]
+    calls = []
+    saved = (funfacts._google_news_top, funfacts._google_news_rss,
+             funfacts._tavily_news, llm.chat_reply)
+    funfacts._google_news_top = lambda limit=12, options=None: (
+        calls.append(("top", (options or {}).get("news_country"))) or list(top))
+    funfacts._google_news_rss = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("the search feed is not for a subject-less ask"))
+    funfacts._tavily_news = lambda *a, **k: []
+    llm.chat_reply = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no model on the news path"))
+    import contextlib
+    import io
+    try:
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        b = _bot(llm_api_key="k")
+        logs = []
+        b._log = logs.append
+        console = io.StringIO()
+        with contextlib.redirect_stdout(console):
+            b._on_message("Hardclaws", "#t", "Docbot whats the leading "
+                          "headlines for today", "hardclaws", "broadcaster/1")
+            for th in threading.enumerate():
+                if th.name == "live-data":
+                    th.join(5)
+        _drain(b)
+        age = funfacts._age
+        assert b.said == [
+            "News | top headlines: Fed holds rates steady as inflation cools "
+            f"(Reuters, {age('Wed, 16 Sep 2026 14:07:49 GMT')}) | Hurricane "
+            "Otis makes landfall near Acapulco as Category 4 storm (AP News, "
+            f"{age('Wed, 16 Sep 2026 13:20:20 GMT')}) | Senate passes stopgap "
+            "funding bill, averting shutdown (CNN, "
+            f"{age('Wed, 16 Sep 2026 12:01:00 GMT')})"], b.said
+        assert len(b.said[0]) <= 450
+        assert calls == [("top", "US")], calls
+        assert "dropped 2 roundup page title(s)" in console.getvalue(), \
+            console.getvalue()
+        assert any("live data answered" in l for l in logs), logs
+        # The follow-up complaint is a fresh headline ask: it rotates to
+        # the next stories rather than becoming a persona joke, and the
+        # feed is not fetched again (ten-minute cache, one key for every
+        # phrasing).
+        b.said.clear()
+        b._on_message("Hardclaws", "#t", "Docbot that is not a headline "
+                      "where the news", "hardclaws", "broadcaster/1")
+        for th in threading.enumerate():
+            if th.name == "live-data":
+                th.join(5)
+        _drain(b)
+        assert b.said and b.said[0].startswith(
+            "News | top headlines: Apple unveils iPhone 18 lineup"), b.said
+        assert "Eagles beat Cowboys" in b.said[0], b.said
+        assert calls == [("top", "US")], calls
+        assert b._mention_wait("hardclaws") == 0, "not a persona reply"
+        # !ask takes the same path.
+        b.said.clear()
+        b._on_message("kvack", "#t", "!ask whats the news", "kvack", "")
+        _drain(b)
+        assert b.said and b.said[0].startswith("News | top headlines: "), b.said
+        # A feed of nothing but roundups is an honest 'empty', never a
+        # page title.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._google_news_top = lambda limit=12, options=None: top[:1]
+        got = funfacts.get_funfact("whats the news today", b._opts)
+        assert got["fact"].startswith("The top-stories feed came back empty"), got
+        # A subject still goes to the search feed.
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+        funfacts._google_news_rss = lambda q, when, limit=6, options=None: [
+            ("Three dead in Los Angeles helicopter crash", "BBC",
+             "Wed, 16 Sep 2026 03:20:20 GMT")]
+        got = funfacts.get_funfact("any news on the LA helicopter crash today",
+                                   b._opts)
+        assert got["place"] == "LA helicopter crash" and got["fact"].startswith(
+            "Three dead in Los Angeles helicopter crash (BBC, "), got
+    finally:
+        (funfacts._google_news_top, funfacts._google_news_rss,
+         funfacts._tavily_news, llm.chat_reply) = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+    print("[PASS] 'whats the headlines' is the day's top stories, three real "
+          "titles a message, never a roundup page title")
+
+
+def test_the_big_top_and_middle_earth_join_the_voices():
+    """The library grows: the clown, the lot lizard (an actual lizard -
+    the name is the whole joke, nothing else), a maxed-out spin
+    instructor, Yoda, Smeagol/Gollum and the rest of the Fellowship,
+    plus a big top of pure-fun voices. Every one carries the same
+    rails and the streamer's story; '!persona list' now goes out one
+    crew per message because the whole library no longer fits in
+    one; typed names are forgiving ('Lot Lizard', 'gollum', 'Sam')."""
+    import re as _re
+    for v in ("clown", "lotlizard", "spin", "yoda", "smeagol", "gandalf",
+              "gimli", "samwise", "legolas", "treebeard", "pirate", "butler",
+              "grandma", "painter", "infomercial"):
+        assert chatai.persona(v), v
+    assert len(chatai.PERSONAS) >= 28
+    assert len(set(chatai.PERSONAS.values())) == len(chatai.PERSONAS)
+    assert set(chatai.PERSONA_BLURBS) == set(chatai.PERSONAS)
+    grouped = [n for _, names in chatai.PERSONA_GROUPS for n in names]
+    assert len(grouped) == len(set(grouped)) == len(chatai.PERSONAS), grouped
+    assert set(grouped) == set(chatai.PERSONAS)
+    # Every voice text passes the bot's own output rails: nothing
+    # explicit or tasteless, no @, no command syntax - and the lot
+    # lizard is a reptile.
+    for k, text in chatai.PERSONAS.items():
+        assert not funfacts._EXPLICIT.search(text), k
+        assert not funfacts._TASTELESS.search(text), k
+        assert "@" not in text and not _re.search(r"![a-zA-Z]", text), k
+        assert "airborne" in chatai.system_prompt(text), k
+    assert "reptile" in chatai.PERSONAS["lotlizard"]
+    assert "nothing flirty" in chatai.PERSONAS["lotlizard"]
+    assert "Gollum" in chatai.PERSONAS["smeagol"]
+    # Forgiving names.
+    for typed, want in (("Lot Lizard", "lotlizard"), ("lot-lizard", "lotlizard"),
+                        ("gollum", "smeagol"), ("Sam", "samwise"),
+                        ("spin class", "spin"), ("YODA", "yoda"),
+                        ("bob ross", "painter"), ("Gandalf the Grey", "gandalf")):
+        assert chatai.persona_name(typed) == want, typed
+    assert chatai.persona_name("nope") is None
+    assert chatai.persona("gollum") == chatai.PERSONAS["smeagol"]
+
+    b = _bot(llm_api_key="k")
+    b._persona_command("amod", "moderator/1", "list")
+    _drain(b)
+    assert len(b.said) == 1 + len(chatai.PERSONA_GROUPS), b.said
+    assert all(len(s) <= 450 for s in b.said), [len(s) for s in b.said]
+    assert "28 voices" in b.said[0] or f"{len(chatai.PERSONAS)} voices" in b.said[0]
+    joined = " ".join(b.said)
+    for n in chatai.PERSONAS:
+        assert f"{n} (" in joined, n
+    assert "middle-earth" in joined and "smeagol (precious" in joined
+    # 'set Lot Lizard' / 'set gollum' land on the canonical voice, and
+    # the model receives that voice.
+    b.said.clear()
+    b._persona_command("amod", "moderator/1", "set Lot Lizard")
+    assert b.said == ["@amod voice set to lotlizard."], b.said
+    assert b._persona_text() == chatai.PERSONAS["lotlizard"]
+    b._persona_command("amod", "moderator/1", "set gollum")
+    assert b._persona == {"name": "smeagol"}
+    systems = []
+    orig = llm.chat_reply
+    b._distill = lambda *a, **k: None
+    llm.chat_reply = lambda s, u, c, **k: (systems.append(s) or
+                                           "We helps the nice streamer, yes... "
+                                           "no! nasty chatses, precious.")
+    try:
+        b._on_message("Hardclaws", "#t", "doc what do you think of my truck",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert systems and chatai.PERSONAS["smeagol"] in systems[0]
+        assert "airborne" in systems[0]
+        assert b.said[-1].startswith("@Hardclaws We helps"), b.said
+    finally:
+        llm.chat_reply = orig
+    b2 = _bot(persona_state_path=b.cfg["persona_state_path"])
+    assert b2._persona_text() == chatai.PERSONAS["smeagol"]
+    print("[PASS] the big top and middle-earth join the voices; the list "
+          "goes out a crew at a time")
+
+
+def test_leaked_reasoning_is_never_posted():
+    """Live-fire 15:30:09-15:30:53: 'docbot who is your favorite NFL
+    team' got, three times, 'The user is asking me (Docbot) who my
+    favorite NFL team is. I need to answer as the Commentator persona -
+    a British sp...' - the thinking model's reasoning delivered as the
+    reply. The cleaner threw it out for LENGTH, the length recovery
+    nearly posted a trimmed slice of it, and the retry was told 'too
+    long' - which was not what was wrong. Narration is recognised as
+    narration: named in the log, the retry is told not to narrate, the
+    recovery refuses it, and three leaks in an hour name the model."""
+    import contextlib
+    import io
+    leak = ("The user Hardclaws is asking me (Docbot) who my favorite NFL "
+            "team is. I need to answer as the Commentator persona - a "
+            "veteran British sports broadcaster. I should pick a team and "
+            "be witty about it. Let me craft something about the Bills. " * 2)
+    for line in (leak, "The user is asking me who my favorite team is.",
+                 "Okay, the user wants a number between 1 and 100. Let me "
+                 "think of something funny.",
+                 "I need to respond as Doc, the trucker. Keep it short.",
+                 "We need to keep it under 200 characters and mention the road.",
+                 "The user tayfta is saying she likes donuts. I should respond "
+                 "warmly in character."):
+        assert chatai.is_narration(line), line
+        assert chatai.clean_line(line) is None, line
+    for line in ("Chiefs, and I will not be taking questions at this time.",
+                 "I need to answer the CB before the dispatcher loses her mind.",
+                 "The user manual for this rig is thicker than a phone book.",
+                 "As the sun comes up over Kansas, the coffee finally kicks in.",
+                 "They want me to pick a team? Fine, Packers, and I regret "
+                 "nothing.", "Let me see... forty-two, final answer.",
+                 "We need to keep the coffee hot and the tires cold, kvack."):
+        assert not chatai.is_narration(line), line
+    assert chatai.recover_direct_line(leak) is None, "no slice of reasoning"
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    prompts = []
+    replies = iter([leak, "Buffalo Bills, and I say that with the confidence "
+                          "of a man who has never been to Buffalo."])
+    orig = llm.chat_reply
+
+    def model(s, u, c=None, **k):
+        if "extract durable facts" in s:
+            return "NOTHING WORTH KEEPING"
+        prompts.append(s)
+        return next(replies)
+
+    llm.chat_reply = model
+    out = io.StringIO()
+    try:
+        llm.reset_disable_state()
+        llm._LAST_CHAT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        b._on_message("Hardclaws", "#t", "docbot who is your favorite NFL "
+                      "team", "hardclaws", "moderator/1")
+        _drain(b)
+        assert b.said == ["@Hardclaws Buffalo Bills, and I say that with the "
+                          "confidence of a man who has never been to "
+                          "Buffalo."], b.said
+        assert any("narrated its reasoning instead of answering - one retry"
+                   in l for l in logs), logs
+        assert "Do not narrate, plan or explain" in prompts[1], prompts[1]
+        assert not any("recovered at a complete boundary" in l for l in logs)
+        # both attempts leak: the honest failure line, never the leak
+        b2 = _bot(llm_api_key="k")
+        logs2 = []
+        b2._log = logs2.append
+        llm.chat_reply = lambda s, u, c=None, **k: (
+            "NOTHING WORTH KEEPING" if "extract durable facts" in s else leak)
+        with contextlib.redirect_stdout(out):
+            b2._on_message("Hardclaws", "#t", "docbot who is your favorite "
+                           "NFL team", "hardclaws", "moderator/1")
+            _drain(b2)
+            b2._chat_ai_mention_by.clear()
+            b2._chat_ai_mention_last = 0.0
+            b2._on_message("kvack", "#t", "docbot pick a number", "kvack", "")
+            _drain(b2)
+        assert all(x.endswith(chatai.DIRECT_FAILURE_LINE) for x in b2.said), \
+            b2.said
+        assert any("narrated its reasoning AGAIN" in l for l in logs2), logs2
+        assert "narrated its reasoning instead of answering 3 times this " \
+            "hour" in out.getvalue(), out.getvalue()
+        assert "nvidia/nemotron-3-ultra-550b-a55b:free" in out.getvalue()
+        assert "Never narrate, plan or explain" in chatai.system_prompt("")
+    finally:
+        llm.chat_reply = orig
+        llm.reset_disable_state()
+    print("[PASS] a model that narrates its reasoning is retried with the "
+          "right instruction, never posted, and named after three leaks")
+
+
+def test_general_knowledge_goes_to_the_model_not_the_engine():
+    """Live-fire, twice on one night: 'Docbot whats the avg time for
+    someone to run 5k' and 'Docbot how long it take to run 5k home
+    boy?' were routed at the fact engine - which posted a Reddit thread
+    title, then the race's DISTANCE. Neither is an encyclopedia
+    question: there is no article to look up for a typical 5K time.
+    The chat model knows the answer and was never asked. General
+    knowledge (durations, rates, typical values, how-tos, explanations)
+    now goes to the model, told what kind of ask it is; the engine keeps
+    NAMED things ('what is a bongo twist', 'how tall is Mount Everest'),
+    records ('how many trailers can a truck pull') and live data. If the
+    model declines, the engine still gets its try - a figure of the
+    right kind or nothing."""
+    names = ("doc", "docbot", "truckingwithdocbot")
+    for q in ("whats the avg time for someone to run 5k",
+              "how long it take to run 5k home boy?",
+              "Docbot how long it take to run 5k home boy?",
+              "how long does it take to run a 5k",
+              "how much does a gallon of diesel weigh",
+              "how far can a truck go on a tank", "how fast can a semi go",
+              "how often should you change oil", "why is the sky blue",
+              "how do air brakes work", "what happens if you run out of def",
+              "whats the legal weight limit for a semi"):
+        assert chatai.knowledge_question(q, names), q
+        assert not chatai.factual_question(q, names), q
+    for q in ("what is a bongo twist", "when was the eiffel tower built",
+              "who won the 1998 world cup", "how long is the Golden Gate Bridge",
+              "how tall is Mount Everest", "how old is Willie Nelson",
+              "whats the longest truck in the world",
+              "how many trailers can a truck pull", "how long is a marathon",
+              "how long is the amazon river", "what is the dew point",
+              "which state has the most truck stops",
+              "docbot weather in paris?",
+              "who got into a helicopter crash today in California",
+              "what time is sunrise today in vandalia"):
+        assert not chatai.knowledge_question(q, names), q
+        assert chatai.factual_question(q, names), q
+    for q in ("whats your favorite truck", "how do you feel about donuts",
+              "how long have you been driving", "how are you today"):
+        assert not chatai.factual_question(q, names), q
+
+    b = _bot(llm_api_key="k")
+    b._distill = lambda nick, lines: None
+    logs, prompts, engine = [], [], []
+    b._log = logs.append
+    orig_fact, orig_reply = bot_mod.get_funfact, llm.chat_reply
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or {
+        "place": "5K run",
+        "fact": "The 5K run is a long-distance road running competition "
+                "over a distance of five kilometres (3.107 mi)."})
+
+    def model(system, user, cfg=None, **k):
+        prompts.append(user)
+        if "avg time" in user.lower():
+            return ("Most folks finish a 5K somewhere in the 30 to 40 "
+                    "minute range; around 34 is a fair average.")
+        if "does it take" in user.lower():
+            return ("Beginners land near 35 minutes; regular joggers "
+                    "closer to 25.")
+        return ("Call it half an hour to forty minutes for most people. "
+                "Quicker if you have been training.")
+
+    llm.chat_reply = model
+    try:
+        # both live questions: the model answers, the engine is never asked
+        for msg in ("Docbot whats the avg time for someone to run 5k",
+                    "Docbot how long it take to run 5k home boy?"):
+            b._chat_ai_mention_last = 0.0
+            b._chat_ai_mention_by.clear()
+            b._on_message("kvack", "#t", msg, "kvack", "")
+            _drain(b)
+        assert len(b.said) == 2, b.said
+        assert "30 to 40 minute" in b.said[0], b.said
+        assert "half an hour to forty" in b.said[1], b.said
+        assert engine == [], engine
+        assert all("general-knowledge question" in p for p in prompts), \
+            prompts
+        assert sum("the model answers it, not the fact engine" in l
+                   for l in logs) == 2, logs
+        # !ask takes the same route
+        b._reply_ask("kvack", "how long does it take to run a 5k")
+        assert len(b.said) == 3 and "35 minutes" in b.said[2], b.said
+        assert engine == [], engine
+        # a NAMED thing still goes to the engine first
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("kvack", "#t", "doc what is a bongo twist", "kvack", "")
+        _drain(b)
+        assert engine == ["what is a bongo twist"], engine
+        # the model declines a knowledge question: the engine gets its
+        # try, and posts only a figure of the right kind - never the
+        # distance
+        llm.chat_reply = lambda s, u, c=None, **k: "NOTHING TO SAY"
+        engine.clear()
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("kvack", "#t", "Docbot how long it take to run 5k "
+                      "home boy?", "kvack", "")
+        _drain(b)
+        assert engine == ["how long it take to run 5k home boy?"], engine
+        assert len(b.said) == 5 and "3.107" in b.said[-1], b.said
+        assert any("the fact engine answered it" in l for l in logs), logs
+    finally:
+        bot_mod.get_funfact = orig_fact
+        llm.chat_reply = orig_reply
+    print("[PASS] general knowledge ('how long does it take to run 5k') "
+          "goes to the model; the engine keeps named things and live data")
 
 
 def test_overheard_questions_never_get_funfacts():
@@ -468,6 +1426,7 @@ def test_overheard_questions_never_get_funfacts():
         # A factual question ADDRESSED to the bot still gets the engine,
         # with the address stripped from the query and the header.
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc what is a bongo twist",
                       "kvack", "")
         _drain(b)
@@ -503,6 +1462,24 @@ def test_the_bot_cannot_repeat_itself():
     assert chatai.clean_line("check the funfact command for more pal") is None
     assert chatai.clean_line("one emoji is fine \U0001f69b") is not None
     assert chatai.clean_line("two emoji not \U0001f69b\U0001f3dc") is None
+    # ONE emoji as a person sees it. Live-fire the cleaner counted the
+    # code points of a shrug-with-gender-sign (🤷 ZWJ ♂ VS16) as two
+    # emoji and threw away 'Clueless is my default setting, hon - keeps
+    # the warranty valid. 🤷\u200d♂️' - a good line, rejected twice.
+    assert chatai.clean_line("Clueless is my default setting, hon \u2014 "
+                             "keeps the warranty valid. \U0001f937\u200d"
+                             "\u2642\ufe0f") is not None
+    assert chatai.clean_line("Easy does it now, hon. "
+                             "\U0001f937\U0001f3fb\u200d\u2640\ufe0f") \
+        is not None                             # skin tone + ZWJ + sign
+    assert chatai.clean_line("Fine by me, that works. \U0001f44d\U0001f3fd") \
+        is not None                             # skin-tone modifier
+    assert chatai.clean_line("Road trip then, pal \U0001f1fa\U0001f1f8") \
+        is not None                             # a flag is one emoji
+    assert chatai.clean_line("Family time on the road "
+                             "\U0001f468\u200d\U0001f469\u200d\U0001f467") \
+        is not None                             # a ZWJ family
+    assert chatai.clean_line("Two here \U0001f600 and \U0001f60e") is None
     assert "Your own last lines" in chatai.user_prompt(
         [("a", "hi")], "a", "hello", own=own[:1])
 
@@ -530,9 +1507,14 @@ def test_the_bot_cannot_repeat_itself():
         assert b.said and "scale house" in b.said[0], b.said
         assert any("recycled" in l for l in logs), logs
         # !ask gets the same redemption from the same starting history.
+        # The question must NOT contain the echoed words: 'what is your
+        # favorite midnight snack' exempts 'midnight' as the topic asked
+        # about, so an answer naming midnight snacks is on-topic and is
+        # answered rather than refused - which is the point of the direct
+        # bar. Asking about 3am instead leaves the echo gratuitous.
         calls.clear()
         b._chat_ai_own = list(own)
-        b._reply_ask("Hardclaws", "what is your favorite midnight snack")
+        b._reply_ask("Hardclaws", "what do you reach for at 3am")
         assert len(calls) == 2, calls
         assert "COMPLETELY different" in calls[1]
         assert len(b.said) == 2 and "scale house" in b.said[1], b.said
@@ -588,6 +1570,7 @@ def test_factual_questions_get_the_engine_first():
             "place": "Vandalia, Illinois", "kind": "Sunrise",
             "fact": "Sunrise is expected around 6:38 AM local time today."}
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "Docbot what time we expecting sunrise today in "
                       "Vandalia, IL ?", "hardclaws", "broadcaster/1")
@@ -602,6 +1585,7 @@ def test_factual_questions_get_the_engine_first():
             "fact": ("Currently 68°F with partly cloudy skies; feels like "
                      "66°F; humidity 59%; wind WSW at 12 mph.")}
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "Docbot what is the weather in Marshall, IL",
                       "hardclaws", "broadcaster/1")
@@ -675,6 +1659,7 @@ def test_mods_can_switch_the_bots_voice():
         b._persona_command("amod", "moderator/1", "set nobody")
         assert any("no voice called" in s for s in b.said), b.said
         b._persona_command("amod", "moderator/1", "list")
+        _drain(b)                    # the list goes out through the queue
         assert any("sarge" in s and "rookie" in s for s in b.said), b.said
         b._persona_command("amod", "moderator/1", "custom too short")
         assert any("12-300" in s for s in b.said), b.said
@@ -829,6 +1814,7 @@ def test_a_direct_ask_gets_one_redemption():
                                           (bad if len(calls) == 1
                                            else good))
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "docbot what do we think of people who ride zwift "
                       "with 0% trainer difficulty", "hardclaws",
@@ -913,6 +1899,7 @@ def test_rough_direct_ask_is_answered_and_cannot_go_stale():
         with b._chat_lock:
             b._chat_buf.append(("Hardclaws", "docbot old zwift question"))
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t", "Docbot you ok?", "hardclaws",
                       "broadcaster/1")
         _drain(b)
@@ -970,6 +1957,7 @@ def test_mention_notes_are_remembered_and_recalled():
     bot_mod.get_funfact = lambda q, o: (engine.append(q) or None)
     try:
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("Hardclaws", "#t",
                       "docbot when and where did @TruckingWithDoc last "
                       "take a piss?", "hardclaws", "broadcaster/1")
@@ -1021,6 +2009,7 @@ def test_no_failed_chat_attempt_is_silent():
         logs.clear()
         llm.chat_reply = lambda s, u, c: "x" * 400
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc hello there friend", "kvack", "")
         _drain(b)
         assert b.said[-1] == "@kvack " + chatai.DIRECT_FAILURE_LINE, b.said
@@ -1241,6 +2230,7 @@ def test_the_bot_remembers_and_forgets():
         assert ("kvack", "sleeps on the floor by choice") in got, got
         # The next time the bot speaks, it remembers.
         b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
         b._on_message("kvack", "#t", "doc you know what im saying",
                       "kvack", "")
         _drain(b)
@@ -1444,8 +2434,792 @@ def test_nothing_is_recorded_while_the_feature_is_off():
     print("[PASS] nothing is recorded while the feature is off")
 
 
+_SONG = ("Sure! Here's a little song about the night shift:\n\n"
+         "Verse 1:\nRolling down the I-80 line,\n"
+         "Coffee's cold but the load's on time,\n"
+         "Chorus:\nOh the night shift hums, the night shift glows,\n"
+         "Where the diesel goes, nobody knows.\n\nHope you liked it!")
+_POEM = ("Kvack sleeps on the floor by choice,\n"
+         "He says it makes his spine rejoice.\n"
+         "No mattress, no frame, no pillow, no fuss,\n"
+         "Just a man and a floor and the rest of us.")
+
+
+def _drain_for(b, seconds):
+    """Keep draining while timers fire, the way the worker thread would."""
+    end = time.time() + seconds
+    while time.time() < end:
+        _drain(b)
+        time.sleep(0.02)
+    _drain(b)
+
+
+def test_performance_requests_are_recognised():
+    """'Docbot sing me a song' is an ask for a PIECE. The matcher must
+    catch how people actually phrase it and never a question about a
+    real song or someone narrating their own day."""
+    names = ("doc", "docbot")
+    yes = {
+        "Docbot sing me a song": ("song", ""),
+        "Docbot make me a poem": ("poem", ""),
+        "doc sing me a song about the night shift": ("song", "the night shift"),
+        "docbot, write a poem about kvack please": ("poem", "kvack"),
+        "doc can you sing": ("song", ""),
+        "Doc rap for us": ("rap", ""),
+        "docbot give us a limerick about the load": ("limerick", "the load"),
+        "doc tell us a story": ("story", ""),
+        "@docbot do a haiku on coffee": ("haiku", "coffee"),
+        "doc drop some bars about zwift": ("rap", "zwift"),
+        "docbot make a toast to hollie": ("toast", "hollie"),
+        "doc one more song": ("song", ""),
+        "doc, poem about Missouri": ("poem", "Missouri"),
+        "Doc, can you write us a country song about I-80?": ("song", "I-80"),
+    }
+    for text, want in yes.items():
+        got = chatai.performance_request(text, names)
+        assert got == want, (text, got, want)
+    no = [
+        "doc who sang that song", "doc what's the story with the lights",
+        "doc tell me the story of route 66", "doc tell them",
+        "doc how are you", "doc what is a bongo twist",
+        "doc do you like country songs", "doc I wrote a song yesterday",
+        "doc which song is playing", "doc do you know the song by cash",
+        "doc tell me your story", "doc we're gonna sing a song later",
+        "doc that story about the bear was funny", "doc your rap was bad",
+        "doc, take a mental note the load was late",
+        "hey doc these graphics kind of suck", "doc pick a number 1-100",
+    ]
+    for text in no:
+        got = chatai.performance_request(text, names)
+        assert got is None, (text, got)
+    assert chatai.encore_request("doc encore!", names)
+    assert not chatai.encore_request("doc one more thing", names)
+    print("[PASS] performance requests are recognised; questions and "
+          "narration are not")
+
+
+def test_a_performance_is_cleaned_line_by_line():
+    """The model's padding goes, the piece stays; one broken rail
+    anywhere and the whole piece is refused - never half a song."""
+    lines = chatai.clean_performance(_SONG, "song")
+    assert lines == ["Rolling down the I-80 line,",
+                     "Coffee's cold but the load's on time,",
+                     "Oh the night shift hums, the night shift glows,",
+                     "Where the diesel goes, nobody knows."], lines
+    numbered = "1. Line one is here\n2. Line two is here\n3. Line three"
+    assert chatai.clean_performance(numbered, "song") == [
+        "Line one is here", "Line two is here", "Line three"]
+    fenced = "```\nDiesel dawn breaking\nMile markers count the hours\n" \
+             "Coffee finds the cup\n```"
+    assert len(chatai.clean_performance(fenced, "haiku")) == 3
+    # A lyric that merely starts with 'Sure'/'I'll' is a lyric.
+    lyric = ("Sure as the sun comes up over Reno,\nI'll be there with the "
+             "load by nine-oh,\nCoffee in the cup, eyes on the line,\n"
+             "Sure as the sun, I'll make it on time.")
+    assert len(chatai.clean_performance(lyric, "song")) == 4
+    for bad in ("@kvack is the best,\nbetter than the rest,\nput him to the test.",
+                "Rolling on down to example.com,\nWhere the freight is calm,\n"
+                "And nothing goes wrong.",
+                "Line one is fine \U0001F3B5\nLine two is fine\n"
+                "Line three is fine \U0001F3B6",
+                "Type !funfact for more,\nIt's what the bot is for,\nThe score.",
+                "NOTHING TO SAY", "Just one line.\nAnd a second."):
+        assert chatai.clean_performance(bad, "song") == [], bad
+    long = "\n".join(f"Line number {i} of the never ending song"
+                     for i in range(1, 12))
+    assert len(chatai.clean_performance(long, "song")) == 6
+    print("[PASS] a performance is cleaned line by line; one broken rail "
+          "refuses the piece")
+
+
+def test_sing_me_a_song_gets_a_song_over_several_messages():
+    """Live-fire: 'Docbot sing me a song' got one rambling line ABOUT a
+    song. Now the piece is written whole, the first line goes out at
+    once tagged to the asker, and the rest follow a gap apart - the way
+    a person would deliver it, with room for chat to react between."""
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0.3)
+    stamps = []
+    b._say = lambda text: (b.said.append(text),
+                           stamps.append(time.time()))
+    calls = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c, max_tokens=None: (
+        calls.append((u, max_tokens)) or _SONG)
+    try:
+        b._on_message("kvack", "#t",
+                      "Docbot sing me a song about the night shift",
+                      "kvack", "")
+        _drain_for(b, 0.3 * 3 + 0.6)
+    finally:
+        llm.chat_reply = orig
+    assert b.said == ["@kvack Rolling down the I-80 line,",
+                      "Coffee's cold but the load's on time,",
+                      "Oh the night shift hums, the night shift glows,",
+                      "Where the diesel goes, nobody knows."], b.said
+    gaps = [stamps[i + 1] - stamps[i] for i in range(3)]
+    assert all(g >= 0.2 for g in gaps), gaps         # paced, not a wall
+    # The model was asked for the piece, with its subject, at the bigger
+    # completion budget - under the one-line cap it never got past the
+    # preamble.
+    perf = [(u, m) for u, m in calls if "asked you to perform" in u]
+    assert perf and perf[0][1] == llm.PERFORMANCE_MAX_TOKENS, calls
+    assert "SUBJECT: the night shift" in perf[0][0], perf[0][0]
+    # It counted as the mention reply: the cooldown clock moved.
+    assert b._chat_ai_mention_last > 0
+    print("[PASS] 'sing me a song' gets a song over paced messages, the "
+          "first one tagged")
+
+
+def test_performances_have_a_subject_a_fallback_and_an_encore():
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0)
+    seen = []
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c, max_tokens=None: (
+        seen.append(u) or _POEM)
+    try:
+        # No subject: the model is pointed at the room, never at itself.
+        b._on_message("kvack", "#t", "I sleep on the floor by choice",
+                      "kvack", "")
+        b._on_message("hollie", "#t", "Docbot make me a poem", "hollie", "")
+        _drain(b)
+        _drain(b)
+        assert len(b.said) == 4 and b.said[0].startswith(
+            "@hollie Kvack sleeps"), b.said
+        prompt = next(u for u in seen if "asked you to perform" in u)
+        assert "No subject was given" in prompt, prompt
+        assert "kvack: I sleep on the floor" in prompt, prompt
+        # 'encore' repeats the last piece for whoever asked for it.
+        b.said.clear()
+        seen.clear()
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("kvack", "#t", "doc write a poem about the dog",
+                      "kvack", "")
+        _drain(b)
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("hollie", "#t", "doc encore!", "hollie", "")
+        _drain(b)
+        perf = [u for u in seen if "asked you to perform" in u]
+        assert len(perf) == 2 and perf[1].startswith("hollie asked") \
+            and "SUBJECT: the dog" in perf[1], perf
+        assert len(b.said) == 8 and b.said[4].startswith("@hollie "), b.said
+        # '!ask sing me a song' is the same request.
+        b.said.clear()
+        llm.chat_reply = lambda s, u, c, max_tokens=None: _SONG
+        b._reply_ask("kvack", "sing me a song about coffee")
+        _drain(b)
+        assert len(b.said) == 4 and b.said[0].startswith(
+            "@kvack Rolling"), b.said
+    finally:
+        llm.chat_reply = orig
+    # A rail broken twice: one retry, then an honest line in character -
+    # never a poem with the good lines and a hole where the bad one was.
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0)
+    n = []
+    llm.chat_reply = lambda s, u, c, max_tokens=None: (
+        n.append(1) if max_tokens else None) or \
+        "@kvack is the best,\nbetter than the rest,\nput him to the test."
+    try:
+        b._on_message("kvack", "#t", "doc rap for us", "kvack", "")
+        _drain(b)
+    finally:
+        llm.chat_reply = orig
+    assert len(n) == 2, n
+    assert b.said == ["@kvack " + chatai.performance_unavailable("rap")], b.said
+    # No model at all: the same honest line, not a Wikipedia fact about
+    # the word 'song'.
+    b = _bot(chat_ai_perform_delay=0)
+    b._on_message("kvack", "#t", "docbot sing me a song", "kvack", "")
+    _drain(b)
+    assert b.said == ["@kvack " + chatai.performance_unavailable("song")], b.said
+    # An OVERHEARD 'sing me a song' is never a cue: the bot performs only
+    # when asked.
+    b = _bot(llm_api_key="k", chat_ai_perform_delay=0)
+    asked = []
+    real = b._perform
+    b._perform = lambda nick, text: asked.append(text) or real(nick, text)
+    llm.chat_reply = lambda s, u, c, max_tokens=None: "NOTHING TO SAY"
+    try:
+        b._do_chime("kvack", "someone should sing me a song")
+    finally:
+        llm.chat_reply = orig
+    assert asked == [] and b.said == [], (asked, b.said)
+    print("[PASS] performances take a subject, fall back honestly, repeat "
+          "on 'encore', and never start unasked")
+
+
+def test_a_mods_announcement_answers_the_confused_room():
+    """Live-fire: a mod had the bot announce 'TruckingWithDoc is on the
+    phone, radio silence'. Two lines later a viewer said 'Your mic is
+    muted' / 'I assume because your codriver is sleeping' - and the bot
+    said nothing. Those lines were not addressed to it, so they were
+    ambient chimes: a 10% roll, five lines of recent chat and the
+    ten-minute cooldown the bot's own announcement had just started.
+    The one thing it knew for certain, it kept to itself.
+
+    Now a mod's announcement stands as a notice for chat_ai_notice_minutes:
+    anyone who sounds confused about the quiet stream - addressed to the
+    bot or not - gets it once, with no roll and no cooldown; the persona
+    sees it in every prompt while it stands; 'doc is back' clears it;
+    and a plain viewer cannot plant one."""
+    prompts = []
+    orig = llm.chat_reply
+
+    def reply(system, user, cfg, **kw):
+        prompts.append(user)
+        return "Copy that, hon - Doc's on the phone, radio silence for a bit."
+
+    llm.chat_reply = reply
+    b = _bot(llm_api_key="k")
+    try:
+        b._on_message("Hardclaws", "#t",
+                      "Docbot can you tell every one that @TruckingWithDoc "
+                      "is currently on the phone so we are in radio silence",
+                      "hardclaws", "moderator/1")
+        _drain(b)
+        assert b.said == ["@Hardclaws Copy that, hon - Doc's on the phone, "
+                          "radio silence for a bit."], b.said
+        # The exact two lines, seconds later: not addressed, cooldown
+        # running, room nearly empty - answered anyway, once.
+        b._on_message("Etchedchampion", "#t", "Your mic is muted",
+                      "etchedchampion", "")
+        _drain(b)
+        b._on_message("Etchedchampion", "#t",
+                      "I assume because your codriver is sleeping",
+                      "etchedchampion", "")
+        _drain(b)
+        assert b.said[1:] == [
+            "@Etchedchampion heads up: TruckingWithDoc is currently on the "
+            "phone so we are in radio silence"], b.said
+        # The relayed notice drops the @ so the man on the phone is not
+        # pinged every time it is repeated. Another confused viewer gets
+        # it; an unrelated line does not; a direct 'is his mic muted?'
+        # gets the certain answer rather than a persona guess.
+        b._on_message("kvack", "#t", "hello? can't hear anything",
+                      "kvack", "")
+        b._on_message("kvack", "#t", "is he afk", "kvack", "")
+        b._on_message("someone", "#t", "great climb earlier", "someone", "")
+        b._on_message("newguy", "#t", "docbot is his mic muted?",
+                      "newguy", "")
+        _drain(b)
+        assert [m.split(" ", 1)[0] for m in b.said[2:]] == [
+            "@kvack", "@newguy"], b.said
+        assert all(m.endswith("in radio silence") for m in b.said[2:])
+        # The persona is told the notice in every prompt while it stands.
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        prompts.clear()
+        b._on_message("kvack", "#t", "docbot hows your night going",
+                      "kvack", "")
+        _drain(b)
+        assert prompts and "STANDING NOTICE from the mods" in prompts[0] \
+            and "on the phone so we are in radio silence" in prompts[0], \
+            prompts[0][:300]
+        # 'doc is back' ends it: 'hello?' is ordinary chatter again.
+        b._chat_ai_mention_last = 0.0
+        b._chat_ai_mention_by.clear()
+        b._on_message("Hardclaws", "#t", "docbot tell everyone doc is back",
+                      "hardclaws", "moderator/1")
+        _drain(b)
+        assert b._chat_ai_notice is None
+        before = len(b.said)
+        b._on_message("late", "#t", "hello? mic muted?", "late", "")
+        _drain(b)
+        assert len(b.said) == before, b.said[before:]
+
+        # A viewer cannot make the bot announce things; a story request
+        # is not a notice; the switch turns it off; notices expire.
+        b = _bot(llm_api_key="k")
+        b._on_message("troll", "#t",
+                      "docbot tell everyone that the stream is over go home",
+                      "troll", "")
+        b._on_message("Hardclaws", "#t",
+                      "docbot tell everyone about the time you drove to "
+                      "alaska", "hardclaws", "moderator/1")
+        _drain(b)
+        assert b._chat_ai_notice is None
+        b = _bot(llm_api_key="k", chat_ai_notice_minutes=0)
+        b._on_message("Hardclaws", "#t",
+                      "docbot tell everyone doc is on the phone",
+                      "hardclaws", "moderator/1")
+        _drain(b)
+        assert b._chat_ai_notice is None
+        b = _bot(llm_api_key="k", chat_ai_notice_minutes=1)
+        b._on_message("TruckingWithDoc", "#t",
+                      "doc let chat know I'm on the phone, back in ten",
+                      "truckingwithdoc", "broadcaster/1")
+        _drain(b)
+        # First person is the MOD's, not the bot's.
+        assert b._chat_ai_notice[0] == \
+            "TruckingWithDoc is on the phone, back in ten", b._chat_ai_notice
+        b._chat_ai_notice = (b._chat_ai_notice[0], time.time() - 61, set())
+        before = len(b.said)
+        b._on_message("kvack", "#t", "your mic is muted", "kvack", "")
+        _drain(b)
+        assert len(b.said) == before and b._chat_ai_notice is None
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a mod's announcement answers 'your mic is muted' - once "
+          "each, no roll, no cooldown - until 'doc is back'")
+
+
+def test_live_data_questions_take_the_fast_lane():
+    """Live-fire: 'Docbot whats the weather currently in Brewster, NY' got
+    NOTHING - with weatherapi.com configured, no model in the loop. Two
+    rails built for persona chatter stood in front of the reading: the
+    60s mention cooldown (the bot had answered a different 'docbot ...'
+    moments earlier, so the question was 'held' for a minute), and the
+    single worker queue, where a job that waited behind someone else's
+    slow model call found the cooldown re-armed when its turn came and
+    was dropped without a log line. A weather or sunrise question is
+    data: answered now, on its own thread, never touching the mention
+    clock - paced at one reading per viewer per 15s (mods exempt)."""
+    import threading
+    wapi = {"location": {"name": "Brewster", "region": "New York",
+                         "country": "United States of America"},
+            "current": {"temp_f": 65.0, "temp_c": 18.3,
+                        "condition": {"text": "Partly cloudy"},
+                        "wind_mph": 5.6, "wind_kph": 9.0, "wind_dir": "NW",
+                        "precip_in": 0.0, "precip_mm": 0.0, "humidity": 55,
+                        "feelslike_f": 65.0, "feelslike_c": 18.3,
+                        "vis_miles": 9.0, "vis_km": 16.0}}
+    api_calls = []
+
+    def http(url, params=None, timeout=0):
+        assert url == funfacts.WEATHERAPI_API, url
+        api_calls.append(params["q"])
+        return wapi
+
+    def settle():
+        for t in threading.enumerate():
+            if t.name == "live-data":
+                t.join(5)
+
+    def clear():
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+
+    q = "Docbot whats the weather currently in Brewster, NY"
+    reading = ("Hardclaws, it is currently Partly cloudy in Brewster, New "
+               "York. 65°F (18°C). Feels like 65°F (18°C). Wind is blowing "
+               "from the NW at 6 mph (9 km/h). 55% humidity. Visibility: 9 "
+               "miles (16 km). Precipitation: 0.0 in (0.0 mm).")
+    saved = (funfacts._http_get_json, funfacts._osm_geocode, llm.chat_reply)
+    funfacts._http_get_json = http
+    funfacts._osm_geocode = lambda p: (_ for _ in ()).throw(
+        AssertionError("geocoded despite weatherapi"))
+    llm.chat_reply = lambda s, u, c, **kw: "Copy that, hon."
+    try:
+        # The exact live case: a different mention answered 10s ago.
+        clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("Hardclaws", "#t", "docbot you there?", "hardclaws",
+                      "moderator/1")
+        _drain(b)
+        b._on_message("Hardclaws", "#t", q, "hardclaws", "moderator/1")
+        settle()
+        _drain(b)
+        assert b.said == ["@Hardclaws Copy that, hon.", reading], b.said
+        assert not b._chat_ai_pending, b._chat_ai_pending
+        # The worker is busy with someone else's mention: both answered.
+        clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("kvack", "#t", "docbot you awake?", "kvack", "")
+        b._on_message("Hardclaws", "#t", q, "hardclaws", "moderator/1")
+        settle()
+        _drain(b)
+        assert sorted(b.said) == sorted([reading, "@kvack Copy that, hon."]), \
+            b.said
+        # The click-to-mention form, and the mention clock is untouched
+        # so the next persona question is still answered on time.
+        clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("Hardclaws", "#t", "@TruckingWithDocBot whats the "
+                      "weather currently in Brewster, NY", "hardclaws",
+                      "moderator/1")
+        settle()
+        assert b.said == [reading], b.said
+        b._on_message("kvack", "#t", "docbot hows your night", "kvack", "")
+        _drain(b)
+        assert b.said[-1] == "@kvack Copy that, hon.", b.said
+        # Pacing: a viewer looping 'docbot weather in X?' is one reading
+        # and one API call per 15s; mods are exempt.
+        clear()
+        api_calls.clear()
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        for place in ("Brewster, NY", "Scranton, PA", "Miami, FL"):
+            b._on_message("spammer", "#t", f"docbot weather in {place}?",
+                          "spammer", "")
+            settle()
+        assert len(b.said) == 1 and api_calls == ["Brewster, NY"], \
+            (b.said, api_calls)
+        b._live_data_last["spammer"] -= 16
+        b._on_message("spammer", "#t", "docbot weather in Reno, NV?",
+                      "spammer", "")
+        settle()
+        assert len(b.said) == 2, b.said
+        for place in ("Brewster, NY", "Scranton, PA"):
+            b._on_message("Hardclaws", "#t", f"docbot weather in {place}?",
+                          "hardclaws", "moderator/1")
+            settle()
+        assert len(b.said) == 4, b.said
+        # A sunrise question rides the same lane; everything down is an
+        # honest line, never silence.
+        assert chatai.live_data_question("doc when is sunset in brewster ny",
+                                         ["doc", "docbot"])
+        assert not chatai.live_data_question("docbot sunset was gorgeous",
+                                             ["doc", "docbot"])
+        clear()
+        funfacts._http_get_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("down"))
+        funfacts._osm_geocode = lambda p: None
+        b = _bot(llm_api_key="k", weatherapi_key="abc")
+        b._on_message("Hardclaws", "#t", q, "hardclaws", "moderator/1")
+        settle()
+        assert b.said and "couldn't fetch the current weather" in b.said[-1], \
+            b.said
+    finally:
+        funfacts._http_get_json, funfacts._osm_geocode, llm.chat_reply = saved
+        clear()
+    print("[PASS] weather/sunrise questions are answered at once, ahead of "
+          "the chat AI's cooldown and its worker queue")
+
+
+def test_game_and_count_controls_are_recognised():
+    """The parsers behind the working memory, on the lines the streamer
+    actually typed and the ones that must NOT fire. Pure functions."""
+    import ongoing
+    N = ("doc", "docbot", "truckingwithdocbot")
+    idle = {"activity": None, "tallies": {}}
+
+    def ctl(text, state=idle, strict=False):
+        return ongoing.control(text, state, N, strict=strict)
+
+    # -- a game is set up by asking for one
+    c = ctl("Docbot lets do a test run. Topic would be Cycling and lets "
+            "make it 3 rounds")
+    assert c and c.kind == "start" and c.topic == "Cycling" \
+        and c.rounds == 3, c
+    assert "3-round" in c.what and "Cycling" in c.what, c.what
+    c = ctl("docbot trivia time! topic: 80s music, 5 questions")
+    assert c.kind == "start" and c.topic == "80s music" and c.rounds == 5 \
+        and c.cadence is None, c              # '80s' is a decade, not 80 s
+    c = ctl("hey docbot, quiz us on world capitals")
+    assert c.kind == "start" and c.topic == "world capitals", c
+    c = ctl("lets do a cycling quiz, start now")
+    assert c.kind == "start" and c.go, c
+    # ...never by mentioning one, asking about one, or a bare test run
+    for line in ("is trivia tonight?", "do you like trivia?",
+                 "we played trivia last night lol", "you are the trivia host",
+                 "doc are you hosting a trivia game?", "lets do a test run",
+                 "I love a good quiz", "make it 3 rounds",
+                 "start the first round",              # no game yet
+                 "what is the current temperature in Rolla, Missouri?",
+                 "hows it going", "pick a number 1-100"):
+        assert ctl(line) is None, (line, ctl(line))
+
+    # -- inside a game: the host's controls
+    game = {"activity": {"what": "a 3-round Cycling quiz", "topic": "Cycling",
+                         "rounds": 3, "round": 1, "pending": None, "open": 1,
+                         "question": "Which part holds the pedals?",
+                         "asked_by": "Hardclaws", "log": [], "done": False},
+            "tallies": {}}
+    c = ctl("Docbot lets get Round 2 going. Give 30secs to answer then "
+            "start round 3 30secs after that", game)
+    assert c.kind == "round" and c.n == 2 and c.cadence == (30.0, 30.0), c
+    assert ctl("docbot start the first round", game).n == 1
+    assert ctl("round 2", game).n == 2
+    assert ctl("next question", game).n == 2
+    assert ctl("final round", game).n == 3
+    assert ctl("round 3 with 45 secs to answer", game).cadence == (45.0, None)
+    for line in ("whats the answer", "answer?", "times up", "who got it right"):
+        assert ctl(line, game).kind == "reveal", line
+    assert ctl("what round are we on?", game).kind == "status"
+    assert ctl("repeat the question", game).repeat
+    for line in ("game over", "thats it for the game", "cancel the game"):
+        assert ctl(line, game).kind == "end", line
+    assert ctl("who is winning", game).kind == "score"
+    # a guess, a lookup, smalltalk and an off-topic question are chat
+    for line in ("crankset", "is it the crankset?", "what is a crankset?",
+                 "you ok?", "hows it going",
+                 "what is the current temperature in Rolla, Missouri?",
+                 "round 2 was hard, give them 30 secs",
+                 "we're done here", "good game"):
+        assert ctl(line, game) is None, (line, ctl(line, game))
+    # the host's UN-addressed lines: only outright calls count
+    assert ctl("whats the answer", game, strict=True).kind == "reveal"
+    assert ctl("round 2", game, strict=True).n == 2
+    assert ctl("lets go", game, strict=True) is None
+    assert ctl("next", game, strict=True) is None
+    assert ctl("who is winning", game, strict=True) is None
+
+    # -- counts
+    c = ctl("docbot keep count of Dirty Lepages and we will tell the bot "
+            "when we spot one")
+    assert c.kind == "tally_start" and c.label == "Dirty Lepages" \
+        and c.key == "dirty lepage", c
+    assert ctl("keep track of how many chairs he breaks").label \
+        == "chairs he breaks"
+    counting = {"activity": None, "tallies": {
+        "dirty lepage": {"label": "Dirty Lepages", "count": 1, "by": "hardclaws",
+                         "since": 0, "updated": 0, "last": 0}}}
+    for line, n in (("dirty lepage!", 1), ("spotted one", 1), ("+1", 1),
+                    ("+2 dirty lepages", 2), ("another dirty lepage", 1),
+                    ("there's another one", 1), ("that counts", 1),
+                    ("that was a dirty lepage lol", 1)):
+        c = ctl(line, counting)
+        assert c and c.kind == "tally_add" and c.n == n, (line, c)
+    for line in ("how many dirty lepages so far?", "whats the count?",
+                 "dirty lepage count?", "what's the dirty lepage count",
+                 "how many so far?", "count check"):
+        assert ctl(line, counting).kind == "tally_query", line
+    assert ctl("scratch that", counting).kind == "tally_sub"
+    assert ctl("false alarm", counting).kind == "tally_sub"
+    assert ctl("set the dirty lepage count to 5", counting).n == 5
+    assert ctl("stop counting dirty lepages", counting).kind == "tally_stop"
+    assert ctl("reset the count", counting).kind == "tally_reset"
+    # a question ABOUT the thing, an opinion, or unrelated chat is not a bump
+    for line in ("whats a dirty lepage?", "did anyone see that dirty lepage?",
+                 "what do you think of dirty lepages?", "hows it going",
+                 "you have alot of useless facts", "another joke please",
+                 "what is the current temperature in Rolla, Missouri?"):
+        assert ctl(line, counting) is None, (line, ctl(line, counting))
+    # the thing counted must be postable
+    assert ongoing.tally_label("porn clips and we count them") is None
+    # cadence: times in a timing sentence only
+    assert ongoing.cadence("give them a minute") == (60.0, None)
+    assert ongoing.cadence("45s to answer and then keep going") == (45.0, 45.0)
+    assert ongoing.cadence("the 90s were great") is None
+    assert ongoing.cadence("5 questions") is None
+    assert ongoing.looks_like_question("Name the rider who won in 1999")
+    assert not ongoing.looks_like_question("Round 2 is right here.")
+    print("[PASS] game and count controls are recognised - and chat is not")
+
+
+def test_the_bot_hosts_the_quiz_it_was_asked_to_host():
+    """Live-fire, 2026-09-17: 'lets do a test run. Topic would be
+    Cycling and lets make it 3 rounds' -> the bot posed round 1
+    (crankset), then for 'lets get Round 2 going' it asked chat the
+    temperature in Rolla, Missouri, then explained it was 'just the
+    on-stream info bot', then went 'mangled in the gears' twice. Every
+    prompt was built from the last few HUMAN lines with the bot's own
+    lines and every earlier ask stripped: nothing said it was hosting.
+
+    Now the game is state the bot holds: the persona is TOLD what it is
+    hosting and where it is up to in every prompt, a round is a job the
+    model must perform (the line must BE a question, and a new one), the
+    answer is called by the host (or by the cadence he asked for), the
+    fact engine is not a back door while a round is open, a viewer
+    cannot run the game, and a restart mid-game is not amnesia."""
+    import ongoing
+    b = _bot(llm_api_key="k")
+    logs, prompts = [], []
+    b._log = logs.append
+    b._distill = lambda *a, **k: None
+    questions = iter(["Which part of a bike do the pedals attach to?",
+                      "Which part of a bike do the pedals attach to?",  # repeat
+                      "What is the name of the race with the yellow jersey?",
+                      "Round 3 is right here.",             # not a question
+                      "How many gears does a single-speed bike have?"])
+    answers = iter(["The crankset - and nobody in chat got it.",
+                    "The Tour de France - kvack had it.",
+                    "One. kvack takes it, thanks for playing."])
+    engine = []
+    orig_reply, orig_fact = llm.chat_reply, bot_mod.get_funfact
+    bot_mod.get_funfact = lambda q, o: (engine.append(q) or None)
+
+    def model(system, user, cfg=None, **kw):
+        prompts.append(user)
+        if "YOUR JOB RIGHT NOW" in user:
+            if "your line IS the round" in user:
+                return next(questions)
+            if "Time is up on round" in user:
+                return next(answers)
+        # An ordinary reply while the game runs - the persona knows.
+        return "Sit tight, the host calls time - I'm not saying."
+
+    llm.chat_reply = model
+    MOD = "broadcaster/1"
+
+    def say(nick, text, badges=""):
+        b._on_message(nick, "#t", text, nick.lower(), badges)
+        _drain(b)
+
+    def fire_timer():
+        t = b._ongoing_timer
+        assert t is not None, "no cadence step was scheduled"
+        t.cancel()
+        b._ongoing_timer = None
+        t.function(*t.args)
+        _drain(b)
+
+    try:
+        # A viewer cannot make the bot host a game.
+        say("kvack", "docbot lets do a 3 round movie quiz")
+        assert b.said[-1] == "@kvack " + ongoing.NOT_A_MOD_LINE, b.said
+        assert b._ongoing.current() is None
+        # The streamer can. The set-up is acknowledged without a model.
+        say("Hardclaws", "Docbot lets do a test run. Topic would be Cycling "
+            "and lets make it 3 rounds", MOD)
+        assert "3-round Cycling quiz" in b.said[-1] and "round 1" in b.said[-1], \
+            b.said[-1]
+        assert not prompts, "the set-up line went to the model"
+        # Round 1: the model writes the question, framed as the job.
+        say("Hardclaws", "docbot start the first round", MOD)
+        assert b.said[-1] == ("Round 1 of 3: Which part of a bike do the "
+                              "pedals attach to?"), b.said[-1]
+        assert "YOUR JOB RIGHT NOW" in prompts[-1] and \
+            "hosting a 3-round Cycling quiz" in prompts[-1], prompts[-1]
+        assert "round 1 of 3 is DUE" in prompts[-1], prompts[-1]
+        # A guess in chat is chat; a lookup aimed at the bot is held.
+        said_before = len(b.said)
+        say("kvack", "crankset")
+        assert len(b.said) == said_before
+        say("kvack", "docbot what part of a bike holds the pedals?")
+        assert engine == [], "the fact engine answered the quiz question"
+        assert "round 1 is open" in b.said[-1], b.said[-1]
+        # An ordinary question to the bot mid-game: the persona replies,
+        # and its prompt carries the game state and the open question.
+        b._chat_ai_mention_by.clear()
+        b._chat_ai_mention_last = 0.0
+        say("kvack", "docbot is it the crankset?")
+        assert b.said[-1] == "@kvack Sit tight, the host calls time - I'm not saying."
+        assert "WHAT IS GOING ON" in prompts[-1] and \
+            "round 1 of 3 is OPEN" in prompts[-1] and \
+            "pedals attach to" in prompts[-1], prompts[-1]
+        # A viewer cannot call the answer; the host can - by name or not.
+        b._ongoing_pace.clear()          # state answers: one per 15s each
+        say("kvack", "docbot whats the answer")
+        assert b.said[-1] == "@kvack " + ongoing.NOT_THE_HOST_LINE, b.said[-1]
+        say("Hardclaws", "whats the answer", MOD)
+        assert b.said[-1] == "Round 1 answer: The crankset - and nobody in " \
+            "chat got it.", b.said[-1]
+        assert "Time is up on round 1" in prompts[-1] and \
+            "pedals attach to" in prompts[-1], prompts[-1]
+        # Round 2 with a cadence. The model's first try repeats round 1:
+        # refused (one re-ask, with the miss named), the second posts.
+        say("Hardclaws", "Docbot lets get Round 2 going. Give 30secs to "
+            "answer then start round 3 30secs after that", MOD)
+        assert b.said[-1] == ("Round 2 of 3: What is the name of the race "
+                              "with the yellow jersey?"), b.said[-1]
+        assert any("repeated an earlier one" in l for l in logs), logs
+        assert "different from anything you asked before" in prompts[-1]
+        assert any("next game step (reveal 2) in 30s" in l for l in logs), logs
+        # The cadence runs the rest by itself: reveal 2, ask 3, reveal 3.
+        # Round 3's first try ('Round 3 is right here.') is not a
+        # question - the live-fire failure - and is never posted as one.
+        fire_timer()
+        assert b.said[-1] == "Round 2 answer: The Tour de France - kvack had it."
+        fire_timer()
+        assert b.said[-1] == ("Round 3 of 3: How many gears does a "
+                              "single-speed bike have?"), b.said[-1]
+        assert any("was not a question" in l for l in logs), logs
+        assert not any("right here" in x for x in b.said), b.said
+        fire_timer()
+        assert b.said[-1] == "Round 3 answer: One. kvack takes it, thanks for playing."
+        assert b._ongoing_timer is None, "a step was scheduled after the last round"
+        assert b._ongoing.current()["done"] is True
+        # Anyone can ask where things stand - answered from state.
+        b._ongoing_pace.clear()
+        say("kvack", "docbot what round are we on?")
+        assert "finished - all 3 rounds" in b.said[-1], b.said[-1]
+        # A restart mid-game is not amnesia: the state file has it all.
+        fresh = ongoing.Ongoing(b.cfg["ongoing_state_path"])
+        a = fresh.current()
+        assert a and a["round"] == 3 and a["done"] and \
+            len(fresh._questions(a)) == 3, a
+    finally:
+        llm.chat_reply = orig_reply
+        bot_mod.get_funfact = orig_fact
+    print("[PASS] the bot hosts the quiz it was asked to host, round by round")
+
+
+def test_a_count_survives_the_hour_and_is_never_guessed():
+    """Live-fire: 'keep count of Dirty Lepages and we will tell the bot
+    when we spot one' - the count reached 1; an hour later the bot had
+    no idea what a Dirty Lepage was. Nothing stored it: notes need
+    'take a mental note', the distill keeps only self-stated viewer
+    facts, and the room buffer had long rolled past it.
+
+    A count is arithmetic the bot does itself - no model near it: it
+    is opened by a mod, bumped by the mods (or anyone, with
+    chat_ai_count_anyone), read back by anyone, and it sits in every
+    persona prompt while it stands - and in ongoing.json across a
+    restart. The bot also cannot 'lose' it to a busy model: none of
+    these lines cost a model call."""
+    import ongoing
+    b = _bot(llm_api_key="k")
+    logs, prompts = [], []
+    b._log = logs.append
+    b._distill = lambda *a, **k: None
+    orig = llm.chat_reply
+    llm.chat_reply = lambda s, u, c=None, **k: (
+        prompts.append(u) or "Two so far, and the night is young.")
+    MOD = "broadcaster/1"
+
+    def say(nick, text, badges=""):
+        b._on_message(nick, "#t", text, nick.lower(), badges)
+        _drain(b)
+
+    try:
+        say("kvack", "docbot keep count of dirty lepages")
+        assert b.said[-1] == "@kvack " + ongoing.NOT_A_MOD_LINE, b.said
+        say("Hardclaws", "docbot keep count of Dirty Lepages and we will "
+            "tell the bot when we spot one", MOD)
+        assert "counting Dirty Lepages" in b.said[-1] and "at 0" in b.said[-1]
+        say("Hardclaws", "docbot dirty lepage!", MOD)
+        assert b.said[-1] == "@Hardclaws Dirty Lepages: 1."
+        # A viewer's bump is refused but answered; the number holds.
+        b._ongoing_pace.clear()
+        say("kvack", "docbot spotted one")
+        assert "Dirty Lepages is at 1" in b.said[-1] and "mods" in b.said[-1]
+        assert b._ongoing.tallies["dirty lepage"]["count"] == 1
+        # ...unless the config opens the count to the room.
+        b.cfg["chat_ai_count_anyone"] = True
+        say("kvack", "docbot another dirty lepage")
+        assert b.said[-1] == "@kvack Dirty Lepages: 2."
+        b.cfg["chat_ai_count_anyone"] = False
+        assert not prompts, "a count line reached the model"
+        # An hour later. The count is still exact, and it is in the
+        # persona's prompt for anything else that gets asked.
+        for v in b._ongoing.tallies.values():
+            v["since"] -= 3600
+            v["updated"] -= 3600
+            v["last"] -= 3600
+        b._chat_ai_mention_by.clear()
+        b._chat_ai_mention_last = 0.0
+        say("Hardclaws", "docbot how many dirty lepages so far?", MOD)
+        assert b.said[-1].startswith("@Hardclaws Dirty Lepages: 2 so far"), b.said[-1]
+        assert "1h ago" in b.said[-1], b.said[-1]
+        assert not prompts
+        say("Hardclaws", "docbot hows the ride going", MOD)
+        assert prompts and "Counts you are keeping" in prompts[-1] and \
+            "Dirty Lepages: 2" in prompts[-1], prompts[-1]
+        # Corrections, and the end of it.
+        say("Hardclaws", "docbot scratch that", MOD)
+        assert b.said[-1] == "@Hardclaws Dirty Lepages: 1."
+        say("Hardclaws", "docbot set the dirty lepage count to 4", MOD)
+        assert b.said[-1] == "@Hardclaws Dirty Lepages set to 4."
+        # A restart keeps it.
+        fresh = ongoing.Ongoing(b.cfg["ongoing_state_path"])
+        assert fresh.tallies["dirty lepage"]["count"] == 4
+        say("Hardclaws", "docbot stop counting dirty lepages", MOD)
+        assert b.said[-1] == "@Hardclaws done counting Dirty Lepages - final count 4."
+        assert not b._ongoing.tallies
+        # With nothing running, 'how many so far?' is chat again.
+        assert ongoing.control("how many so far?", b._ongoing.snapshot(),
+                               b._chat_ai_names) is None
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a count survives the hour, exact, with no model near it")
+
+
 def main():
     test_a_mention_gets_one_bounded_reply()
+    test_game_and_count_controls_are_recognised()
+    test_the_bot_hosts_the_quiz_it_was_asked_to_host()
+    test_a_count_survives_the_hour_and_is_never_guessed()
     test_chime_ins_are_gated()
     test_ambient_attempts_use_the_ambient_clock_only()
     test_the_streamer_can_address_the_bot_but_it_never_butts_in()
@@ -1454,7 +3228,15 @@ def main():
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
+    test_a_direct_answer_is_never_refused_for_reusing_a_word()
+    test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()
+    test_four_people_asking_at_once_all_get_answers()
+    test_distilling_is_paced_per_viewer()
+    test_news_questions_get_headlines_not_encyclopedia()
+    test_the_headlines_are_the_top_stories_not_a_page_title()
+    test_the_big_top_and_middle_earth_join_the_voices()
+    test_leaked_reasoning_is_never_posted()
     test_overheard_questions_never_get_funfacts()
     test_chimes_answer_what_was_said()
     test_mention_notes_are_remembered_and_recalled()
@@ -1463,6 +3245,7 @@ def main():
     test_the_follower_count_is_one_question_away()
     test_the_bot_cannot_repeat_itself()
     test_factual_questions_get_the_engine_first()
+    test_general_knowledge_goes_to_the_model_not_the_engine()
     test_mods_can_switch_the_bots_voice()
     test_no_failed_chat_attempt_is_silent()
     test_local_models_get_a_smaller_room_to_read()
@@ -1473,6 +3256,12 @@ def main():
     test_quiet_followups_track_real_human_lulls()
     test_ask_is_a_command_not_a_feature()
     test_nothing_is_recorded_while_the_feature_is_off()
+    test_performance_requests_are_recognised()
+    test_a_performance_is_cleaned_line_by_line()
+    test_sing_me_a_song_gets_a_song_over_several_messages()
+    test_performances_have_a_subject_a_fallback_and_an_encore()
+    test_a_mods_announcement_answers_the_confused_room()
+    test_live_data_questions_take_the_fast_lane()
     print("\nALL PASSED \u2714")
     return 0
 
