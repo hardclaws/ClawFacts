@@ -98,6 +98,10 @@ KNOWN_GOOD_SCOPES = {
     "channel:moderate", "channel:manage:moderators",
     "user:read:moderated_channels", "user:read:email",
     "whispers:read", "whispers:edit",
+    # Send Whisper (dev.twitch.tv/docs/api/reference#send-whisper) wants
+    # user:manage:whispers; receiving them over EventSub wants
+    # user:read:whispers. whispers:read/edit above are the retired pair.
+    "user:manage:whispers", "user:read:whispers",
 }
 
 

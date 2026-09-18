@@ -37,6 +37,14 @@ ACTIVATE_URL = "https://www.twitch.tv/activate"
 # other way to enforce "followers only". Adding a scope means the stored
 # token no longer has it - run `python3 bot.py --login` once after updating.
 #
+# moderator:manage:banned_users and user:manage:whispers are moderation.py:
+# the first is what lets the bot ban, time out and unban on a moderator's
+# word (Twitch switched the IRC /ban commands off on 18 Feb 2023, so Helix
+# is the only way left), the second lets it answer a moderator's private
+# message privately, because whispers over IRC went the same day. The
+# whisper scope is user:MANAGE:whispers - Twitch's reference page for Send
+# Whisper names that one, and an invented name aborts the whole device flow.
+#
 # Only scopes that actually exist belong in this list. It once carried
 # "moderation:read:moderators", which is not a Twitch scope at all - the real
 # one is "moderation:read" - and Twitch refused the whole device flow with
@@ -46,7 +54,8 @@ ACTIVATE_URL = "https://www.twitch.tv/activate"
 # broadcaster can never read another channel's moderator list. Whether *this*
 # bot is a moderator comes from the USERSTATE line Twitch sends on join, which
 # is free and needs no scope - see _note_own_state in bot.py.
-SCOPES = "chat:read chat:edit moderator:read:followers"
+SCOPES = ("chat:read chat:edit moderator:read:followers "
+          "moderator:manage:banned_users user:manage:whispers")
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
 TOKENS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tokens.json")
@@ -310,9 +319,14 @@ def describe_login(cfg: dict) -> list[str]:
             scopes = info.get("scope") or info.get("scopes") or []
             out.append(f"  validate     : OK as {info.get('login')!r}")
             out.append(f"  scopes       : {', '.join(scopes) or '(none)'}")
-            if "moderator:read:followers" not in scopes:
-                out.append("-> missing moderator:read:followers. Run: "
+            missing = [w for w in SCOPES.split() if w not in scopes]
+            if missing:
+                out.append("-> missing " + ", ".join(missing) + ". Run: "
                            "python3 bot.py --login")
+                if "moderator:manage:banned_users" in missing:
+                    out.append("   (!ban / !timeout / !unban will be refused "
+                               "by Twitch with 401 until the bot logs in "
+                               "again)")
         except OAuthError as exc:
             out.append(f"  validate     : REJECTED ({exc}) - Twitch will "
                        f"answer 401 on every Helix call")

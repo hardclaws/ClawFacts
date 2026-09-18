@@ -277,10 +277,68 @@ Quick-and-dirty local alternatives:
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
 | `!ask anything`       | The bot answers in its own voice (see the chat AI below).     |
 | `!subgoal`            | The sub goal and how many subs to go (mods maintain it).      |
+| `!ban <name> [reason]`| Bans somebody. **Moderators and lead mods only.**             |
+| `!timeout <name> [10m] [reason]` | Times somebody out (default 10 min). **Mods only.** |
+| `!unban <name>`       | Lifts a ban, or ends a timeout early. **Mods only.**          |
 
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
 keyless APIs and can be disabled with `"fun_commands": false`.
+
+## Moderation on request — !ban, !timeout, !unban
+
+The bot is a moderator of the channel, so a moderator can simply tell it
+what to do. It works typed in chat, and a private message to the bot works
+too when Twitch delivers one:
+
+```
+Leadmod: !ban spambot123 posting links
+Docbot:  @Leadmod spambot123 banned (posting links)
+Leadmod: !timeout chatty 10m caps
+Leadmod: !unban spambot123
+```
+
+**Who may ask.** In the channel the badges decide, and Twitch's *lead
+moderator* role counts — that role replaces the `moderator/1` badge with
+`lead_moderator/1`, so a bot that only looks for `moderator` silently
+ignores it. A private message carries no channel badges at all
+(moderator is a channel role), and a bot account cannot read another
+channel's moderator list — Helix requires `broadcaster_id` to be the
+token's own user id — so for a private ask the channel's own list is the
+authority: the broadcaster, the bot, and whoever is named in
+`"mod_logins"`. Anyone else is refused, and refused privately.
+
+**What Twitch needs from you.** Chat moderation commands went away from
+IRC on 18 February 2023 — `PRIVMSG #chan :/ban somebody` is accepted and
+does nothing — so this is Helix: `POST /helix/moderation/bans`, with
+`moderator_id` set to the bot's own user id, which is why the bot has to
+be a moderator. That needs the `moderator:manage:banned_users` scope, and
+`user:manage:whispers` to answer a private ask privately. **Both are new
+scopes, so run `python3 bot.py --login` once after upgrading** — a token
+issued before them will get a 401, and the bot says exactly that instead
+of failing quietly. `python3 bot.py --doctor` lists the scopes the stored
+token actually has.
+
+**A private message is best-effort, and here is the honest reason.**
+Twitch delivers whispers to bots through EventSub (a webhook endpoint),
+not through the IRC connection this bot uses, and it stopped letting bots
+*send* whispers over IRC on the same day the chat commands went. So the
+bot accepts a `WHISPER` line and a `PRIVMSG` addressed to itself if one
+ever arrives, answers through the Helix whisper API, and never posts the
+answer in the room — but if nothing arrives, nothing happens. The
+in-channel command is the reliable path; the whisper is a convenience.
+Sending whispers also needs a **verified phone number** on the bot's
+account, and Twitch allows 40 unique recipients a day.
+
+**Guard rails.** The bot will not ban the broadcaster, itself, or anyone
+on `mod_logins` (Twitch refuses those anyway, and says so in words rather
+than a bare `400`). A name has to look like a Twitch login
+(`[a-z0-9_]`) before anything is sent, so a stray sentence never reaches
+the API as a name. Lengths are `30s`, `10m`, `2h`, `1d` or a bare number
+of seconds, capped at Twitch's 14 days. Every action — and every refusal
+— is logged with who asked, and moderation still works while `!bot off`
+has the rest of the commands paused. Turn the whole thing off with
+`"mod_commands_enabled": false`.
 
 ## The chat AI: !ask, replies and chime-ins
 

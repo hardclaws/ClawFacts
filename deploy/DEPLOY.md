@@ -104,6 +104,15 @@ log in as the bot account, click **Authorize**. The server saves the login to
 `tokens.json` and — from now on — refreshes it automatically every 30 minutes
 and before every reconnect, so you never have to log in again.
 
+> **Upgrading an existing install?** The bot now also asks for
+> `moderator:manage:banned_users` and `user:manage:whispers` — the scopes
+> behind `!ban` / `!timeout` / `!unban` (Twitch switched the IRC `/ban`
+> commands off in Feb 2023, so moderation is a Helix call, and the bot has
+> to be a moderator of the channel). A token issued before them will get a
+> 401, so run `python3 bot.py --login` once after the upgrade. Check what
+> the stored token actually has with `sudo -u funfact python3 bot.py --doctor`;
+> it names any missing scope and says the same thing.
+
 > Already logged in on your PC? You can skip the login by copying the saved
 > tokens over instead:
 > `scp E:\funfact-bot\tokens.json funfact@YOUR-SERVER-IP:/opt/funfact-bot/`

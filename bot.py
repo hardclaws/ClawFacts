@@ -45,6 +45,7 @@ import reminders as reminders_mod
 import chatai
 import haul as haul_mod
 import memory as memory_mod
+import moderation as moderation_mod
 import ongoing as ongoing_mod
 import names as names_mod
 import trucker as trucker_mod
@@ -93,6 +94,11 @@ CB_COMMANDS = {"cb", "radio", "breaker"}
 # gets raided, so the switch moderates both paths.
 SO_COMMANDS = {"so", "shoutout"}
 BEEF_COMMANDS = {"beef"}
+# Moderation, on a moderator's word: !ban, !unban, !timeout. They work
+# typed in the channel and whispered to the bot, and they answer while
+# the bot is switched off - a ban is not a "bot feature" that pausing
+# should take away.
+MOD_COMMANDS = {"ban", "unban", "timeout", "untimeout"}
 # !revenge is its own command rather than a !beef subcommand: the player who
 # just lost types it in a hurry, and '!beef revenge' would collide with a
 # rival actually called Revenge.
@@ -227,6 +233,17 @@ DEFAULTS = {
     # environment (NVIDIA_API_KEY, GEMINI_API_KEY) adds its provider on
     # its own, so an empty list still means "use whatever keys you have".
     "llm_fallback_providers": [],
+    # Moderation on request: a moderator of THIS channel can ask the bot
+    # to ban, time out or unban somebody - typed in the room or sent to
+    # the bot privately. The bot itself has to be a moderator for Twitch
+    # to accept the call at all, and the token needs the
+    # moderator:manage:banned_users scope (run python3 bot.py --login once
+    # after an upgrade). mod_logins is who may ask privately: a whisper
+    # carries no channel badges, so the channel's own list is the
+    # authority there. The broadcaster is always allowed.
+    "mod_commands_enabled": True,
+    "mod_logins": [],
+    "mod_timeout_seconds": 600,
     "chat_ai_names": ["doc", "docbot"],
     "bot_personality": "",
     # The chat AI's memory: one SQLite file. Messages are pruned after
@@ -512,6 +529,13 @@ class TwitchBot:
         # first command so a failed Helix call can never block startup.
         self._access = access.AccessControl(cfg, self._build_helix(cfg))
         self._broadcaster_id = ""
+        # Moderation on request (see moderation.py). Shares the access
+        # client, so a refreshed token reaches it without a restart.
+        self._moderator = moderation_mod.Moderator(
+            self._access.helix, nick=self.nick or "", log=self._log)
+        # Private replies are rate-limited per sender: a whisper costs a
+        # Helix call and Twitch allows 40 recipients a day.
+        self._pm_last = {}
         self._last_probe = 0.0              # last follower-permission probe
         self._follows_start = None           # followers at startup
         self.paused = False                 # !bot off (moderators only)
@@ -724,6 +748,10 @@ class TwitchBot:
         mod, badges = tags.get("mod"), tags.get("badges", "")
         if mod is None and not badges:
             return                          # nothing to learn from this line
+        # USERSTATE also carries OUR OWN user id, which is the
+        # moderator_id every Helix moderation call has to name. Free here;
+        # an API round trip otherwise.
+        self._moderator.set_own_id(tags.get("user-id", ""))
         # lead_moderator/1 too: the role replaces the moderator badge, so
         # without this a lead-mod bot would be told it is not a moderator.
         is_mod = (mod == "1") or ("moderator/1" in badges) \
@@ -941,6 +969,17 @@ class TwitchBot:
             login = (login_match.group(1) if login_match else nick).lower()
             self._on_message(nick, target, message, login,
                              tags.get("badges", ""))
+        elif command == "WHISPER":
+            # A private message. Twitch stopped letting bots SEND these
+            # over IRC in Feb 2023 and no longer documents receiving them,
+            # so this path may never fire - which is exactly why the same
+            # commands also work in the channel. When it does fire, the
+            # answer goes back out through Helix, never into the room.
+            match = re.match(r":([^!]+)!", src)
+            wlogin = (match.group(1) if match else "?").lower()
+            wnick = tags.get("display-name") or wlogin
+            wtext = trailing[1:] if trailing.startswith(":") else trailing
+            self._on_private(wnick, wlogin, tags.get("badges", ""), wtext)
         elif command == "USERNOTICE":
             # Twitch sends this for subs, gift subs and - the one that matters
             # here - raids. Nothing handled it before, so raids were invisible.
@@ -961,6 +1000,14 @@ class TwitchBot:
     def _on_message(self, nick: str, target: str, message: str,
                     login: str = "", badges: str = "") -> None:
         prefix = self.cfg.get("prefix", "!")
+        # A message sent to the bot itself rather than to the room. It
+        # must never be answered in the channel: '!ban somebody' over a
+        # private message would post that name in public chat, and it must
+        # not reach the chat AI's ear as room context either.
+        if target and not target.startswith("#") \
+                and target.lower() != (self.channel or "").lstrip("#").lower():
+            self._on_private(nick, login or nick.lower(), badges, message)
+            return
         human = (nick or "").lower() != (self.nick or "").lower()
         # Only HUMAN lines drive silence and flow. Counting the bot's own IRC
         # echo makes an autonomous timer influence its own activity detector.
@@ -1045,6 +1092,13 @@ class TwitchBot:
         # off, for the same reason !so and !cb do.
         if command in BEEF_COMMANDS and self._beef_switch(nick, badges,
                                                           argument):
+            return
+
+        # !ban / !unban / !timeout: moderators and lead mods only, and
+        # deliberately reachable while the bot is switched off - pausing
+        # the fun-fact bot must not take the room's moderation with it.
+        if command in MOD_COMMANDS:
+            self._mod_command(nick, login, badges, command, argument)
             return
 
         if command in REMINDER_COMMANDS:
@@ -1180,6 +1234,175 @@ class TwitchBot:
             self._say(f"@{nick} usage: {pre}bot on | {pre}bot off | "
                       f"{pre}bot status")
         self._log(f"!bot {argument or 'status'} from {nick} -> paused={self.paused}")
+
+    # ---- private messages and moderation ------------------------------
+    def _on_private(self, nick: str, login: str, badges: str,
+                    message: str) -> None:
+        """A message sent to the bot itself: moderation, or a pointer.
+
+        Nothing here is ever answered in the channel. Twitch stopped
+        letting bots send whispers over IRC in Feb 2023 and no longer
+        documents delivering them, so a private ask may simply never
+        arrive - the same command typed in the room is the reliable path,
+        and says so when a private one is refused.
+        """
+        message = " ".join((message or "").split())
+        self._log(f"private message from {nick or login}: {message[:100]!r}")
+        prefix = self.cfg.get("prefix", "!")
+        if not message.startswith(prefix):
+            return
+        body = message[len(prefix):].strip()
+        command, _, argument = body.partition(" ")
+        command = command.lower()
+        if command in MOD_COMMANDS:
+            self._mod_command(nick, login, badges, command, argument,
+                              private=True)
+            return
+        self._reply_private(
+            login, f"{prefix}{command} is a channel command - say it in "
+            f"{self.channel}. For mods, {prefix}ban, {prefix}timeout and "
+            f"{prefix}unban work here too.")
+
+    def _reply_private(self, login: str, text: str) -> bool:
+        """Answer a private message privately, through Helix.
+
+        Rate-limited per sender: a whisper is an API call, Twitch allows
+        40 recipients a day, and a bot that answers every message it is
+        sent is a spam vector.
+        """
+        login = (login or "").strip().lower()
+        now = time.time()
+        if now - self._pm_last.get(login, 0.0) < 20.0:
+            self._log(f"private reply to {login} skipped (too soon)")
+            return False
+        self._pm_last[login] = now
+        return self._moderator.whisper(login, text)
+
+    def _mod_authorised(self, login: str, badges: str,
+                        private: bool = False) -> bool:
+        """May THIS sender ask the bot to moderate the room?"""
+        if not self.cfg.get("mod_commands_enabled", True):
+            return False
+        # In the channel the badges are the authority, and a lead
+        # moderator counts: Twitch replaces the moderator badge with
+        # lead_moderator/1, so a tool that looks only for "moderator"
+        # silently ignores the role.
+        if access.tier_from_badges(badges or "") in ("broadcaster",
+                                                     "moderator"):
+            return True
+        if not private:
+            return False
+        # A whisper carries no channel badges - moderator is a channel
+        # role - and a bot account cannot read another channel's
+        # moderator list: Helix wants broadcaster_id to be the token's own
+        # user id. So for a private ask the channel's own list decides.
+        login = (login or "").strip().lower()
+        return bool(login) and login in self._mod_logins()
+
+    def _mod_logins(self) -> set:
+        """Who may ask privately: mod_logins, the broadcaster, the bot."""
+        names = {str(n).strip().lstrip("#@").lower()
+                 for n in (self.cfg.get("mod_logins") or []) if str(n).strip()}
+        names.add((self.channel or "").lstrip("#").lower())
+        names.add((self.nick or "").lower())
+        names.discard("")
+        return names
+
+    def _mod_blocked(self, target: str) -> str:
+        """Who the bot will not touch, even on a moderator's word."""
+        if not moderation_mod.LOGIN_RE.match(target or ""):
+            return (f"{target!r} is not a Twitch username (letters, numbers "
+                    f"and underscore only)")
+        if target == (self.channel or "").lstrip("#").lower():
+            return f"{target} is the broadcaster"
+        if target == (self.nick or "").lower():
+            return "I am not banning myself"
+        if target in self._mod_logins():
+            return (f"{target} is on mod_logins, and Twitch does not let me "
+                    f"ban a moderator")
+        return ""
+
+    def _mod_reply(self, nick: str, login: str, private: bool,
+                   text: str) -> None:
+        """Answer where the ask came from - a whisper stays a whisper."""
+        if private:
+            if not self._reply_private(login, text):
+                self._log(f"(private answer to {login} not delivered: {text})")
+        else:
+            self._say(f"@{nick} {text}")
+
+    def _mod_command(self, nick: str, login: str, badges: str, command: str,
+                     argument: str, private: bool = False) -> None:
+        """!ban <name> [reason] | !timeout <name> [10m] [reason] | !unban."""
+        pre = self.cfg.get("prefix", "!")
+        if not self.cfg.get("mod_commands_enabled", True):
+            self._mod_reply(nick, login, private,
+                            f"moderation commands are switched off "
+                            f"(mod_commands_enabled).")
+            return
+        if not self._mod_authorised(login, badges, private):
+            self._log(f"{pre}{command} refused - {nick or login} is not a "
+                      f"moderator of {self.channel}")
+            if private:
+                self._reply_private(
+                    login, f"only moderators of {self.channel} can ask me to "
+                    f"{command}.")
+            return
+        words = " ".join((argument or "").split()).split(" ")
+        target = access.clean_login(words[0]).lower() if words[0] else ""
+        if not target:
+            usage = " [10m] [reason]" if command == "timeout" else " [reason]"
+            self._mod_reply(nick, login, private,
+                            f"usage: {pre}{command} <twitch name>{usage}")
+            return
+        blocked = self._mod_blocked(target)
+        if blocked:
+            self._mod_reply(nick, login, private, blocked)
+            return
+        duration, reason = None, " ".join(words[1:])
+        if command == "timeout":
+            try:
+                default = int(self.cfg.get("mod_timeout_seconds")
+                              or moderation_mod.DEFAULT_TIMEOUT)
+            except (TypeError, ValueError):
+                default = moderation_mod.DEFAULT_TIMEOUT
+            duration = moderation_mod.parse_duration(
+                words[1] if len(words) > 1 else "", default)
+            if duration is None:
+                self._mod_reply(nick, login, private,
+                                f"{words[1]!r} is not a length I know - try "
+                                f"30s, 10m, 2h or 1d")
+                return
+            reason = " ".join(words[2:])
+        if not self._moderator.usable:
+            self._mod_reply(nick, login, private,
+                            "I cannot moderate yet: "
+                            + (self._moderator.problem()
+                               or "no Twitch login"))
+            return
+        self._log(f"{pre}{command} {target} asked by {nick or login}"
+                  f"{' (private)' if private else ''}"
+                  + (f" for {duration}s" if duration else "")
+                  + (f" reason={reason[:60]!r}" if reason.strip() else ""))
+
+        def _do():
+            # Helix can take a few seconds; the IRC read loop must not
+            # wait for it, or chat stalls behind a moderation call.
+            try:
+                if command in ("unban", "untimeout"):
+                    res = self._moderator.unban(target)
+                else:
+                    res = self._moderator.ban(target, reason.strip(),
+                                              duration=duration)
+                self._mod_reply(nick, login, private,
+                                res.note if res.ok
+                                else f"could not {command}: {res.note}")
+            except Exception as exc:
+                self._log(f"[mod] {command} {target} failed: {exc!r}")
+                self._mod_reply(nick, login, private,
+                                f"could not {command} {target}: {exc!r}")
+
+        threading.Thread(target=_do, name="mod-action", daemon=True).start()
 
     # ---- reminders and the cargo board --------------------------------
     def _is_mod(self, badges: str) -> bool:
@@ -3742,6 +3965,9 @@ class TwitchBot:
             if self.cfg.get("cb_command_enabled", True) else None,
             f"{prefix}so <name> - shout a channel out (mods only)"
             if self.cfg.get("shoutout_enabled", True) else None,
+            f"{prefix}ban / {prefix}timeout / {prefix}unban <name> - "
+            f"moderation (mods only)"
+            if self.cfg.get("mod_commands_enabled", True) else None,
             f"{prefix}beef <name> [topic] - start a feud ({prefix}beef "
             f"stats for the standings, {prefix}revenge after a loss)"
             if self.cfg.get("beef_enabled", True) else None,

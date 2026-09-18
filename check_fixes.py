@@ -20,6 +20,8 @@ def main() -> int:
     import os
     import tempfile
 
+    import auth as _auth
+    import access as access_mod
     import bot as _bot
     import customcmds as _cc_mod
     import shoutout as _so
@@ -1101,6 +1103,102 @@ def main() -> int:
             return False
         finally:
             _llm2.urllib.request.urlopen = original
+
+    def _mods_can_ban():
+        """A moderator's word bans somebody - a viewer's word does nothing.
+
+        Twitch switched the IRC /ban commands off in Feb 2023, so this is
+        a Helix POST naming the bot as moderator_id; a lead moderator's
+        badge counts, and a private ask is answered privately.
+        """
+        import io as _io
+        import json as _json
+        import threading as _th
+        import urllib.error as _ue
+
+        import moderation as _mod
+
+        calls = []
+
+        def _fake(req, timeout=8):
+            calls.append((req.get_method(), req.full_url,
+                          (req.data or b"").decode("utf-8")))
+            if "/helix/users" in req.full_url:
+                login = req.full_url.split("login=")[-1]
+                return _io.BytesIO(_json.dumps(
+                    {"data": [{"id": "999", "login": login}]}
+                ).encode("utf-8"))
+            return _io.BytesIO(_json.dumps({"data": [{
+                "user_id": "999", "end_time": None}]}).encode("utf-8"))
+
+        cfg = dict(
+            _bot.DEFAULTS, nick="Docbot", channel="#doc",
+            mod_logins=["Leadmod"],
+            memory_db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+            beef_state_path=os.path.join(tempfile.mkdtemp(), "b.json"),
+            persona_state_path=os.path.join(tempfile.mkdtemp(), "p.json"),
+            subgoal_state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+        )
+        b = _bot.TwitchBot(cfg)
+        b._distill = lambda *a, **k: None
+        b._log = lambda line: None
+        said = []
+        b._say = said.append
+        b._moderator = _mod.Moderator(
+            access_mod.Helix("cid", "tok", "111"), nick="docbot")
+        b._moderator.moderator_id = "777"
+        _orig = _mod.urllib.request.urlopen
+        _mod.urllib.request.urlopen = _fake
+        try:
+            if not b._mod_authorised("leadmod", "lead_moderator/1"):
+                return False
+            if b._mod_authorised("viewer", "subscriber/3"):
+                return False
+            if not b._mod_authorised("leadmod", "", private=True):
+                return False
+            if b._mod_authorised("stranger", "", private=True):
+                return False
+
+            def _join():
+                for t in _th.enumerate():
+                    if t.name == "mod-action":
+                        t.join(5)
+
+            b._on_message("Viewer", "#doc", "!ban spammer", "viewer",
+                          "subscriber/3")
+            _join()
+            if calls or said:
+                return False
+            b._on_message("Leadmod", "#doc", "!ban Spammer link spam",
+                          "leadmod", "lead_moderator/1")
+            _join()
+            bans = [c for c in calls if "moderation/bans" in c[1]]
+            if len(bans) != 1 or bans[0][0] != "POST":
+                return False
+            if "broadcaster_id=111&moderator_id=777" not in bans[0][1]:
+                return False
+            body = _json.loads(bans[0][2])
+            if body != {"data": {"user_id": "999",
+                                 "reason": "link spam"}}:
+                return False
+            if not any("banned" in line for line in said):
+                return False
+            # A private ask stays private: no line in the room.
+            said.clear()
+            calls.clear()
+            whispers = []
+            b._moderator.whisper = lambda login, text: (
+                whispers.append((login, text)), True)[1]
+            b._pm_last.clear()
+            b._on_message("Leadmod", "docbot", "!unban spammer", "leadmod",
+                          "")
+            _join()
+            if said or not whispers:
+                return False
+            return [c[0] for c in calls
+                    if "moderation/bans" in c[1]] == ["DELETE"]
+        finally:
+            _mod.urllib.request.urlopen = _orig
 
     def _provider_chain_walks():
         """An ordered list of providers: one dead key is skipped, not fatal.
@@ -2383,13 +2481,18 @@ def main() -> int:
              dict(__import__("bot").DEFAULTS, nick="n", channel="#c",
                   oauth_token="oauth:x")), "_diagnose_access")),
         ("only scopes Twitch actually has are requested at login",
-         # "moderation:read:moderators" is not a Twitch scope. One invented
-         # name aborts the whole device flow with "invalid scope requested",
-         # so the bot could not log in at all.
+         # "moderation:read:moderators" is not a Twitch scope, and neither
+         # is "user:write:whispers" - Send Whisper wants user:MANAGE:
+         # whispers (dev.twitch.tv/docs/api/reference#send-whisper). One
+         # invented name aborts the whole device flow with "invalid scope
+         # requested", so the bot could not log in at all.
          "moderation:read:moderators" not in __import__("auth").SCOPES
+         and "user:write:whispers" not in __import__("auth").SCOPES
          and all(x in {"chat:read", "chat:edit", "moderator:read:followers",
                        "moderation:read", "channel:moderate",
-                       "moderator:read:chatters"}
+                       "moderator:read:chatters",
+                       "moderator:manage:banned_users",
+                       "user:manage:whispers"}
                  for x in __import__("auth").SCOPES.split())),
         ("the bot learns its own moderator status from chat, not the API",
          hasattr(__import__("bot").TwitchBot(
@@ -2648,6 +2751,12 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("a moderator's word bans; a viewer's word does nothing",
+         "moderator:manage:banned_users" in _auth.SCOPES
+         and "user:manage:whispers" in _auth.SCOPES
+         and "mod_logins" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and _mods_can_ban()),
         ("an ordered provider list: one dead key is skipped, not fatal",
          callable(_llm2.fallback_providers)
          and _llm2.fallback_providers({}) == []
