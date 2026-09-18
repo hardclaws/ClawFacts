@@ -218,6 +218,15 @@ DEFAULTS = {
     "llm_fallback_key": "",
     "llm_fallback_base_url": "",
     "llm_fallback_model": "",
+    # ...or a whole ordered list of them, each with its own key, base and
+    # model chain: Groq -> NVIDIA NIM -> Gemini -> OpenRouter. Every one
+    # has its own rest window, so a dead key on one is skipped instead of
+    # taking the next provider down with it. Entries look like
+    # {"base_url": "...", "key": "...", "model": "a, b"} - or name a
+    # "key_env" and keep the secret in bot.env. A key already in the
+    # environment (NVIDIA_API_KEY, GEMINI_API_KEY) adds its provider on
+    # its own, so an empty list still means "use whatever keys you have".
+    "llm_fallback_providers": [],
     "chat_ai_names": ["doc", "docbot"],
     "bot_personality": "",
     # The chat AI's memory: one SQLite file. Messages are pruned after
@@ -443,6 +452,24 @@ def load_config(path: str, require: bool = True) -> dict:
             cfg["llm_fallback_key"] = os.environ.get(
                 "GROQ_API_KEY", "").strip()
 
+    # The ordered fallback list, normalized: a list of dicts, junk dropped
+    # with a line instead of a silent no-op. A provider entry may carry its
+    # key inline or name a "key_env" - the second keeps the secret in
+    # bot.env, where the panel never writes it. llm.py adds any provider
+    # whose key is already in the environment, so this list is only for the
+    # order and the models you want.
+    providers = cfg.get("llm_fallback_providers")
+    if isinstance(providers, dict):
+        providers = [providers]
+    clean = []
+    for item in (providers or []):
+        if isinstance(item, dict) and (item.get("base_url") or item.get("base")):
+            clean.append(item)
+        else:
+            print(f"[config] llm_fallback_providers entry ignored (needs a "
+                  f"base_url): {item!r}", flush=True)
+    cfg["llm_fallback_providers"] = clean
+
     # The OAuth token is optional here — it can come from the auto-login flow.
     # `require` is False for --doctor: a half-finished config is exactly what
     # you are diagnosing, so refusing to load it would hide the answer.
@@ -581,6 +608,10 @@ class TwitchBot:
                                       or cfg.get("llm_fallback_url", "")),
             "llm_fallback_model": (cfg.get("llm_fallback_model")
                                    or cfg.get("llm_fallback_model_name", "")),
+            # The ordered provider list travels with the options too - the
+            # chat client only ever sees this dict, not cfg.
+            "llm_fallback_providers": list(
+                cfg.get("llm_fallback_providers") or []),
             "llm_no_think": bool(cfg.get("llm_no_think", False)),
             # Deliberately absent from DEFAULTS (llm.py chooses hosted/local
             # defaults); preserving a user override here does not create one.
@@ -3987,30 +4018,30 @@ def _log_llm_provider(cfg: dict) -> None:
     # supposed fallback had never become an endpoint.
     try:
         import llm as llm_mod
-        fb = llm_mod.fallback_endpoint(cfg)
+        providers = llm_mod.fallback_providers(cfg)
         problem = llm_mod.fallback_problem(cfg)
     except Exception as exc:
         print(f"[llm] fallback status unavailable: {exc!r}")
         return
-    if not fb:
-        level = "MISCONFIGURED" if any((cfg.get(k) or "").strip() for k in (
-            "llm_fallback_key", "llm_fallback_api_key",
-            "llm_fallback_base_url", "llm_fallback_url",
-            "llm_fallback_model", "llm_fallback_model_name")) else "OFF"
+    if not providers:
+        level = "MISCONFIGURED" if (cfg.get("llm_fallback_providers")
+                                    or any((cfg.get(k) or "").strip() for k in (
+                                        "llm_fallback_key", "llm_fallback_api_key",
+                                        "llm_fallback_base_url", "llm_fallback_url",
+                                        "llm_fallback_model",
+                                        "llm_fallback_model_name"))) else "OFF"
         print(f"[llm] fallback {level} — {problem}")
         return
-    fbase, fkey, fmodel = fb
-    if "openrouter" in fbase.lower():
-        fprovider = "OpenRouter"
-    elif "groq" in fbase.lower():
-        fprovider = "Groq"
-    elif llm_mod._is_local(fbase):
-        fprovider = "local Ollama"
-    else:
-        fprovider = fbase
-    fmasked = ("(no key)" if llm_mod._is_local(fbase) else
-               (f"{fkey[:4]}…{fkey[-4:]}" if len(fkey) > 10 else "(set)"))
-    print(f"[llm] fallback READY — {fprovider}, model {fmodel}, key {fmasked}")
+    # Every provider in the chain, in the order a line will be tried. One
+    # line each: a chain that quietly stops at the first dead key is the
+    # exact failure this list exists to prevent.
+    for i, (fbase, fkey, fmodels) in enumerate(providers):
+        fprovider = llm_mod.provider_name(fbase)
+        fmasked = ("(no key)" if llm_mod._is_local(fbase) else
+                   (f"{fkey[:4]}…{fkey[-4:]}" if len(fkey) > 10 else "(set)"))
+        label = "fallback READY" if i == 0 else f"fallback #{i + 1} READY"
+        print(f"[llm] {label} — {fprovider}, "
+              f"model {', '.join(fmodels)}, key {fmasked}")
 
 
 def run_selftest(cfg: dict) -> int:
@@ -4042,6 +4073,7 @@ def run_selftest(cfg: dict) -> int:
         "llm_fallback_key": cfg.get("llm_fallback_key", ""),
         "llm_fallback_base_url": cfg.get("llm_fallback_base_url", ""),
         "llm_fallback_model": cfg.get("llm_fallback_model", ""),
+        "llm_fallback_providers": list(cfg.get("llm_fallback_providers") or []),
         "google_api_key": cfg.get("google_api_key", ""),
         "google_cx": cfg.get("google_cx", ""),
         "serper_api_key": cfg.get("serper_api_key", ""),

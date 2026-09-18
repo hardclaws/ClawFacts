@@ -1102,6 +1102,70 @@ def main() -> int:
         finally:
             _llm2.urllib.request.urlopen = original
 
+    def _provider_chain_walks():
+        """An ordered list of providers: one dead key is skipped, not fatal.
+
+        Groq spent -> NVIDIA NIM key rejected -> Gemini answers; and on the
+        NEXT line NIM is not asked again, because its own breaker is open
+        while Gemini's is not. Each provider also gets its own request
+        shape (NIM wants max_tokens; Gemini 3.x gets the reasoning budget).
+        """
+        import io as _io
+        import json as _json
+        import urllib.error as _ue
+
+        nim = "https://integrate.api.nvidia.com/v1"
+        gem = "https://generativelanguage.googleapis.com/v1beta/openai"
+        groq = "https://api.groq.com/openai/v1"
+        cfg = {"llm_api_key": "gsk", "llm_base_url": groq,
+               "llm_model": "openai/gpt-oss-120b",
+               "llm_fallback_providers": [
+                   {"base_url": nim, "key": "nvapi-x",
+                    "model": "openai/gpt-oss-120b"},
+                   {"base_url": gem, "key": "gem-x",
+                    "model": "gemini-3.8-flash"}]}
+        bodies, hits = [], []
+
+        def _fake(req, timeout=60):
+            hits.append(req.full_url)
+            bodies.append(req.data.decode("utf-8"))
+            if req.full_url.startswith(groq):
+                raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                    _io.BytesIO(b"{}"))
+            if req.full_url.startswith(nim):
+                raise _ue.HTTPError(req.full_url, 401, "bad key", {},
+                                    _io.BytesIO(b"{}"))
+            return _io.BytesIO(_json.dumps({"choices": [{"message": {
+                "content": "Gemini line."}}]}).encode("utf-8"))
+
+        _orig = _llm2.urllib.request.urlopen
+        _llm2.urllib.request.urlopen = _fake
+        try:
+            _llm2.reset_disable_state()
+            if [p[0] for p in _llm2.fallback_providers(cfg)] != [nim, gem]:
+                return False
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            if got != "Gemini line." or hits != [
+                    groq + "/chat/completions", groq + "/chat/completions",
+                    nim + "/chat/completions", gem + "/chat/completions"]:
+                return False
+            gem_body = _json.loads(bodies[-1])
+            if not (gem_body.get("reasoning_effort") == "low"
+                    and "max_completion_tokens" in gem_body
+                    and "temperature" not in gem_body):
+                return False
+            if not (_llm2._fallback_unavailable(nim)
+                    and not _llm2._fallback_unavailable(gem)):
+                return False
+            # Next line: NIM is skipped for the session, Gemini answers.
+            hits.clear()
+            got = _llm2.chat_reply("s", "u" * 20, cfg)
+            return got == "Gemini line." and hits == [
+                gem + "/chat/completions"]
+        finally:
+            _llm2.urllib.request.urlopen = _orig
+            _llm2.reset_disable_state()
+
     def _bot_forwards_chat_options():
         """The provider test can pass while the real bot still drops the
         fallback fields when it builds _opts. Exercise that handoff itself."""
@@ -2584,6 +2648,14 @@ def main() -> int:
          and "llm_fallback_key" in pathlib.Path(
              "config.example.json").read_text(encoding="utf-8")
          and _chat_falls_back()),
+        ("an ordered provider list: one dead key is skipped, not fatal",
+         callable(_llm2.fallback_providers)
+         and _llm2.fallback_providers({}) == []
+         and "llm_fallback_providers" in pathlib.Path(
+             "config.example.json").read_text(encoding="utf-8")
+         and "NVIDIA_API_KEY" in pathlib.Path(
+             "deploy/bot.env.example").read_text(encoding="utf-8")
+         and _provider_chain_walks()),
         ("OpenRouter HTTP-200 errors keep their code and explanation",
          _openrouter_200_error_is_explicit()
          and "fallback NOT READY" in pathlib.Path(

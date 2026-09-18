@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import time
 import urllib.error
@@ -94,8 +95,11 @@ _DANGLING_TAIL = re.compile(
 # by default: live-fire the 550b ultra took 24-34 s a line and twice
 # narrated its reasoning instead of answering. Sending it the reasoning
 # budget + low effort like the others keeps the answer inside the cap.
+# Gemini 3.x is the same story: it always thinks, so a plain `max_tokens`
+# ask has its answer squeezed out by the thinking it does first.
 _REASONING = re.compile(
-    r"(^|[/.])(o1|o3|o4|gpt-oss|gpt-5|deepseek-r1|deepseek-reasoner|nemotron)\b",
+    r"(^|[/.])(o1|o3|o4|gpt-oss|gpt-5|gemini-3|deepseek-r1|"
+    r"deepseek-reasoner|nemotron)\b",
     re.IGNORECASE,
 )
 
@@ -176,37 +180,115 @@ def _disable(code: int) -> None:
 #: with it.
 FALLBACK_BASE_URL = "https://openrouter.ai/api/v1"
 
+#: The other free OpenAI-compatible tiers worth having behind Groq, in
+#: the order they are tried. NVIDIA NIM: one free developer key (sign-up
+#: plus a phone number, no card) for ~40 requests a minute shared across
+#: every model, no daily token cap - and it hosts the very model this
+#: bot defaults to, so the persona does not change voice. Google AI
+#: Studio: the Gemini family, free per-project quotas, strongest free
+#: models of the lot; Gemini 3.x needs the reasoning treatment above.
+NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+GEMINI_BASE_URL = ("https://generativelanguage.googleapis.com"
+                   "/v1beta/openai")
+
+#: name -> (base URL, env var that carries its key, model chain to use
+#: when the config does not name one). bot.load_config walks this to
+#: build the ordered fallback list from whatever keys bot.env carries.
+KNOWN_PROVIDERS = (
+    ("Groq", DEFAULT_BASE_URL, "GROQ_API_KEY",
+     DEFAULT_MODEL + ", " + DEFAULT_GROQ_FALLBACK),
+    ("NVIDIA NIM", NIM_BASE_URL, "NVIDIA_API_KEY",
+     "openai/gpt-oss-120b, nvidia/nemotron-3-super-120b-a12b"),
+    ("Gemini", GEMINI_BASE_URL, "GEMINI_API_KEY",
+     "gemini-3.8-flash, gemini-3.5-flash-lite"),
+    ("OpenRouter", FALLBACK_BASE_URL, "OPENROUTER_API_KEY",
+     DEFAULT_OPENROUTER_FALLBACK),
+)
+
+#: One breaker per fallback provider, keyed by base URL. The point of a
+#: list of fallbacks is that a dead key on one of them cannot take the
+#: others down with it - so the window belongs to the provider, not to
+#: "the fallback". _FALLBACK_DISABLED_UNTIL stays as a mirror of the
+#: longest open window for the admin panel and the old single-provider
+#: callers.
 _FALLBACK_DISABLED_UNTIL = 0.0
+_FALLBACK_DISABLED_BY_BASE = {}
 _ON_FALLBACK = False
 
 
-def _fallback_unavailable() -> bool:
-    return time.time() < _FALLBACK_DISABLED_UNTIL
+def _fallback_unavailable(base: str = "") -> bool:
+    """Is a fallback resting? With no base: any of them."""
+    now = time.time()
+    if base:
+        return now < _FALLBACK_DISABLED_BY_BASE.get((base or "").rstrip("/"),
+                                                    0.0)
+    return any(now < t for t in _FALLBACK_DISABLED_BY_BASE.values())
 
 
-def _disable_fallback(code: int) -> None:
-    """The fallback's own breaker, mirroring _disable()."""
+def _disable_fallback(code: int, base: str = "") -> None:
+    """One provider's own breaker, mirroring _disable()."""
     global _FALLBACK_DISABLED_UNTIL
-    if _fallback_unavailable():
+    base = (base or "").rstrip("/") or FALLBACK_BASE_URL
+    if _fallback_unavailable(base):
         return
+    name = provider_name(base)
+    until = 0.0
     if code in (401, 403):
-        _FALLBACK_DISABLED_UNTIL = time.time() + 21600  # ~6h
-        print("[llm] fallback key rejected (HTTP %d) - check "
-              "llm_fallback_key in config.json. Fallback disabled for "
-              "this session." % code, flush=True)
+        until = time.time() + 21600  # ~6h
+        print("[llm] %s fallback key rejected (HTTP %d) - check its key "
+              "in config.json or bot.env. %s disabled for this session."
+              % (name, code, name), flush=True)
     elif code == 402:
-        _FALLBACK_DISABLED_UNTIL = time.time() + 3600
-        print("[llm] fallback account has no credits (HTTP 402). "
-              "Fallback disabled for an hour.", flush=True)
+        until = time.time() + 3600
+        print("[llm] %s fallback account has no credits (HTTP 402). "
+              "Disabled for an hour." % name, flush=True)
     elif code == 404:
-        _FALLBACK_DISABLED_UNTIL = time.time() + 21600
-        print("[llm] fallback model not found (HTTP 404) - free slugs rotate; "
-              "pick a live reasoning model from openrouter.ai/models. "
-              "Fallback disabled for this session.", flush=True)
+        until = time.time() + 21600
+        if "openrouter" in base:
+            hint = "free slugs rotate; pick a live model from openrouter.ai/models"
+        else:
+            hint = "check the slug against the provider's model list"
+        print("[llm] %s fallback model not found (HTTP 404) - %s. "
+              "Disabled for this session." % (name, hint), flush=True)
     elif code == 429:
-        _FALLBACK_DISABLED_UNTIL = time.time() + 120
-        print("[llm] fallback rate-limited (HTTP 429); backing off for "
-              "2 minutes.", flush=True)
+        until = time.time() + 120
+        print("[llm] %s fallback rate-limited (HTTP 429); backing off for "
+              "2 minutes." % name, flush=True)
+    if not until:
+        return
+    _FALLBACK_DISABLED_BY_BASE[base] = until
+    if until > _FALLBACK_DISABLED_UNTIL:
+        _FALLBACK_DISABLED_UNTIL = until
+
+
+def _is_nvidia(base: str) -> bool:
+    """NVIDIA's NIM endpoint validates a request body against each
+    model's own schema, so a field the schema does not list is a 422 -
+    including the newer ``max_completion_tokens`` spelling. It wants
+    plain ``max_tokens``, and it may answer 202 (accepted, still
+    running) instead of a completion."""
+    return "nvidia.com" in (base or "").lower()
+
+
+def provider_name(base: str) -> str:
+    """A readable name for an endpoint, for log lines and the panel."""
+    b = (base or "").strip()
+    if _is_local(b):
+        return "local Ollama"
+    low = b.lower()
+    for name, url, _env, _models in KNOWN_PROVIDERS:
+        if url.rstrip("/").lower() == low.rstrip("/"):
+            return name
+    if "openrouter" in low:
+        return "OpenRouter"
+    if "groq" in low:
+        return "Groq"
+    if "nvidia" in low:
+        return "NVIDIA NIM"
+    if "googleapis.com" in low:
+        return "Gemini"
+    host = low.split("//", 1)[-1].split("/", 1)[0]
+    return host or "the fallback provider"
 
 
 def _model_list(value) -> list:
@@ -228,11 +310,102 @@ def _first_model(value) -> str:
     return items[0] if items else ""
 
 
+def _provider_entries(cfg: dict) -> list:
+    """Every configured second provider, in the order they are tried.
+
+    The single ``llm_fallback_*`` trio comes first, so an existing
+    config.json behaves exactly as it did before there was a list.
+    ``llm_fallback_providers`` - a list of ``{"base_url", "key",
+    "model"}`` - extends it, each with its own key and its own breaker.
+    Last, a key sitting in the environment adds its provider with the
+    documented defaults, so NVIDIA_API_KEY or GEMINI_API_KEY in bot.env
+    is enough: no config edit, no surprise order.
+    """
+    entries = [{
+        "base_url": (cfg.get("llm_fallback_base_url")
+                     or cfg.get("llm_fallback_url") or FALLBACK_BASE_URL),
+        "key": (cfg.get("llm_fallback_key")
+                or cfg.get("llm_fallback_api_key") or ""),
+        "model": (cfg.get("llm_fallback_model")
+                  or cfg.get("llm_fallback_model_name") or ""),
+    }]
+    extra = cfg.get("llm_fallback_providers")
+    if isinstance(extra, dict):
+        extra = [extra]
+    if isinstance(extra, (list, tuple)):
+        for item in extra:
+            if isinstance(item, dict):
+                entries.append(item)
+    taken = set()
+    for entry in entries:
+        base = str(entry.get("base_url") or entry.get("base")
+                   or "").strip().rstrip("/")
+        if base:
+            taken.add(base)
+    pbase = ((cfg.get("llm_base_url") or "").strip()
+             or DEFAULT_BASE_URL).rstrip("/")
+    for _name, base, env, models in KNOWN_PROVIDERS:
+        if base in taken or base == pbase:
+            continue
+        key = (os.environ.get(env) or "").strip()
+        if key:
+            entries.append({"base_url": base, "key": key, "model": models})
+    return entries
+
+
+def fallback_providers(cfg: dict) -> list:
+    """[(base, key, [models...]), ...] - the fallback chain, in order.
+
+    Each entry is a separate provider with its own key and its own
+    circuit breaker, tried in this order until one answers. An entry
+    needs a model chain and either a key or a local endpoint, and a
+    provider that is just the primary again (same base, same first
+    model) is dropped: it would fail identically.
+    """
+    pbase = ((cfg.get("llm_base_url") or "").strip()
+             or DEFAULT_BASE_URL).rstrip("/")
+    pmodel = (cfg.get("llm_model") or "").strip()
+    out, seen = [], set()
+    for entry in _provider_entries(cfg):
+        base = str(entry.get("base_url") or entry.get("base")
+                   or "").strip().rstrip("/")
+        models = _model_list(entry.get("model") or entry.get("models"))
+        # "key_env" keeps the secret in bot.env: the config names the
+        # provider, the environment carries the key.
+        key = str(entry.get("key") or entry.get("api_key")
+                  or os.environ.get(str(entry.get("key_env") or ""))
+                  or "").strip()
+        if not base or not models:
+            continue
+        if not key and not _is_local(base):
+            continue
+        if base == pbase and models[0] == pmodel:
+            continue
+        sig = (base, key, tuple(models))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append((base, key, models))
+    return out
+
+
+def _fallback_ready(cfg: dict) -> bool:
+    """Is at least one configured fallback provider usable right now?
+
+    Asking the FIRST one only - the old single-provider question - is how
+    a dead key on provider #1 used to mute the whole chain: Groq resting
+    plus NIM resting read as "no fallback at all", and Gemini was never
+    asked.
+    """
+    return any(not _fallback_unavailable(base)
+               for base, _key, _models in fallback_providers(cfg))
+
+
 def fallback_models(cfg: dict) -> list:
-    """The fallback chain, in order. The first is what fallback_endpoint
-    returns; the rest are tried when it 429s or errors."""
-    return _model_list(cfg.get("llm_fallback_model")
-                       or cfg.get("llm_fallback_model_name"))
+    """The first fallback provider's model chain, in order. The first is
+    what fallback_endpoint returns; the rest are tried when it 429s."""
+    providers = fallback_providers(cfg)
+    return list(providers[0][2]) if providers else []
 
 
 def fallback_endpoint(cfg: dict):
@@ -246,29 +419,20 @@ def fallback_endpoint(cfg: dict):
     just the primary again (same base and model) is rejected - it would
     fail identically.
     """
-    model = _first_model(cfg.get("llm_fallback_model")
-                         or cfg.get("llm_fallback_model_name"))
-    if not model:
+    providers = fallback_providers(cfg)
+    if not providers:
         return None
-    base = ((cfg.get("llm_fallback_base_url")
-             or cfg.get("llm_fallback_url") or "").strip()
-            or FALLBACK_BASE_URL).rstrip("/")
-    # Accept the explicit example name and the common ``*_api_key`` spelling.
-    # A silently ignored but present key is worse than accepting a harmless
-    # alias: it looks exactly like failover is broken in the live log.
-    key = (cfg.get("llm_fallback_key")
-           or cfg.get("llm_fallback_api_key") or "").strip()
-    if not key and not _is_local(base):
-        return None
-    pbase = ((cfg.get("llm_base_url") or "").strip()
-             or DEFAULT_BASE_URL).rstrip("/")
-    if base == pbase and model == (cfg.get("llm_model") or "").strip():
-        return None
-    return base, key, model
+    base, key, models = providers[0]
+    return base, key, models[0]
 
 
 def fallback_problem(cfg: dict) -> str:
     """Why no second endpoint can be used, or an empty string when usable."""
+    if fallback_providers(cfg):
+        return ""
+    if cfg.get("llm_fallback_providers"):
+        return ("llm_fallback_providers names a provider with no usable "
+                "key or model")
     model = _first_model(cfg.get("llm_fallback_model")
                          or cfg.get("llm_fallback_model_name"))
     if not model:
@@ -432,11 +596,12 @@ def check_models(cfg: dict) -> None:
                 print(f"[llm] llm_model names {m}, which Groq retired - "
                       f"use {GROQ_RETIRED[m]} instead (console.groq.com/"
                       f"docs/deprecations)", flush=True)
-    fb = fallback_endpoint(cfg)
-    if fb and "groq" in fb[0]:
-        for m in fallback_models(cfg):
+    for fbase, _fkey, fmodels in fallback_providers(cfg):
+        if "groq" not in fbase:
+            continue
+        for m in fmodels:
             if m in GROQ_RETIRED:
-                print(f"[llm] llm_fallback_model names {m}, which Groq "
+                print(f"[llm] a Groq fallback names {m}, which Groq "
                       f"retired - use {GROQ_RETIRED[m]} instead", flush=True)
 
 
@@ -446,6 +611,7 @@ def reset_disable_state() -> None:
     global _NO_FALLBACK_WARNED_UNTIL
     _DISABLED_UNTIL = 0.0
     _FALLBACK_DISABLED_UNTIL = 0.0
+    _FALLBACK_DISABLED_BY_BASE.clear()
     _ON_FALLBACK = False
     _NO_FALLBACK_WARNED_UNTIL = 0.0
     _MODEL_DISABLED_UNTIL.clear()
@@ -533,7 +699,7 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 def _build_body(model: str, user_prompt: str, system: str = None,
                 max_tokens: int = None, hard_nothink: bool = False,
                 reasoning_budget: int = None,
-                temperature: float = None) -> str:
+                temperature: float = None, base: str = "") -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -546,7 +712,13 @@ def _build_body(model: str, user_prompt: str, system: str = None,
         # reasoning model - too tight and the answer is what gets
         # squeezed out (an empty 200; live-fire: a held mention
         # 'answered' at 17:33:23 came back with nothing at 17:33:24).
-        body["max_completion_tokens"] = reasoning_budget or 300
+        # Gemini 3.x is the same: reasoning_effort "none" only switches
+        # thinking off on the 2.5 family, so the budget is what keeps a
+        # Gemini 3 answer inside the cap. NVIDIA NIM spells the cap
+        # max_tokens and rejects the newer name with a 422.
+        cap = reasoning_budget or 300
+        body["max_tokens" if _is_nvidia(base)
+             else "max_completion_tokens"] = cap
         body["reasoning_effort"] = "low"
     else:
         body["max_tokens"] = max_tokens or 300
@@ -606,6 +778,15 @@ def _request(base: str, key: str, body: bytes,
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
         response_headers = getattr(resp, "headers", {})
+        status = getattr(resp, "status", None) or getattr(resp, "code", 200)
+    if status == 202:
+        # NVIDIA NIM answers 202 ("accepted, poll the requestId") instead
+        # of a completion. There is no text in it and this client does not
+        # poll, so it is a miss: say so and let the next model or provider
+        # answer, rather than reporting a malformed completion.
+        raise urllib.error.HTTPError(
+            req.full_url, 202, "provider is still working on it",
+            response_headers or {}, io.BytesIO(raw))
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -646,7 +827,7 @@ def _call(base: str, model: str, key: str, user_prompt: str,
                                 max_tokens=max_tokens,
                                 hard_nothink=hard_nothink,
                                 reasoning_budget=reasoning_budget,
-                                temperature=temperature),
+                                temperature=temperature, base=base),
                     timeout=timeout)
 
 
@@ -729,9 +910,10 @@ def chat_reply(system: str, user: str, cfg: dict,
     model = cfg.get("llm_model") or (
         OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
     fb = fallback_endpoint(cfg)
+    fb_ready = _fallback_ready(cfg)
     primary_configured = bool(key) or _is_local(base)
     primary_up = primary_configured and not _unavailable()
-    if not primary_up and not (fb and not _fallback_unavailable()):
+    if not primary_up and not fb_ready:
         if primary_configured and _unavailable() and not fb:
             _note_no_fallback(cfg)
         return None
@@ -770,7 +952,7 @@ def chat_reply(system: str, user: str, cfg: dict,
         primary_models.append(spare)
     if primary_up and not primary_models:
         primary_up = False              # every model is resting
-        if not (fb and not _fallback_unavailable()):
+        if not fb_ready:
             return None
     if primary_up:
         model = primary_models[0]
@@ -805,10 +987,10 @@ def chat_reply(system: str, user: str, cfg: dict,
             if text:
                 _note_primary_line()
                 return text
-            # Still nothing: fall through to the fallback, if there is
-            # one - an unanswered mention is the worst silence the bot
+            # Still nothing: fall through to the fallback chain, if there
+            # is one - an unanswered mention is the worst silence the bot
             # has (live-fire: the streamer's held message, 17:33:24).
-            if fb:
+            if fb_ready:
                 print(f"[llm] {model} returned nothing twice - the "
                       f"fallback takes this one", flush=True)
         except urllib.error.HTTPError as exc:
@@ -847,65 +1029,84 @@ def chat_reply(system: str, user: str, cfg: dict,
         except Exception as exc:
             print(f"[llm] chat error: {exc!r}", flush=True)
     # The primary could not answer - it just failed, or its breaker
-    # window from an earlier 429 is still open. A second provider
-    # carries the line instead of the room going quiet.
-    if fb and not _fallback_unavailable():
-        fbase, fkey, fmodel = fb
-        # The fallback pays for the primary's budget only when it is the
-        # same kind of endpoint: a local Ollama fallback behind a hosted
-        # primary would inherit 8s and time out on the prompt read alone.
-        try:
-            default_to_fb = 30.0 if _is_local(fbase) else 8.0
-            fb_timeout = max(timeout, min(float(cfg.get("chat_ai_timeout")
-                                                  or default_to_fb), 30.0))
-        except (TypeError, ValueError):
-            fb_timeout = max(timeout, 30.0 if _is_local(fbase) else 8.0)
-        if cfg.get("debug"):
-            print(f"[llm] POST {fbase}/chat/completions  model={fmodel} "
-                  f"(chat fallback, timeout {fb_timeout}s)", flush=True)
-        try:
-            chain = [m for m in (fallback_models(cfg) or [fmodel])
-                     if not _model_unavailable(fbase, m)]
-            if not chain:
-                _disable_fallback(429)  # every fallback model is resting
-                return None
-            text = _chat_call_chain(fbase, chain, fkey, prompt, system,
-                                    fb_timeout, budget, cfg, extra,
-                                    fallback=True)
-            _note_fallback_line(model, chain[0])
+    # window from an earlier 429 is still open. The fallback providers
+    # carry the line in turn instead of the room going quiet: each on
+    # its own key and its own breaker, so a dead one is skipped and the
+    # next takes the line.
+    for fbase, fkey, fmodels in fallback_providers(cfg):
+        if _fallback_unavailable(fbase):
+            continue
+        text, used = _chat_fallback(fbase, fkey, fmodels, cfg, prompt,
+                                    system, timeout, budget, extra)
+        if text:
+            _note_fallback_line(model, used or fmodels[0])
             return text
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429:
-                if all(_model_unavailable(fbase, m)
-                       for m in (fallback_models(cfg) or [fmodel])):
-                    _disable_fallback(429)
-            else:
-                _disable_fallback(exc.code)
-            if exc.code == 404:
-                _model_404_hint()
-            elif exc.code not in (401, 402, 403, 429):
-                # A 400/5xx must never vanish silently - the fallback
-                # failing quietly reads as 'the bot just stopped'.
-                detail = ""
-                try:
-                    detail = exc.read().decode(
-                        "utf-8", "replace").strip()[:200]
-                except Exception:
-                    pass
-                print(f"[llm] fallback chat call failed (HTTP "
-                      f"{exc.code}){': ' + detail if detail else ''}",
-                      flush=True)
-            return None
-        except TimeoutError as exc:
-            print(f"[llm] fallback chat error: {exc!r} - still too busy",
-                  flush=True)
-            return None
-        except Exception as exc:
-            print(f"[llm] fallback chat error: {exc!r}", flush=True)
-            return None
     if not fb and _unavailable():
         _note_no_fallback(cfg)
     return None
+
+
+def _chat_fallback(fbase: str, fkey: str, fmodels: list, cfg: dict,
+                   prompt: str, system: str, timeout: float, budget: int,
+                   extra: dict):
+    """One fallback provider's turn at a chat line: (text, model used).
+
+    Every failure path here touches ONLY this provider's breaker. That
+    is the whole point of a list of fallbacks: a dead NVIDIA key must
+    not be the reason Gemini never gets asked.
+    """
+    name = provider_name(fbase)
+    # The fallback pays for the primary's budget only when it is the
+    # same kind of endpoint: a local Ollama fallback behind a hosted
+    # primary would inherit 8s and time out on the prompt read alone.
+    try:
+        default_to_fb = 30.0 if _is_local(fbase) else 8.0
+        fb_timeout = max(timeout, min(float(cfg.get("chat_ai_timeout")
+                                                  or default_to_fb), 30.0))
+    except (TypeError, ValueError):
+        fb_timeout = max(timeout, 30.0 if _is_local(fbase) else 8.0)
+    if cfg.get("debug"):
+        print(f"[llm] POST {fbase}/chat/completions  model={fmodels[0]} "
+              f"(chat fallback: {name}, timeout {fb_timeout}s)", flush=True)
+    try:
+        chain = [m for m in fmodels if not _model_unavailable(fbase, m)]
+        if not chain:
+            _disable_fallback(429, fbase)  # every model here is resting
+            return None, ""
+        text = _chat_call_chain(fbase, chain, fkey, prompt, system,
+                                fb_timeout, budget, cfg, extra,
+                                fallback=True)
+        used = _LAST_CHAT_MODEL if (text and _LAST_CHAT_MODEL in chain) \
+            else chain[0]
+        return (text or ""), used
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            if all(_model_unavailable(fbase, m) for m in fmodels):
+                _disable_fallback(429, fbase)
+        else:
+            _disable_fallback(exc.code, fbase)
+        if exc.code == 404:
+            _model_404_hint()
+        elif exc.code not in (401, 402, 403, 429):
+            # A 400/5xx must never vanish silently - the fallback
+            # failing quietly reads as 'the bot just stopped'.
+            detail = ""
+            try:
+                detail = exc.read().decode(
+                    "utf-8", "replace").strip()[:200]
+            except Exception:
+                pass
+            print(f"[llm] {name} fallback chat call failed (HTTP "
+                  f"{exc.code}){': ' + detail if detail else ''}",
+                  flush=True)
+        return None, ""
+    except TimeoutError as exc:
+        print(f"[llm] {name} fallback chat error: {exc!r} - still too "
+              f"busy", flush=True)
+        return None, ""
+    except Exception as exc:
+        print(f"[llm] {name} fallback chat error: {exc!r}", flush=True)
+        return None, ""
 
 
 def _warm_probe(base: str, model: str, key: str, cfg: dict,
@@ -1018,14 +1219,13 @@ def warm_up(cfg: dict) -> bool:
         if spare and spare not in models:
             models.append(spare)
         ok = _warm_chain(base, models, key, cfg)
-    fb = fallback_endpoint(cfg)
-    if fb and not _fallback_unavailable():
-        fbase, fkey, fmodel = fb
-        fok = _warm_chain(fbase, fallback_models(cfg) or [fmodel], fkey,
-                          cfg, fallback=True)
+    for fbase, fkey, fmodels in fallback_providers(cfg):
+        if _fallback_unavailable(fbase):
+            continue
+        fok = _warm_chain(fbase, fmodels, fkey, cfg, fallback=True)
         if fok and not ok:
             print("[llm] the primary could not be warmed - chat will "
-                  "run on the fallback", flush=True)
+                  f"run on the {provider_name(fbase)} fallback", flush=True)
         ok = ok or fok
     return ok
 
@@ -1085,8 +1285,8 @@ def is_configured(options: dict) -> bool:
 
 
 def any_configured(options: dict) -> bool:
-    """True when the primary or configured second provider is usable."""
-    return is_configured(options) or fallback_endpoint(options) is not None
+    """True when the primary or any configured fallback is usable."""
+    return is_configured(options) or bool(fallback_providers(options))
 
 
 def _fallback_model(base: str, model: str) -> str | None:
@@ -1278,18 +1478,17 @@ def _complete(base: str, model: str, key: str, user: str, cfg: dict,
             _note_primary_line()
             return text
 
-    fb = fallback_endpoint(cfg)
-    if fb and not _fallback_unavailable():
-        fbase, fkey, fmodel = fb
-        chain = ", ".join(fallback_models(cfg)) or fmodel
+    for fbase, fkey, fmodels in fallback_providers(cfg):
+        if _fallback_unavailable(fbase):
+            continue
         text = _complete_provider(
-            fbase, chain, fkey, user, cfg, tag, system=system,
+            fbase, ", ".join(fmodels), fkey, user, cfg, tag, system=system,
             timeout=timeout, fallback=True, max_tokens=max_tokens,
             reasoning_budget=reasoning_budget, temperature=temperature)
         if text:
-            _note_fallback_line(model, fmodel)
+            _note_fallback_line(model, fmodels[0])
             return text
-    if not fb and _unavailable():
+    if not fallback_providers(cfg) and _unavailable():
         _note_no_fallback(cfg)
     return None
 

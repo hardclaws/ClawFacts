@@ -472,15 +472,19 @@ class BotControl:
 
     def llm_status(self) -> dict:
         cfg = self.cfg
-        base = (cfg.get("llm_base_url") or "").lower()
-        provider = ("OpenRouter" if "openrouter" in base else
-                    "Groq" if "groq" in base else
-                    "local Ollama" if ("localhost" in base or "11434" in base
-                                       or "127.0.0.1" in base or "ollama" in base)
-                    else (base or "not configured"))
+        base = (cfg.get("llm_base_url") or "").strip()
+        low = base.lower()
+        provider = ("OpenRouter" if "openrouter" in low else
+                    "Groq" if "groq" in low else
+                    "local Ollama" if ("localhost" in low or "11434" in low
+                                       or "127.0.0.1" in low or "ollama" in low)
+                    else (low or "not configured"))
         out = {"provider": provider, "model": cfg.get("llm_model") or "",
                "fallback_model": cfg.get("llm_fallback_model") or "",
                "fallback_base": cfg.get("llm_fallback_base_url") or "",
+               # The ordered chain, one entry per provider: who would take
+               # a line next, and whether their own breaker is open.
+               "fallbacks": [],
                "configured": bool((cfg.get("llm_api_key") or "").strip()
                                   or provider == "local Ollama"),
                "resting": [], "breaker": 0.0, "fallback_breaker": 0.0,
@@ -488,6 +492,17 @@ class BotControl:
         try:
             import llm as llm_mod
             now = time.time()
+            if base:
+                out["provider"] = llm_mod.provider_name(base)
+            for fbase, _fkey, fmodels in llm_mod.fallback_providers(cfg):
+                left = max(0.0, llm_mod._FALLBACK_DISABLED_BY_BASE.get(
+                    fbase, 0.0) - now)
+                out["fallbacks"].append({
+                    "provider": llm_mod.provider_name(fbase),
+                    "base": fbase,
+                    "model": ", ".join(fmodels),
+                    "resting": left,
+                })
             for (b, m), until in sorted(llm_mod._MODEL_DISABLED_UNTIL.items()):
                 if until > now:
                     out["resting"].append({"model": m, "base": b,
@@ -823,6 +838,11 @@ class BotControl:
             secret = k in SECRET_KEYS
             if secret:
                 shown = _mask(v)
+            elif k == "llm_fallback_providers":
+                # A provider list can carry keys inline. Show it as JSON
+                # like any other list, but with every key masked - and a
+                # masked key posted back means "keep the stored one".
+                shown = json.dumps(_mask_providers(v), ensure_ascii=False)
             elif isinstance(v, (dict, list)):
                 shown = json.dumps(v, ensure_ascii=False)
             elif isinstance(v, bool):
@@ -864,6 +884,8 @@ class BotControl:
                     continue        # blank or masked = leave the stored one
             old = on_disk.get(key, defaults.get(key))
             new = _coerce(raw, old)
+            if key == "llm_fallback_providers" and isinstance(new, list):
+                new = _unmask_providers(new, old)
             if new == old and key in on_disk:
                 continue
             on_disk[key] = new
@@ -974,11 +996,43 @@ RESTART_KEYS = frozenset({
     "use_tls", "memory_db_path", "persona_state_path", "subgoal_state_path",
     "beef_state_path", "log_file", "chat_ai_enabled", "chat_ai_names",
     "llm_api_key", "llm_base_url", "llm_model", "llm_fallback_key",
-    "llm_fallback_base_url", "llm_fallback_model", "llm_no_think",
+    "llm_fallback_base_url", "llm_fallback_model",
+    "llm_fallback_providers", "llm_no_think",
     "tier_cooldowns", "access_control", "min_follow_age_seconds",
     "follower_check_failure", "prefix", "names_topup_enabled",
     "names_topup_hours",
 })
+
+
+def _mask_providers(value):
+    """The provider list with any inline API key masked."""
+    if not isinstance(value, list):
+        return value
+    out = []
+    for entry in value:
+        if isinstance(entry, dict) and entry.get("key"):
+            entry = dict(entry)
+            entry["key"] = _mask(entry.get("key"))
+        out.append(entry)
+    return out
+
+
+def _unmask_providers(new, old):
+    """A masked key posted back means 'keep the one already stored'.
+
+    The editor shows every inline key masked, so saving an unrelated
+    field would otherwise overwrite them with the mask itself.
+    """
+    stored = [e for e in (old if isinstance(old, list) else [])
+              if isinstance(e, dict)]
+    out = []
+    for i, entry in enumerate(new):
+        if isinstance(entry, dict) and MASK in str(entry.get("key") or ""):
+            entry = dict(entry)
+            entry["key"] = (stored[i].get("key", "")
+                            if i < len(stored) else "")
+        out.append(entry)
+    return out
 
 
 def _mask(value) -> str:
@@ -1421,9 +1475,15 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
 
         rests = "".join(f'<li>{e(r["model"])} <small>resting {human(r["left"])} more</small></li>'
                         for r in L["resting"]) or "<li class='mut'>none</li>"
+        chain = "".join(
+            f'<li>{e(f["provider"])} <small>{e(f["model"])}</small>'
+            + (f' <span class="warn">resting {human(f["resting"])}</span>'
+               if f["resting"] else '') + '</li>'
+            for f in L.get("fallbacks") or []) or "<li class='mut'>none</li>"
         ai = (f'<dl><dt>Provider</dt><dd>{e(L["provider"])} {yn(L["configured"], "", "(no key)")}</dd>'
               f'<dt>Model</dt><dd>{e(L["model"])}</dd>'
-              f'<dt>Fallback</dt><dd>{e(L["fallback_model"] or "-")}</dd>'
+              f'<dt>Fallback chain</dt><dd><ol style="margin:0;padding-left:1.2rem">'
+              f'{chain}</ol></dd>'
               f'<dt>Chat AI</dt><dd>{yn(s["chat_ai"], "enabled", "off")}'
               + (' <span class="warn">on fallback</span>' if L["on_fallback"] else '') + '</dd>'
               f'<dt>Breaker</dt><dd>{("primary down " + human(L["breaker"])) if L["breaker"] else "clear"}'

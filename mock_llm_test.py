@@ -826,6 +826,175 @@ def main():
     print("[PASS] a retired Groq slug is skipped for the session, named "
           "once with its replacement; the spare is gpt-oss-20b")
 
+    # ------------------------------------------------------------------
+    # An ORDERED LIST of fallback providers: Groq -> NVIDIA NIM -> Gemini,
+    # each with its own key and its own rest window.
+    # ------------------------------------------------------------------
+    import os as _os
+
+    class _Resp:
+        """A urlopen result that can report a real status code."""
+
+        def __init__(self, raw, status=200):
+            self._raw, self.status, self.headers = raw, status, {}
+
+        def read(self):
+            return self._raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    NIM = "https://integrate.api.nvidia.com/v1"
+    GEM = "https://generativelanguage.googleapis.com/v1beta/openai"
+    GROQ = "https://api.groq.com/openai/v1"
+    multicfg = {
+        "llm_api_key": "gsk-test", "llm_base_url": GROQ,
+        "llm_model": "openai/gpt-oss-120b",
+        "llm_fallback_providers": [
+            {"base_url": NIM, "key": "nvapi-testkey",
+             "model": "openai/gpt-oss-120b"},
+            # key_env keeps the secret in bot.env: the config names the
+            # provider, the environment carries the key.
+            {"base_url": GEM, "key_env": "GEMINI_API_KEY",
+             "model": "gemini-3.8-flash, gemini-3.5-flash-lite"},
+        ],
+    }
+    _had_gem = _os.environ.get("GEMINI_API_KEY")
+    _had_nv = _os.environ.get("NVIDIA_API_KEY")
+    _os.environ["GEMINI_API_KEY"] = "gem-testkey"
+
+    def _router(fail, status=None):
+        """Answer everything; fail the named bases with `code`."""
+        def _fake(req, timeout=60):
+            model = json.loads(req.data.decode("utf-8"))["model"]
+            captured.append({"url": req.full_url, "headers": req.headers,
+                             "body": req.data.decode("utf-8"),
+                             "timeout": timeout})
+            for base, code in (fail or {}).items():
+                if req.full_url.startswith(base):
+                    raise urllib.error.HTTPError(
+                        req.full_url, code, "nope", {},
+                        io.BytesIO(b'{"error":{"message":"boom"}}'))
+            payload = {"choices": [{"message": {"role": "assistant",
+                                                "content": "Line from " + model}}]}
+            raw = json.dumps(payload).encode("utf-8")
+            if status and req.full_url.startswith(status[0]):
+                return _Resp(raw, status[1])
+            return _Resp(raw)
+        return _fake
+
+    orig = llm.urllib.request.urlopen
+    try:
+        # The chain, in order, with each provider's own key.
+        providers = llm.fallback_providers(multicfg)
+        assert [p[0] for p in providers] == [NIM, GEM], providers
+        assert providers[0][1] == "nvapi-testkey", providers
+        assert providers[1][1] == "gem-testkey", providers      # via key_env
+        assert providers[1][2] == ["gemini-3.8-flash",
+                                   "gemini-3.5-flash-lite"], providers
+        assert llm.fallback_endpoint(multicfg) == (
+            NIM, "nvapi-testkey", "openai/gpt-oss-120b"), \
+            llm.fallback_endpoint(multicfg)
+        assert llm.fallback_problem(multicfg) == "", \
+            llm.fallback_problem(multicfg)
+        # A key in the environment adds its provider on its own.
+        _os.environ["NVIDIA_API_KEY"] = "nvapi-env"
+        envonly = llm.fallback_providers({"llm_api_key": "gsk",
+                                          "llm_base_url": GROQ,
+                                          "llm_model": "openai/gpt-oss-120b"})
+        # Both keys are in the environment now, so both providers join -
+        # NIM ahead of Gemini, the order KNOWN_PROVIDERS gives them.
+        assert [(p[0], p[1]) for p in envonly] == [
+            (NIM, "nvapi-env"), (GEM, "gem-testkey")], envonly
+        del _os.environ["GEMINI_API_KEY"]
+        assert [p[0] for p in llm.fallback_providers(
+            {"llm_api_key": "gsk", "llm_base_url": GROQ,
+             "llm_model": "openai/gpt-oss-120b"})] == [NIM]
+        _os.environ["GEMINI_API_KEY"] = "gem-testkey"
+        assert llm.provider_name(NIM) == "NVIDIA NIM", llm.provider_name(NIM)
+        assert llm.provider_name(GEM) == "Gemini", llm.provider_name(GEM)
+        del _os.environ["NVIDIA_API_KEY"]
+
+        # Groq spent, NIM spent: Gemini answers, and each request body is
+        # that provider's own shape.
+        llm.reset_disable_state()
+        captured.clear()
+        llm.urllib.request.urlopen = _router({GROQ: 429, NIM: 429})
+        got = llm.chat_reply("s", "u" * 20, multicfg)
+        assert got == "Line from gemini-3.8-flash", got
+        assert [c["url"] for c in captured] == [
+            GROQ + "/chat/completions", GROQ + "/chat/completions",
+            NIM + "/chat/completions", GEM + "/chat/completions"], captured
+        assert captured[3]["headers"]["Authorization"] == \
+            "Bearer gem-testkey", captured[3]["headers"]
+        nim_body = json.loads(captured[2]["body"])
+        assert "max_tokens" in nim_body and \
+            "max_completion_tokens" not in nim_body, nim_body
+        assert nim_body["reasoning_effort"] == "low", nim_body
+        gem_body = json.loads(captured[3]["body"])
+        # A thinking model's cap covers thinking AND answer, so it keeps
+        # the reasoning budget (300), not the 120-token one-line cap.
+        assert gem_body["max_completion_tokens"] == 300, gem_body
+        assert gem_body["reasoning_effort"] == "low", gem_body
+        assert "temperature" not in gem_body, gem_body
+        assert "max_tokens" not in gem_body, gem_body
+        # Two separate rest windows: NIM's is open, Gemini's is not.
+        assert llm._fallback_unavailable(NIM), "NIM must rest after its 429"
+        assert not llm._fallback_unavailable(GEM), \
+            "a 429 on NIM must not rest Gemini too"
+        assert list(llm._FALLBACK_DISABLED_BY_BASE) == [NIM], \
+            llm._FALLBACK_DISABLED_BY_BASE
+
+        # A dead NIM key is skipped on the NEXT line, not retried: the
+        # walk goes straight from a resting Groq to Gemini.
+        llm.reset_disable_state()
+        llm.urllib.request.urlopen = _router({GROQ: 429, NIM: 401})
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, multicfg) == \
+            "Line from gemini-3.8-flash"
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, multicfg) == \
+            "Line from gemini-3.8-flash"
+        assert [c["url"] for c in captured] == [
+            GEM + "/chat/completions"], captured
+
+        # NVIDIA answers 202 ("accepted, still working") instead of a
+        # completion: that is a miss, and the next provider takes the line.
+        llm.reset_disable_state()
+        llm.urllib.request.urlopen = _router({GROQ: 429}, status=(NIM, 202))
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, multicfg) == \
+            "Line from gemini-3.8-flash", captured
+        assert [c["url"].split("//")[1].split("/")[0] for c in captured] == \
+            ["api.groq.com", "api.groq.com", "integrate.api.nvidia.com",
+             "generativelanguage.googleapis.com"], captured
+
+        # Sourced answers walk the same chain.
+        llm.reset_disable_state()
+        llm.urllib.request.urlopen = _router({GROQ: 429, NIM: 429})
+        captured.clear()
+        ans = llm.answer_question("how long is the Nile?", ["6,650 km"],
+                                  multicfg)
+        assert ans and "gemini-3.8-flash" in \
+            [json.loads(c["body"])["model"] for c in captured], captured
+    finally:
+        llm.urllib.request.urlopen = orig
+        llm.reset_disable_state()
+        captured.clear()
+        if _had_gem is None:
+            _os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            _os.environ["GEMINI_API_KEY"] = _had_gem
+        if _had_nv is None:
+            _os.environ.pop("NVIDIA_API_KEY", None)
+        else:
+            _os.environ["NVIDIA_API_KEY"] = _had_nv
+    print("[PASS] an ordered provider list carries chat: Groq -> NIM -> "
+          "Gemini, each on its own key and its own rest window")
+
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1
 

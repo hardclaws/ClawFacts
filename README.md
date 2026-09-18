@@ -101,6 +101,15 @@ Edit `config.json`:
 > `"llm_api_key": "gsk_..."`, `"llm_base_url": "https://api.groq.com/openai/v1"`,
 > `"llm_model": "openai/gpt-oss-120b"`
 >
+> **NVIDIA NIM** — free developer key, 100+ models, ~40 req/min:
+> `"llm_api_key": "nvapi-..."`, `"llm_base_url": "https://integrate.api.nvidia.com/v1"`,
+> `"llm_model": "openai/gpt-oss-120b"`
+>
+> **Google AI Studio (Gemini)** — free per-project quota, strongest free
+> models: `"llm_api_key": "..."`,
+> `"llm_base_url": "https://generativelanguage.googleapis.com/v1beta/openai"`,
+> `"llm_model": "gemini-3.8-flash"`
+>
 > **Local Ollama** — unfiltered, no key needed:
 > `"llm_api_key": ""`, `"llm_base_url": "http://localhost:11434/v1"`,
 > `"llm_model": "llama3.1:8b"`
@@ -350,6 +359,55 @@ A recommended free chain, as of September 2026:
 "llm_fallback_key": "sk-or-...",
 "llm_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free, nex-agi/nex-n2.5-pro:free, cohere/north-mini-code:free"
 ```
+
+**A whole chain of providers, not just one.** One second provider is
+still one more key that can be dead, out of credits or rate-limited at
+the exact wrong moment, so `llm_fallback_providers` takes an *ordered
+list* — each entry its own base, its own key, its own model chain and
+its own rest window. A line is offered to them in order until one
+answers; a provider whose key is rejected is skipped for the session
+and the next one is asked instead, so no single dead key can mute the
+room.
+
+```json
+"llm_fallback_providers": [
+  {"base_url": "https://integrate.api.nvidia.com/v1",
+   "key_env": "NVIDIA_API_KEY",
+   "model": "openai/gpt-oss-120b, nvidia/nemotron-3-super-120b-a12b"},
+  {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+   "key_env": "GEMINI_API_KEY",
+   "model": "gemini-3.8-flash, gemini-3.5-flash-lite"},
+  {"base_url": "https://openrouter.ai/api/v1",
+   "key_env": "OPENROUTER_API_KEY",
+   "model": "nvidia/nemotron-3-super-120b-a12b:free, cohere/north-mini-code:free"}
+]
+```
+
+`key_env` names the environment variable that carries the key, so the
+secret stays in `bot.env` and is never written into `config.json` (an
+inline `"key"` works too, and the admin panel shows it masked either
+way). The old `llm_fallback_key` / `_base_url` / `_model` trio still
+works unchanged and is always tried first, so nothing about an existing
+setup has to move.
+
+| Provider | Base URL | Key | Free tier (Sept 2026) |
+| --- | --- | --- | --- |
+| Groq | `https://api.groq.com/openai/v1` | `gsk_...` | 30 RPM, 1K req/day, 8K tokens/min **per model** — fast, but the minute budget is the weak spot |
+| NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | `nvapi-...` (phone, no card) | ~40 RPM shared across every model, no daily token cap; hosts the same `openai/gpt-oss-*` models |
+| Google AI Studio | `https://generativelanguage.googleapis.com/v1beta/openai` | from `aistudio.google.com/apikey` | free per-project quota; Gemini 3.x Flash ≈ 10 RPM, Flash-Lite ≈ 15 RPM, resets midnight Pacific |
+| OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-v1-...` | `:free` slugs at 20 RPM; 50 req/day, or 1,000/day after a one-time $10 purchase |
+
+Two of these providers need their own request shape, which the bot now
+handles per endpoint: NVIDIA NIM validates a body against each model's
+schema, so it gets `max_tokens` (the newer `max_completion_tokens` is a
+422 there) and its 202 "still working" answer counts as a miss rather
+than a reply. Gemini 3.x always thinks before it answers —
+`reasoning_effort: "none"` only switches thinking off on the 2.5
+family — so the bot sends it the reasoning budget and low effort, the
+same way it does for `gpt-oss` and Nemotron, or the thinking eats the
+answer. A key in the environment is enough on its own: `NVIDIA_API_KEY`
+or `GEMINI_API_KEY` in `bot.env` adds that provider with these
+defaults, no config edit.
 
 `nemotron-3-super` answers in under a second where the 550b `ultra`
 takes 20–30 s a line; `nex-n2.5-pro` and `north-mini-code` are
