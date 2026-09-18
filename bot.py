@@ -937,14 +937,29 @@ class TwitchBot:
         PINGs for that long, and that is a drop we caused.
         """
         now = time.time()
-        pong = ("yes - our PING was never answered" if self._pong_due
-                else f"no (last one {now - self._last_pong_at:.0f}s ago)"
-                if self._last_pong_at else "no (none received yet)")
-        return (f"[irc] drop forensics: silent for "
-                f"{now - self._irc_last_data:.0f}s, keep-alive sent "
-                f"{now - self._last_ping:.0f}s ago, pong outstanding: "
-                f"{pong}, worst stall in _handle "
-                f"{self._irc_slowest_handle:.1f}s")
+        silent = now - self._irc_last_data
+        stall = self._irc_slowest_handle
+        pong = ("no PONG came back" if self._pong_due
+                else f"last PONG {now - self._last_pong_at:.0f}s ago"
+                if self._last_pong_at else "no PONG yet this connection")
+        # The numbers alone still leave the operator to draw the
+        # conclusion, and the whole point was to stop guessing - so the
+        # line ends in the verdict they imply.
+        if stall >= 5.0:
+            verdict = ("VERDICT: something stalled the read loop for that "
+                       "long, so it could not read the server's PING - this "
+                       "drop was ours")
+        elif self._pong_due and silent > 60:
+            verdict = ("VERDICT: the server went quiet after our keep-alive "
+                       "and never answered - it had already let go")
+        else:
+            verdict = ("VERDICT: the server was talking to us and the read "
+                       "loop was never blocked, so Twitch closed it for its "
+                       "own reasons - reconnecting is the whole remedy")
+        return (f"[irc] drop forensics: silent for {silent:.0f}s, "
+                f"keep-alive sent {now - self._last_ping:.0f}s ago, "
+                f"pong: {pong}, worst stall in _handle {stall:.1f}s. "
+                f"{verdict}")
 
     def _token_keeper(self) -> None:
         """Refresh the OAuth token every 30 minutes so it never expires while
@@ -990,14 +1005,40 @@ class TwitchBot:
                     self._irc_slowest_handle = took
 
     # ---- line handling ------------------------------------------------
+    @staticmethod
+    def _irc_command(line: str) -> str:
+        """The IRC verb of a line, whatever is prefixed to it.
+
+        Live-fire, the drop forensics reported "our PING was never
+        answered" - and that was the instrumentation lying, not the
+        server. Twitch answers OUR keep-alive with its own source
+        prefixed:
+
+            < PING :tmi.twitch.tv
+            > :tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv
+
+        while the PING it sends US arrives bare ("PING :tmi.twitch.tv").
+        So ``line.startswith("PONG")`` never matched the answer, the
+        outstanding flag never cleared, and every drop blamed us for a
+        PONG that had in fact arrived. Reading the verb, not the first
+        character, is the only form that matches both directions.
+        """
+        rest = line
+        if rest.startswith("@"):              # IRCv3 tags
+            rest = rest.split(" ", 1)[1] if " " in rest else ""
+        if rest.startswith(":"):              # :source
+            rest = rest.split(" ", 1)[1] if " " in rest else ""
+        return rest.split(" ", 1)[0].upper()
+
     def _handle(self, line: str) -> None:
         line = line.strip()
         if not line:
             return
-        if line.startswith("PING"):
+        command = self._irc_command(line)
+        if command == "PING":
             self._send("PONG :tmi.twitch.tv")
             return
-        if line.startswith("PONG"):
+        if command == "PONG":
             # Answer to OUR keep-alive: it closes the outstanding PING and
             # proves the server was alive that recently.
             self._pong_due = False

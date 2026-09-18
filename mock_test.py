@@ -291,18 +291,29 @@ def test_a_dropped_connection_explains_itself():
         # 1. Twitch let go while we were healthy - the common case, and
         #    the one that needs no fix at all.
         line, _ = drop()
-        assert "pong outstanding: no (none received yet)" in line, line
+        assert "pong: no PONG yet this connection" in line, line
+        assert "VERDICT" in line, line
         assert "worst stall in _handle 0.0s" in line, line
 
         # 2. Our keep-alive went unanswered: that IS our bug, and the log
         #    must say so rather than blaming the server.
         line, _ = drop(pong_due=True)
-        assert "pong outstanding: yes - our PING was never answered" in line
+        assert "pong: no PONG came back" in line, line
 
         # 3. A PONG closes the outstanding PING and dates the last proof
         #    the server was alive.
         line, _ = drop(["PONG :tmi.twitch.tv"], pong_due=True)
-        assert "pong outstanding: no (last one 0s ago)" in line, line
+        assert "pong: last PONG 0s ago" in line, line
+
+        # 3b. THE BUG THIS FOUND. Twitch answers our keep-alive with its
+        #     own source prefixed, so a handler testing startswith("PONG")
+        #     never matched it and every drop reported a PING that had in
+        #     fact been answered. Both spellings must clear the flag.
+        for spelling in (":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv",
+                         "PONG :tmi.twitch.tv"):
+            line, _ = drop([spelling], pong_due=True)
+            assert "no PONG came back" not in line, (spelling, line)
+            assert "last PONG 0s ago" in line, (spelling, line)
 
         # 4. Instrumentation must not break the keep-alive itself: a
         #    server PING is still answered, exactly once.

@@ -2975,13 +2975,35 @@ def main() -> int:
          # longest stall inside _handle.
          all(t in _bot2 for t in (
              "def _drop_forensics",
-             "pong outstanding",
              "worst stall in _handle",
              "_irc_slowest_handle",
              "_pong_due",
-             'startswith("PONG")',
              "self._log(self._drop_forensics())"))
-         and "_pong_due = True" in _bot2),
+         and "_pong_due = True" in _bot2
+         # Behavioural, not textual: Twitch answers our keep-alive with its
+         # own source prefixed (":tmi.twitch.tv PONG ..."), so a handler
+         # testing line.startswith("PONG") never sees it and the flag never
+         # clears. Asserted on the verb parser itself, because a substring
+         # search for the old code matched its own docstring and passed
+         # vacuously.
+         and _bot.TwitchBot._irc_command(
+             ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
+         and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"),
+        ("an answered keep-alive is recognised as answered",
+         # Live-fire: the first real drop logged "pong outstanding: yes" -
+         # claiming Twitch ignored our PING - when it had in fact answered
+         # it seconds earlier. Twitch prefixes its reply with its own
+         # source, ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv", and
+         # the handler tested line.startswith("PONG"), so it never matched
+         # and the flag never cleared. The field was a false alarm, and a
+         # false alarm is worse than no field: it points the operator at
+         # their own keep-alive when the answer is Twitch letting go.
+         # Both spellings must clear it, because only the prefixed one
+         # occurs in production.
+         _bot.TwitchBot._irc_command(
+             ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
+         and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
+         and 'command == "PONG"' in _bot2),
         ("a direct answer is posted, not refused for reusing a word",
          (lambda _live, _own, _q: (
              # Live-fire: "Docbot tell us what a boomer is" was refused with
