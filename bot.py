@@ -3538,19 +3538,27 @@ class TwitchBot:
             self.nick)
         similarity_source = (context[-1][1] if quiet and context else text)
         if chatai.too_similar(line, self._chat_ai_own,
-                              source=similarity_source):
+                              source=similarity_source,
+                              direct=addressed and not quiet):
             if addressed:
-                # A direct question is not optional chatter. Re-ask once with
-                # the repetition named instead of silently discarding a valid
-                # answer because the persona reused a motif.
+                # A direct question is not optional chatter, and the person
+                # who asked is owed an answer. Re-ask once for a fresher
+                # phrasing - but keep the first attempt, because a retry that
+                # comes back empty used to REPLACE a good answer with a
+                # canned apology.
+                first = line
                 self._log("direct reply sounded recycled - one retry")
-                line = self._chat_ai_line(snapshot, nick, text, vary=True)
-                if not line or chatai.too_similar(
-                        line, self._chat_ai_own, source=text):
-                    self._say(self._fit(f"@{nick} ",
-                                        chatai.DIRECT_FAILURE_LINE))
-                    self._log("direct reply declined after repetition retry")
-                    return
+                line = self._chat_ai_line(snapshot, nick, text,
+                                          vary=True) or first
+                if chatai.too_similar(line, self._chat_ai_own, source=text,
+                                      direct=True):
+                    # Still close to what the persona just said. Post it
+                    # anyway: an answer that reuses a word or two beats
+                    # telling the asker their question got "mangled in the
+                    # gears", which is what this used to do - often enough
+                    # that the room learned not to trust the bot.
+                    self._log("direct reply still echoes the persona - "
+                              "posted anyway rather than apologising")
             else:
                 self._log(f"chat line declined - too similar to its own "
                           f"recent lines: {line[:80]!r}")
@@ -3986,12 +3994,15 @@ class TwitchBot:
             snapshot = self._chat_ai_snapshot()
             line = self._chat_ai_line(snapshot, nick, q)
             if line and chatai.too_similar(
-                    line, self._chat_ai_own, source=q):
+                    line, self._chat_ai_own, source=q, direct=True):
                 # An explicit command gets one redemption: ask again with
-                # the repetition named, then take whatever comes.
-                line = self._chat_ai_line(snapshot, nick, q, vary=True)
+                # the repetition named, then take whatever comes - keeping
+                # the first attempt if the retry comes back empty.
+                first = line
+                line = self._chat_ai_line(snapshot, nick, q,
+                                          vary=True) or first
             if line and not chatai.too_similar(
-                    line, self._chat_ai_own, source=q):
+                    line, self._chat_ai_own, source=q, direct=True):
                 self._say(self._fit(f"@{nick} ", line))
                 self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
                 self._log(f"chat ai answered {nick}")

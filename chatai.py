@@ -558,7 +558,7 @@ def _phrase_bigrams(line: str, exempt=None) -> set:
 
 
 def too_similar(line: str, own_lines, jaccard: float = 0.3,
-                source: str = "") -> bool:
+                source: str = "", direct: bool = False) -> bool:
     """True when a candidate recycles the bot's recent wording.
 
     Topic words present in the message being answered are exempt: two answers
@@ -566,6 +566,22 @@ def too_similar(line: str, own_lines, jaccard: float = 0.3,
     signature across several bot lines, a shared phrase/template, or high
     overall overlap. The old rule rejected *any one word* shared with the
     previous line, which discarded sensible direct answers constantly.
+
+    ``direct`` is a line answering a question somebody actually asked, and
+    the bar is deliberately much higher there. These rules exist to stop the
+    bot sounding like a broken record in *unsolicited* chatter, where
+    declining costs nothing; applied to a direct answer they cost the asker
+    their answer. Live-fire, "Docbot tell us what a boomer is" was refused
+    with "my answer got mangled in the gears" because the reply said "twenty
+    years on the road" and Doc had said "years" in two of his last three
+    lines - a long-haul persona says "years" constantly, so the motif rule
+    fired on ordinary vocabulary. For a direct answer only real duplication
+    counts: a chained run of shared words inside one previous line (a
+    reused template), or genuine overall overlap. Measured on the live
+    failure, the refused answer sat at 0.167 jaccard against the persona's
+    recent lines while a real echo of the same motif sits at 0.375 - so the
+    overlap rule at its normal 0.3 separates them, and it was only the
+    motif rule that had to go.
     """
     exempt = _content_words(source)
     words = _content_words(line) - exempt
@@ -573,6 +589,17 @@ def too_similar(line: str, own_lines, jaccard: float = 0.3,
     recent = [_content_words(l) - exempt for l in recent_lines]
     if not words or not recent:
         return False
+    if direct:
+        phrases = _phrase_bigrams(line, exempt)
+        for old in recent_lines:
+            shared = phrases & _phrase_bigrams(old, exempt)
+            # Two bigrams that chain ("a b" + "b c") are a three-word run:
+            # that is a reused template, not two people saying "years".
+            if any(a.split()[1] == b.split()[0] for a in shared
+                   for b in shared):
+                return True
+        return any(s and len(words & s) / len(words | s) >= jaccard
+                   for s in recent)
     # A word the model has made a motif across at least two previous lines.
     if any(sum(1 for s in recent if w in s) >= 2 for w in words):
         return True

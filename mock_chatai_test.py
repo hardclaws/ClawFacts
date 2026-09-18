@@ -427,6 +427,100 @@ def test_emoji_walls_never_chime():
     print("[PASS] emoji walls never chime; real lines and mentions do")
 
 
+def test_a_direct_answer_is_never_refused_for_reusing_a_word():
+    """Live-fire, 2026-09-18: 'Docbot tell us what a boomer is' came back
+    'I heard you, but my answer got mangled in the gears. Try me once more.'
+
+    The answer was fine. It said 'twenty years on the road', Doc had said
+    'years' in two of his last three lines, and the anti-echo motif rule
+    treats a word reused across two lines as a template - so a correct
+    answer to a direct question was thrown away and the asker got an
+    apology. It happened often enough that the room learned not to trust
+    the bot.
+
+    Anti-echo exists to stop the bot sounding like a broken record in
+    UNSOLICITED chatter, where declining costs nothing. A direct answer is
+    the opposite: someone asked, and silence is the failure. So a direct
+    line is only refused for real duplication - a chained run of shared
+    words, or near-identical wording - and when even the retry is close,
+    the answer is posted rather than replaced by an apology.
+    """
+    b = _bot(llm_api_key="k")
+    logs = []
+    b._log = logs.append
+    b._distill = lambda *a, **k: None
+    orig = llm.chat_reply
+    # The persona's own recent lines: ordinary Doc, narrow vocabulary.
+    b._chat_ai_own = [
+        "@kvack Twenty years of nights and the coffee still does the "
+        "steering.",
+        "@tayfta Some roads you just eat and keep the wheels turning.",
+        "@marblehead9 Thirty years on the road and I still laugh at it.",
+    ]
+    # Snapshot BEFORE the reply: posting appends the line to _chat_ai_own,
+    # so comparing against it afterwards compares the answer to itself.
+    own_before = list(b._chat_ai_own)
+    llm.chat_reply = lambda s, u, c=None, **k: (
+        "A boomer is an old-school trucker - twenty years on the road, set "
+        "in his ways, and he has run every mile you are about to.")
+    try:
+        b._on_message("Hardclaws", "#t", "Docbot tell us what a boomer is",
+                      "hardclaws", "broadcaster/1")
+        _drain(b)
+        assert len(b.said) == 1 and b.said[0].startswith("@Hardclaws "), b.said
+        assert "old-school trucker" in b.said[0], b.said
+        assert chatai.DIRECT_FAILURE_LINE not in b.said[0], b.said
+        # An unsolicited chime in the same words is still refused: the
+        # strict rule is unchanged, only the direct bar moved.
+        line_only = b.said[0].split(" ", 1)[1]
+        assert chatai.too_similar(
+            line_only, own_before,
+            source="Docbot tell us what a boomer is"), "ambient bar moved"
+        assert not chatai.too_similar(
+            line_only, own_before,
+            source="Docbot tell us what a boomer is", direct=True), b.said
+
+        # A retry that comes back empty must not REPLACE the answer: it used
+        # to, which is how a good answer became an apology.
+        b2 = _bot(llm_api_key="k")
+        b2._log = logs.append
+        b2._distill = lambda *a, **k: None
+        # Genuine duplication (a verbatim echo of a recent line) still
+        # triggers the re-ask - and when the re-ask comes back EMPTY, the
+        # original answer must survive. It used to be replaced by the
+        # apology, which is how a good answer became "mangled in the gears".
+        dup = "Midnight coffee, fresh donuts, and the road that never ends"
+        b2._chat_ai_own = [dup]
+        calls = []
+
+        def flaky(system, user, cfg=None, **kw):
+            calls.append(system)
+            if "COMPLETELY different" in system:
+                return ""          # the re-ask produces nothing
+            return dup
+
+        llm.chat_reply = flaky
+        b2._on_message("kvack", "#t", "docbot what is a boomer", "kvack", "")
+        _drain(b2)
+        assert len(calls) == 2, calls            # it did re-ask
+        assert len(b2.said) == 1, b2.said
+        assert dup in b2.said[0], b2.said
+        assert chatai.DIRECT_FAILURE_LINE not in b2.said[0], b2.said
+        assert any("posted anyway" in l for l in logs), logs
+
+        # Real duplication is still caught on the direct path - the point is
+        # not to let the bot parrot itself, only to stop punishing a person
+        # who asked a question.
+        assert chatai.too_similar(
+            "Midnight coffee, fresh donuts, and the road that never ends",
+            ["Midnight coffee, fresh donuts, and the road that never ends"],
+            source="doc whats up", direct=True)
+    finally:
+        llm.chat_reply = orig
+    print("[PASS] a direct answer is posted, never refused for reusing a "
+          "word the persona says anyway")
+
+
 def test_a_held_question_is_acknowledged_with_the_wait():
     """A mention held by a rail is announced, with the wait quoted.
 
@@ -1413,9 +1507,14 @@ def test_the_bot_cannot_repeat_itself():
         assert b.said and "scale house" in b.said[0], b.said
         assert any("recycled" in l for l in logs), logs
         # !ask gets the same redemption from the same starting history.
+        # The question must NOT contain the echoed words: 'what is your
+        # favorite midnight snack' exempts 'midnight' as the topic asked
+        # about, so an answer naming midnight snacks is on-topic and is
+        # answered rather than refused - which is the point of the direct
+        # bar. Asking about 3am instead leaves the echo gratuitous.
         calls.clear()
         b._chat_ai_own = list(own)
-        b._reply_ask("Hardclaws", "what is your favorite midnight snack")
+        b._reply_ask("Hardclaws", "what do you reach for at 3am")
         assert len(calls) == 2, calls
         assert "COMPLETELY different" in calls[1]
         assert len(b.said) == 2 and "scale house" in b.said[1], b.said
@@ -3129,6 +3228,7 @@ def main():
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
+    test_a_direct_answer_is_never_refused_for_reusing_a_word()
     test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()
     test_four_people_asking_at_once_all_get_answers()
