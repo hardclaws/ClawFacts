@@ -3289,6 +3289,69 @@ def test_weather_uses_current_data_not_an_archive_search_snippet():
     print("[PASS] weather returns current Open-Meteo conditions, never snippets")
 
 
+def test_a_conditions_question_reaches_the_api_not_a_model():
+    """Live-fire: "what's the temperature in kingman, AZ" was answered by
+    the chat AI, which invented a number. _WEATHER_Q matched only the
+    literal word "weather", so a conditions question phrased any other
+    way fell straight through to a model - the one thing this path
+    exists to prevent. A measurement plus a place is a conditions
+    question; a measurement of anything else is not."""
+    import contextlib
+
+    asks = ["what\u2019s the temperature in kingman, AZ",
+            "is it raining in flagstaff",
+            "how hot is it in phoenix",
+            "wind speed in barstow",
+            "does it snow in denver",
+            "will it rain in tulsa",
+            "temperature in kingman az"]
+    saved = funfacts._weatherapi_answer
+    funfacts._weatherapi_answer = lambda place, options: {
+        "place": place, "kind": "Weather", "_ttl": 300,
+        "facts": ["it is currently Clear in Kingman, Arizona."],
+        "sentence": True, "source": "weatherapi.com"}
+    try:
+        for q in asks:
+            place, kind = funfacts._weather_header(q)
+            assert kind == "Weather" and place, (q, place, kind)
+            # False would mean the question fell through to search or a
+            # model instead of being answered from measured conditions.
+            got = funfacts._weather_answer(q, {})
+            assert got is not False, (q, got)
+            assert got.get("kind") == "Weather", (q, got)
+            assert got.get("source") == "weatherapi.com", (q, got)
+    finally:
+        funfacts._weatherapi_answer = saved
+        with funfacts._cache_lock:
+            funfacts._cache.clear()
+
+    # The weather word still wins on its own, and still asks for a place
+    # rather than guessing one.
+    assert funfacts._weather_header(
+        "whats the weather like in Saint Clair, Mo") == (
+        "Saint Clair, Mo", "Weather")
+    assert funfacts._weather_header("weather") == (None, "Weather")
+
+    # ...but a measurement is only weather when it is asked about a
+    # place, and not about an oven.
+    for q in ["whats the capital of Australia",
+              "what is the temperature of the sun",
+              "what temperature in the oven for chicken",
+              "how long to bake bread in a dutch oven",
+              "who is the boss of wind in sails",
+              "who won the rain bowl in dallas"]:
+        assert funfacts._weather_header(q) == (None, None), q
+
+    # A missing key used to fall back in silence, so the operator had no
+    # way to know their weather was never coming from weatherapi.com.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert funfacts._weatherapi_answer("kingman", {}) is None
+    said = buf.getvalue()
+    assert "no weatherapi_key set" in said, said
+    assert "weatherapi.com/signup" in said, said
+
+
 def test_sunrise_uses_live_clock_data_not_search_debris():
     """Exact live-fire query: a search snippet said only “all times are local”.
     Sunrise/sunset must use geocoded Open-Meteo data, include the actual clock
@@ -3732,6 +3795,7 @@ def main():
     test_the_geocoder_may_not_substitute_a_different_place()
     test_weather_uses_current_data_not_an_archive_search_snippet()
     test_weatherapi_answers_in_the_channels_sentence_when_a_key_is_set()
+    test_a_conditions_question_reaches_the_api_not_a_model()
     test_sunrise_uses_live_clock_data_not_search_debris()
     print("\nALL PASSED ✔")
     return 0

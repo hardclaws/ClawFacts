@@ -3004,6 +3004,26 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("a conditions question reaches the weather API, not a model",
+         # Live-fire: "what's the temperature in kingman, AZ" was answered
+         # by the chat AI with an invented number. _WEATHER_Q matched only
+         # the literal word "weather", so every other phrasing of a
+         # conditions question fell through to a model - the one thing the
+         # weather path exists to prevent. A measurement plus a place is
+         # weather; the same measurement of an oven or the sun is not.
+         funfacts._weather_header(
+             "what\u2019s the temperature in kingman, AZ")
+         == ("kingman, AZ", "Weather")
+         and funfacts._weather_header("does it snow in denver")
+         == ("denver", "Weather")
+         and funfacts._weather_header("weather in kingman")
+         == ("kingman", "Weather")
+         and funfacts._weather_header("what is the temperature of the sun")
+         == (None, None)
+         and funfacts._weather_header(
+             "what temperature in the oven for chicken") == (None, None)
+         and funfacts._weather_header("who is the boss of wind in sails")
+         == (None, None)),
         ("a direct answer is posted, not refused for reusing a word",
          (lambda _live, _own, _q: (
              # Live-fire: "Docbot tell us what a boomer is" was refused with

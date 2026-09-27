@@ -3451,6 +3451,40 @@ def _question_wiki_hits(subject: str):
 
 
 _WEATHER_Q = re.compile(r"\bweather\b", re.IGNORECASE)
+
+#: A conditions question that never says the word "weather". Live-fire:
+#: "what's the temperature in kingman, AZ" fell through to the chat AI,
+#: which invented a number - the one thing this path exists to prevent.
+#: These count only when a place is attached, or "what is the
+#: temperature of the sun" would be hijacked into a forecast.
+_WEATHER_HINT = re.compile(
+    r"\b(?:temperature|temperatures|temp|temps|degrees|"
+    r"rain|raining|rainfall|snow|snowing|sleet|hailing|"
+    r"humid|humidity|windy|wind|gusting|gusts|"
+    r"overcast|drizzle|thunderstorm|lightning|"
+    r"dew\s?point|heat\s?index|wind\s?chill|uv\s?index|"
+    r"feels\s?like|current\s+conditions|"
+    r"how\s+hot|how\s+cold|how\s+warm|how\s+windy|how\s+humid|"
+    r"is\s+it\s+(?:hot|cold|warm|sunny|cloudy|foggy|storming|freezing|"
+    r"raining|snowing|hailing|windy|overcast))\b", re.IGNORECASE)
+
+#: A hint word alone is too loose - "who is the boss of wind in sails"
+#: matched it. A conditions question is ASKED, so the sentence has to
+#: open like one.
+_WEATHER_ASK = re.compile(
+    r"^\s*(?:what|whats|how|hows|is|are|does|do|will|current|"
+    r"temperature|temperatures|temp|temps|degrees|wind|windspeed|"
+    r"rain|raining|rainfall|snow|snowing|humidity|humid|feels|dew|"
+    r"uv|heat|weather|forecast|tell|give|any)\b", re.IGNORECASE)
+
+#: The same words measured on something other than the sky. Without
+#: this, "what temperature in the oven for chicken" asks for a city.
+_NOT_WEATHER = re.compile(
+    r"\b(?:oven|stove|fridge|freezer|refrigerator|cooker|grill|smoker|"
+    r"kettle|bath|shower|pool|engine|coolant|radiator|exhaust|tyre|tire|"
+    r"cpu|gpu|server|laptop|soldering|kiln|forge|incubator|"
+    r"fever|thermometer|chicken|turkey|roast|steak|bread|bake|baking|"
+    r"meat|candy|fudge|yeast)\b", re.IGNORECASE)
 _IN_PLACE = re.compile(
     r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
@@ -3540,11 +3574,20 @@ def _weather_header(question: str):
     76.7F...' - the DATA was right, the label was wrong. Weather is
     data, not trivia: it gets its own header and the place as the
     label instead of the whole question."""
-    if not _WEATHER_Q.search(question or ""):
-        return None, None
-    m = _IN_PLACE.search((question or "").strip().rstrip(" ?!."))
+    question = question or ""
+    m = _IN_PLACE.search(question.strip().rstrip(" ?!."))
     place = " ".join(m.group(1).split()) if m else None
-    return place, "Weather"
+    if _WEATHER_Q.search(question):
+        # "weather" is unambiguous: with no place it asks for one rather
+        # than guessing, which is the behaviour the channel already has.
+        return place, "Weather"
+    if place and _WEATHER_ASK.match(question) \
+            and _WEATHER_HINT.search(question) \
+            and not _NOT_WEATHER.search(question):
+        # A measurement plus a place is a conditions question even
+        # without the word "weather" in it.
+        return place, "Weather"
+    return None, None
 
 
 _WEATHER_CODES = {
@@ -3606,6 +3649,9 @@ def _weatherapi_answer(place: str, options: dict) -> dict | None:
     """
     key = (options.get("weatherapi_key") or "").strip()
     if not key:
+        print("[funfacts] no weatherapi_key set - answering from "
+              "Open-Meteo instead of the sentence format; free key at "
+              "weatherapi.com/signup", flush=True)
         return None
     try:
         data = _http_get_json(WEATHERAPI_API,
@@ -3695,7 +3741,7 @@ def _weatherapi_answer(place: str, options: dict) -> dict | None:
     # 'sentence' tells the bot to post this as a line addressed to the
     # asker ('kvack, it is currently...') rather than under a header.
     return {"place": where, "kind": "Weather", "_ttl": 300,
-            "facts": [fact], "sentence": True}
+            "facts": [fact], "sentence": True, "source": "weatherapi.com"}
 
 
 #: A question about something that HAPPENED - recency words, or a date.
@@ -4200,9 +4246,10 @@ def _weather_answer(question: str, options: dict = None):
     if precipitation is not None and precipitation > 0:
         pieces.append(f"precipitation {precipitation:.2f} in")
     fact = "; ".join(pieces) + "."
-    print(f"[funfacts] current weather for {label}: {fact}", flush=True)
+    print(f"[funfacts] current weather for {label} (open-meteo "
+          f"fallback): {fact}", flush=True)
     return {"place": label, "kind": "Weather", "_ttl": 300,
-            "facts": [fact]}
+            "facts": [fact], "source": "open-meteo"}
 
 
 def _question_place(question: str) -> str:

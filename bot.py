@@ -4279,7 +4279,9 @@ class TwitchBot:
             prefix = f"{nick}, "
             msg = prefix + trim_to_fit(fact, max(40, limit - len(prefix)))
             self._say(msg)
-            self._log(f"replied for {argument!r}")
+            self._log(f"replied for {argument!r}"
+                      + (f" via {result['source']}"
+                         if result.get("source") else ""))
             return
         name = result.get('kind') \
             or self.cfg.get('fact_prefix', 'FunFact')
@@ -4298,7 +4300,9 @@ class TwitchBot:
         fact = trim_to_fit(fact, max(40, limit - len(prefix)))
         msg = prefix + fact
         self._say(msg)
-        self._log(f"replied for {argument!r}")
+        self._log(f"replied for {argument!r}"
+                  + (f" via {result['source']}"
+                     if result.get("source") else ""))
 
 
 def _doctor_questions(cfg: dict) -> None:
