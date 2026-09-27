@@ -427,6 +427,63 @@ def test_emoji_walls_never_chime():
     print("[PASS] emoji walls never chime; real lines and mentions do")
 
 
+def test_a_longer_recap_window_remembers_more():
+    """Live-fire: "the last 24 hours", "over the week" and "the last five
+    days" came back with the same four events. Nothing parsed the period,
+    and recall() returned eight most-recent distilled facts whichever
+    window was named. Worse, the messages table - ninety days of real
+    chat, written on every line - had never been READ: its only queries
+    were the two DELETEs. A recap now reads the period's own chat, so a
+    longer window genuinely knows more."""
+    import os
+    import tempfile
+
+    import memory
+
+    now = time.time()
+    box = {"t": now - 6 * 86400}
+    m = memory.Memory(os.path.join(tempfile.mkdtemp(), "m.db"),
+                      clock=lambda: box["t"])
+    script = [(0.0, "Hardclaws",
+               "swapped a flat on the 18-wheel outside Lubbock"),
+              (1.0, "iKembo", "still hunting that perfect USB-C cable"),
+              (2.0, "LePageMaster",
+               "rolled through Lubbock, seven dirty lepages on the board"),
+              (2.5, "DaniLikesDonuts",
+               "that tarp job in the rain was something else"),
+              (3.0, "JetPinky",
+               "the scale house at Amarillo had us waiting forty minutes"),
+              (4.0, "iKembo", "finally found a cable that does 240 watts"),
+              (5.9, "Hardclaws", "parked up for the night, see you tomorrow")]
+    try:
+        for day, nick, text in script:
+            box["t"] = now - (6 - day) * 86400
+            m.note(nick, nick.lower(), text)
+        # The bot's own command line is not a stream event.
+        box["t"] = now
+        m.note("DocBot", "docbot", "!weather kingman")
+
+        got = m.digest(now - 7 * 86400, skip=("DocBot",))
+        assert "DocBot" not in {n for _, n, _ in got}, got
+        day_1 = {t for _, _, t in m.digest(now - 86400, skip=("DocBot",))}
+        day_5 = {t for _, _, t in m.digest(now - 5 * 86400,
+                                           skip=("DocBot",))}
+        week = {t for _, _, t in got}
+        assert day_1, day_1
+        assert day_1 < day_5 < week, (len(day_1), len(day_5), len(week))
+
+        # The window in the question is what selects the material.
+        assert chatai.recap_window("story wrapup about the last 24hours") \
+            == (86400.0, "the last 24 hours")
+        assert chatai.recap_window("highlights over the week") \
+            == (604800.0, "the last week")
+        assert chatai.recap_window("highlights over the last 5 days") \
+            == (432000.0, "the last 5 days")
+        assert chatai.recap_window("what is a lepage") is None
+    finally:
+        m.close()
+
+
 def test_a_direct_answer_is_never_refused_for_reusing_a_word():
     """Live-fire, 2026-09-18: 'Docbot tell us what a boomer is' came back
     'I heard you, but my answer got mangled in the gears. Try me once more.'
@@ -3228,6 +3285,7 @@ def main():
     test_a_timed_out_model_is_not_asked_twice()
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
+    test_a_longer_recap_window_remembers_more()
     test_a_direct_answer_is_never_refused_for_reusing_a_word()
     test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()

@@ -3004,6 +3004,22 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("a recap reads the period it was asked about",
+         # Live-fire: 'the last 24 hours', 'over the week' and 'the last
+         # five days' returned the same four events. Nothing parsed the
+         # period, and the ninety-day message log - written on every line
+         # of chat - had never been read: its only queries against it were
+         # the two DELETEs.
+         (lambda _ch=__import__("chatai"), _mem=__import__("memory"): (
+             _ch.recap_window("story wrapup about the last 24hours")
+             == (86400.0, "the last 24 hours")
+             and _ch.recap_window("highlights over the week")
+             == (604800.0, "the last week")
+             and _ch.recap_window("highlights over the last 5 days")
+             == (432000.0, "the last 5 days")
+             and _ch.recap_window("what is a lepage") is None
+             and callable(getattr(_mem.Memory, "digest", None))
+             and callable(getattr(_mem.Memory, "transcript", None))))()),
         ("a conditions question reaches the weather API, not a model",
          # Live-fire: "what's the temperature in kingman, AZ" was answered
          # by the chat AI with an invented number. _WEATHER_Q matched only

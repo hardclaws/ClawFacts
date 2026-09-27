@@ -147,6 +147,63 @@ class Memory:
         except sqlite3.Error:
             return []
 
+    # ---- the log, read back ---------------------------------------
+    def transcript(self, since: float, limit: int = 1500,
+                   nicks: list = None) -> list:
+        """Logged chat newer than ``since``, oldest first: [(ts, nick, text)].
+
+        The messages table has always been written - every line of chat
+        goes through note() - and was never read: the only queries
+        against it were the two DELETEs. Recaps drew eight distilled
+        facts instead, which is why a five-day recap reported the same
+        four events as a one-day one.
+        """
+        if not self.ok:
+            return []
+        sql = "SELECT ts, nick, text FROM messages WHERE ts >= ?"
+        args = [since]
+        names = sorted({(n or "").strip()
+                        for n in (nicks or []) if n and n.strip()})
+        if names:
+            sql += " AND nick IN (%s)" % ",".join("?" * len(names))
+            args.extend(names)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(max(1, int(limit)))
+        try:
+            with self._lock:
+                rows = self._db.execute(sql, tuple(args)).fetchall()
+            return [(r[0], r[1], r[2]) for r in reversed(rows)]
+        except sqlite3.Error:
+            return []
+
+    def digest(self, since: float, limit: int = 40, skip=()) -> list:
+        """A spread of the period's real chat, not its last `limit` lines.
+
+        Taking the newest N lines of a five-day window reports only the
+        last hour, which is the complaint this exists to answer. The
+        window is bucketed and the most substantive line taken from each,
+        so a long period is represented end to end. Commands, the bot's
+        own lines and one-word noise are dropped: none of it is a story.
+        """
+        rows = self.transcript(since)
+        if not rows:
+            return []
+        drop = {(n or "").strip().lower() for n in skip if n and n.strip()}
+        kept = []
+        for ts, nick, text in rows:
+            t = " ".join((text or "").split())
+            if len(t) < 12 or t.startswith(("!", "/")):
+                continue
+            if (nick or "").strip().lower() in drop:
+                continue
+            kept.append((ts, nick, t))
+        if len(kept) <= max(1, limit):
+            return kept
+        buckets = [[] for _ in range(max(1, limit))]
+        for i, row in enumerate(kept):
+            buckets[i * len(buckets) // len(kept)].append(row)
+        return [max(b, key=lambda r: len(r[2])) for b in buckets if b]
+
     # ---- the exit ----------------------------------------------------
     def purge(self, nick: str) -> int:
         """Erase everything held about one viewer: their memories AND their

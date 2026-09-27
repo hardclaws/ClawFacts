@@ -121,12 +121,67 @@ def system_prompt(persona: str = "") -> str:
             + _RULES)
 
 
+_WINDOW_NUM = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "couple": 2, "three": 3,
+    "few": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "twenty": 20,
+    "thirty": 30,
+}
+
+_WINDOW_UNIT = {"hour": 3600.0, "hr": 3600.0, "hours": 3600.0,
+                "day": 86400.0, "days": 86400.0,
+                "week": 604800.0, "weeks": 604800.0,
+                "month": 2592000.0, "months": 2592000.0}
+
+#: "the last 24hours", "over the week", "the last five days". The number
+#: is optional and may be a word; "24hours" with no space is how it was
+#: actually typed.
+_RECAP_WINDOW = re.compile(
+    r"\b(?:last|past|previous|over|this|during|in)\s+(?:the\s+)?"
+    r"(?:(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|twenty|thirty|a|an|couple(?:\s+of)?|few)\s*)?"
+    r"(hours?|hrs?|days?|weeks?|months?)\b", re.IGNORECASE)
+
+
+def recap_window(text: str):
+    """(seconds, 'the last 5 days') when the message asks about a period.
+
+    Live-fire: "the last 24 hours", "over the week" and "the last five
+    days" were three different questions that got three near-identical
+    answers, because nothing ever parsed the period - the recall was
+    eight most-recent facts whichever window was named. None means the
+    message is not a recap, and the caller leaves memory alone.
+    """
+    m = _RECAP_WINDOW.search(text or "")
+    if not m:
+        return None
+    unit = _WINDOW_UNIT.get(m.group(2).lower())
+    if unit is None:
+        return None
+    raw = (m.group(1) or "").lower().replace(" of", "").strip()
+    if raw.isdigit():
+        count = int(raw)
+    else:
+        count = _WINDOW_NUM.get(raw, 0)
+    if not count:
+        # "over the week" / "this month": the unit alone means one of it.
+        count = 1
+    count = min(count, 366)             # a recap is not an archive
+    secs = unit * count
+    said = m.group(2).lower()
+    one = {"hr": "hour", "hrs": "hour"}.get(said, said.rstrip("s"))
+    label = f"the last {one}" if count == 1 \
+        else f"the last {count} {said}"
+    return secs, label
+
+
 def user_prompt(lines: list, nick: str, text: str,
                 memories: list = None, quiet: bool = False,
                 max_lines: int = 15, max_memories: int = 8,
                 own: list = None, overheard: bool = False,
                 notice: str = None, knowledge: bool = False,
-                ongoing: list = None, task: str = None) -> str:
+                ongoing: list = None, task: str = None,
+                history: list = None, window_label: str = "") -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
@@ -253,6 +308,19 @@ def user_prompt(lines: list, nick: str, text: str,
                        "reason - in your own voice, one line. If you "
                        "genuinely do not know, say so; never invent a "
                        "number.")
+    if history:
+        # The period's real chat, straight from the log. Without it a
+        # recap had only eight distilled facts to work from, so every
+        # window came back with the same four events - and a model asked
+        # for a week it cannot see will invent one.
+        out.append("")
+        out.append("WHAT ACTUALLY HAPPENED"
+                   + (f" IN {window_label.upper()}" if window_label else "")
+                   + " (real chat from the log, oldest first):")
+        out.extend(f"- {h}" for h in history)
+        out.append("Answer ONLY from these lines and the facts above. If "
+                   "they do not cover what was asked, say so plainly - "
+                   "never invent an event, a count, a place or a name.")
     out.append("")
     out.append("Your line:")
     return "\n".join(out)

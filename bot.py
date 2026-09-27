@@ -3251,6 +3251,26 @@ class TwitchBot:
                       + [streamer.lower() if streamer else ""])
         memories = self._memory.recall(
             candidates) if self._memory.ok else []
+        # A recap asks about a PERIOD, and the period was never parsed:
+        # 'the last 24 hours', 'over the week' and 'the last five days'
+        # all drew the same eight most-recent facts and came back with
+        # the same four events. Read the window's real chat - the log has
+        # always been written and was never read.
+        history, window_label = [], ""
+        window = chatai.recap_window(text)
+        if window and self._memory.ok:
+            secs, window_label = window
+            history = [
+                "[%s] %s: %s" % (time.strftime("%a %H:%M",
+                                               time.localtime(ts)),
+                                 who, said)
+                for ts, who, said in self._memory.digest(
+                    time.time() - secs, skip=(self.nick,))]
+            self._log(f"recap over {window_label}: {len(history)} lines of "
+                      f"real chat")
+            if not history:
+                self._log(f"nothing logged in {window_label} - the recap "
+                          f"will say so rather than invent events")
         # A local model on CPU reads the whole prompt before writing a
         # word - that read, not the generation, is what blew a 20s
         # timeout on a warm model. Send it a smaller room and fewer
@@ -3283,7 +3303,9 @@ class TwitchBot:
                                    overheard=overheard,
                                    notice=self._standing_notice(),
                                    knowledge=knowledge,
-                                   ongoing=going_on, task=task),
+                                   ongoing=going_on, task=task,
+                                   history=history,
+                                   window_label=window_label),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
