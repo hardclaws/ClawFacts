@@ -143,13 +143,34 @@ _RECAP_WINDOW = re.compile(
     r"twelve|twenty|thirty|a|an|couple(?:\s+of)?|few)\s*)?"
     r"(hours?|hrs?|days?|weeks?|months?)\b", re.IGNORECASE)
 
-#: "summary of the stream so far", "recap so far", "what happened today",
-#: "stream today", "so far" - these have no hour/day unit but are still
-#: a recap request. They should not be missed because the regex above
-#: needs a unit.
+#: "summary of the stream so far", "recap so far", "what happened today
+#: in chat", "interesting chat today", "stream today", "so far" - these
+#: have no hour/day unit but are still a recap request when they mention
+#: chat/stream/recap/summary/what happened. They should not be missed
+#: because the regex above needs a unit, but "today" alone is not a recap.
 _RECAP_SO_FAR = re.compile(
-    r"\b(?:summary|recap|so\s+far|what\s+happened|stream\s+so\s+far|"
-    r"today|this\s+stream|stream\s+today|today'?s?\s+stream)\b",
+    r"\b(?:"
+    r"summary\s+of\s+(?:the\s+)?stream|"
+    r"recap\s+of\s+(?:the\s+)?stream|"
+    r"summary\s+of\s+stream|"
+    r"stream\s+so\s+far|"
+    r"so\s+far\s+today|"
+    r"what\s+happened\s+(?:today\s+)?in\s+chat|"
+    r"what\s+happened\s+in\s+chat|"
+    r"interesting\s+chat|"
+    r"chat\s+going\s+on|"
+    r"had\s+any\s+.*chat|"
+    r"this\s+stream|"
+    r"stream\s+today|"
+    r"today'?s?\s+stream|"
+    r"recap|"
+    r"summary\s+so\s+far|"
+    r"so\s+far"
+    r")\b",
+    re.IGNORECASE)
+# More precise: chat/stream history questions, not just "today"
+_RECAP_CHAT = re.compile(
+    r"\b(?:chat|stream|recap|summary)\b",
     re.IGNORECASE)
 
 #: "who gave a story about a 5k run", "who spoke about X", "who mentioned X"
@@ -223,16 +244,26 @@ def recap_window(text: str):
             label = f"the last {one}" if count == 1 \
                 else f"the last {count} {said}"
             return secs, label
-    # "summary of the stream so far", "what happened today", "this stream"
-    # have no hour/day unit but are still a recap request. Previously
-    # "Docbot give us a summary of the stream so far" returned None and
-    # the model hallucinated a 5K run recap with no attribution.
+    # "summary of the stream so far", "interesting chat today",
+    # "stream so far" have no hour/day unit but are still a recap request
+    # when they mention chat/stream. Previously "Docbot give us a summary
+    # of the stream so far" returned None and the model hallucinated a 5K
+    # run recap with no attribution. "today" alone is NOT a recap, it is
+    # news, unless it also mentions chat/stream.
     if _RECAP_SO_FAR.search(t):
+        # "whats the news today" contains "today" but also "news" - not a recap
         low = t.lower()
-        if "today" in low:
+        if "news" in low or "headline" in low:
+            pass
+        else:
+            if "today" in low or "chat" in low:
+                return 86400.0, "today"
+            return 43200.0, "so far today"
+    # Fallback: explicit "what happened today in chat" or "interesting chat"
+    if _RECAP_CHAT.search(t) and ("today" in t.lower() or "so far" in t.lower() or "what happened" in t.lower()):
+        low = t.lower()
+        if "news" not in low:
             return 86400.0, "today"
-        # "so far", "this stream", "stream so far" -> 12h typical stream
-        return 43200.0, "so far today"
     return None
 
 
@@ -1455,6 +1486,16 @@ def factual_question(text: str, names=()) -> bool:
     things UP, and there is no article to look up for a typical 5K
     time. The chat model answers those from what it knows."""
     t = strip_address(text, names)
+    # Chat-history questions must not go to the fact engine: "we had any
+    # interesting chat going on today" was routed to news and answered
+    # with a Polygon headline about Control Resonant.
+    low = t.lower()
+    if "chat" in low or "in chat" in low:
+        return False
+    if recap_window(t) is not None:
+        return False
+    if who_spoke_about(t) is not None:
+        return False
     if weather_question(t):
         return True
     if funfacts.news_question(t) and not _OPINION_Q.match(t):

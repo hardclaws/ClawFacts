@@ -3889,6 +3889,14 @@ def news_question(question: str) -> bool:
         return False
     if _YOUR_NEWS.search(q):
         return False            # sharing news, or asking about the bot's
+    # "interesting chat going on today" is about the stream's chat history,
+    # not the news. Previously "today" + "going on" matched news and the bot
+    # answered a chat-history question with a Polygon headline.
+    low = q.lower()
+    if "chat" in low or "in chat" in low:
+        return False
+    if re.search(r"\b(?:stream|recap|summary)\b.*\b(?:today|so\s+far)\b|\b(?:today|so\s+far)\b.*\b(?:stream|recap|summary)\b", low):
+        return False
     if _TOP_NEWS_Q.search(q):
         # 'whats the news' / 'headlines?' / 'where the news' - the
         # day's headlines, no recency word needed: the ask IS recent.
