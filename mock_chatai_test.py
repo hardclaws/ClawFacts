@@ -484,6 +484,71 @@ def test_a_longer_recap_window_remembers_more():
         m.close()
 
 
+def recap_does_not_echo_the_request():
+    """check_fixes entry point: a check reports False, it never raises.
+
+    An uncaught AssertionError here took the whole self-check banner down
+    instead of naming the one missing fix - and that banner is what tells
+    the operator which build they are running."""
+    try:
+        test_a_recap_does_not_quote_the_request_back_as_an_event()
+        return True
+    except Exception:
+        return False
+
+
+def test_a_recap_does_not_quote_the_request_back_as_an_event():
+    """Captured off the real bot, not a paraphrase: the recap's own ask
+    arrived as the last of the week's events -
+
+        [Mon 00:09] Hardclaws: Docbot tell us the highlights over the week
+
+    A question is not a thing that happened, and neither is anyone else's
+    ask of the bot. Both are dropped from the material."""
+    import llm as llm_mod
+
+    b = _bot(llm_api_key="k")
+    b._distill = lambda *a, **k: None
+    logs = []
+    b._log = lambda *a, **k: logs.append(" ".join(str(x) for x in a))
+    now = time.time()
+    box = {"t": now - 3 * 86400}
+    b._memory.clock = lambda: box["t"]
+    b._memory.note("Hardclaws", "hardclaws",
+                   "swapped a flat on the 18-wheel outside Lubbock")
+    box["t"] = now - 86400
+    b._memory.note("iKembo", "ikembo",
+                   "finally found a cable that does 240 watts")
+    box["t"] = now
+
+    captured = {}
+    saved = llm_mod.chat_reply
+
+    def fake(system, user, opts=None, **kw):
+        captured["user"] = user
+        return "here is your recap"
+
+    llm_mod.chat_reply = fake
+    try:
+        ask = "Docbot tell us the highlights over the week"
+        b._on_message("Hardclaws", "#t", ask, "hardclaws", "broadcaster/1")
+        _join_acks(b)
+        for _ in range(4):
+            _drain(b)
+        _drain(b)
+    finally:
+        llm_mod.chat_reply = saved
+
+    prompt = captured.get("user") or ""
+    assert "WHAT ACTUALLY HAPPENED" in prompt, prompt[-400:]
+    block = prompt[prompt.index("WHAT ACTUALLY HAPPENED"):]
+    assert "Docbot tell us" not in block, block
+    assert ask not in block, block
+    assert "swapped a flat on the 18-wheel" in block, block
+    assert "240 watts" in block, block
+    assert any("recap over the last week" in ln for ln in logs), logs
+
+
 def test_a_direct_answer_is_never_refused_for_reusing_a_word():
     """Live-fire, 2026-09-18: 'Docbot tell us what a boomer is' came back
     'I heard you, but my answer got mangled in the gears. Try me once more.'
@@ -3286,6 +3351,7 @@ def main():
     test_a_tease_gets_a_comeback_when_the_model_is_down()
     test_emoji_walls_never_chime()
     test_a_longer_recap_window_remembers_more()
+    test_a_recap_does_not_quote_the_request_back_as_an_event()
     test_a_direct_answer_is_never_refused_for_reusing_a_word()
     test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()

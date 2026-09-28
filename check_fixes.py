@@ -3004,6 +3004,13 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("a recap does not quote the request back as an event",
+         # Captured off the real bot: the recap's own ask arrived as the
+         # last of the week's events, '[Mon 00:09] Hardclaws: Docbot tell
+         # us the highlights over the week'. A question is not a thing
+         # that happened. Runs the real path - _on_message through the job
+         # queue to the prompt handed to the model - not a copy of it.
+         __import__("mock_chatai_test").recap_does_not_echo_the_request()),
         ("a recap reads the period it was asked about",
          # Live-fire: 'the last 24 hours', 'over the week' and 'the last
          # five days' returned the same four events. Nothing parsed the

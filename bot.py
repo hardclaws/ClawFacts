@@ -3260,12 +3260,21 @@ class TwitchBot:
         window = chatai.recap_window(text)
         if window and self._memory.ok:
             secs, window_label = window
-            history = [
-                "[%s] %s: %s" % (time.strftime("%a %H:%M",
-                                               time.localtime(ts)),
-                                 who, said)
-                for ts, who, said in self._memory.digest(
-                    time.time() - secs, skip=(self.nick,))]
+            names = tuple(n.lower() for n in self._chat_ai_names if n)
+            ask = " ".join((text or "").split()).lower()
+            history = []
+            for ts, who, line in self._memory.digest(
+                    time.time() - secs, skip=(self.nick,)):
+                flat = " ".join(line.split())
+                # The recap request is not one of the week's events, and
+                # neither is anyone else's ask of the bot. Left in, the
+                # model was handed its own question as a thing that
+                # happened - live-fire it appeared as the last entry.
+                if flat.lower() == ask or flat.lower().startswith(names):
+                    continue
+                history.append("[%s] %s: %s" % (
+                    time.strftime("%a %H:%M", time.localtime(ts)),
+                    who, flat))
             self._log(f"recap over {window_label}: {len(history)} lines of "
                       f"real chat")
             if not history:
