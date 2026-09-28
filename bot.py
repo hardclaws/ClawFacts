@@ -3427,6 +3427,8 @@ class TwitchBot:
                     flat = " ".join(line.split())
                     if flat.lower() == ask or flat.lower().startswith(names):
                         continue
+                    if chatai.mention_kind(flat, self._chat_ai_names) is not None:
+                        continue
                     history.append("[%s] %s: %s" % (
                         time.strftime("%a %H:%M", time.localtime(ts)),
                         who, flat))
@@ -3436,6 +3438,8 @@ class TwitchBot:
                             time.time() - secs, skip=(self.nick,)):
                         flat = " ".join(line.split())
                         if flat.lower() == ask or flat.lower().startswith(names):
+                            continue
+                        if chatai.mention_kind(flat, self._chat_ai_names) is not None:
                             continue
                         history.append("[%s] %s: %s" % (
                             time.strftime("%a %H:%M", time.localtime(ts)),
@@ -3448,7 +3452,10 @@ class TwitchBot:
                     # neither is anyone else's ask of the bot. Left in, the
                     # model was handed its own question as a thing that
                     # happened - live-fire it appeared as the last entry.
+                    # Also filter any line that mentions the bot.
                     if flat.lower() == ask or flat.lower().startswith(names):
+                        continue
+                    if chatai.mention_kind(flat, self._chat_ai_names) is not None:
                         continue
                     history.append("[%s] %s: %s" % (
                         time.strftime("%a %H:%M", time.localtime(ts)),
