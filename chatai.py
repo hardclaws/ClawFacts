@@ -518,8 +518,27 @@ def _blocked_output(line: str) -> bool:
     if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
                  line, re.IGNORECASE):
         return True          # "check !funfact" died with the redirect rule
-    return bool(funfacts._EXPLICIT.search(line)
-                or funfacts._TASTELESS.search(line))
+    # Explicit filter: block porn, but allow educational sexual health.
+    # Previously "No, pregnancy can't occur from oral sex; sperm would need
+    # to travel to the uterus, which doesn't happen during a blowjob" was
+    # rejected because it contains "blowjob" matching _EXPLICIT, so the bot
+    # posted only "NO, pregnancy cannot occur from oral sex." - cut short.
+    if funfacts._EXPLICIT.search(line):
+        low = line.lower()
+        # Really explicit: always block
+        if re.search(r"\b(?:porn\w*|xxx|bukkake|fisting|cumshot\w*|gangbang\w*)\b", low):
+            return True
+        # Educational sexual health: pregnancy, etc. - allow even if it says
+        # blowjob/oral sex, as long as it's not pornographic.
+        if ("pregnancy" in low or "pregnant" in low) and ("cannot" in low or "can't" in low or "can not" in low or "no" in low or "does not" in low or "doesn't" in low or "cannot occur" in low):
+            return False
+        # Also allow general educational: "oral sex cannot cause pregnancy"
+        if "oral sex" in low and ("pregnancy" in low or "pregnant" in low):
+            return False
+        return True
+    if funfacts._TASTELESS.search(line):
+        return True
+    return False
 
 
 #: A reasoning model's THINKING, delivered as the answer. Live-fire
