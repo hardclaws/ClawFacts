@@ -3004,6 +3004,21 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("the example config ships a working local model",
+         # config.example.json is what a new operator copies, and it had an
+         # empty llm_fallback_providers - so anyone starting from it got a
+         # running log written by a hosted provider, with no local model in
+         # the file to fix that. The local entry and the six running-log
+         # knobs are now in it.
+         (lambda _ex: (
+             any(__import__("llm")._is_local(e.get("base_url", ""))
+                 for e in _ex.get("llm_fallback_providers", []))
+             and all(k in _ex for k in (
+                 "memory_summary_minutes", "memory_summary_min_lines",
+                 "memory_summary_max_lines", "memory_summary_local_lines",
+                 "memory_summary_timeout", "memory_summary_local_only"))
+         ))(__import__("json").load(__import__("io").open(
+             "config.example.json", encoding="utf-8")))),
         ("the running log names its writer, and can refuse a hosted one",
          # 'How do we make sure the local model gets used?' The operator's
          # own config had no local endpoint in it at all, so the running
