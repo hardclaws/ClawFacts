@@ -3004,6 +3004,13 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("appending a local model does not displace the hosted one",
+         # Live-fire: the example config's single local entry read as a
+         # REPLACEMENT for the Google entry already in the operator's
+         # llm_fallback_providers, which would have silently taken Gemini
+         # out of the chat fallback chain. It is a list - the old chain
+         # must survive as a prefix of the new one, with Ollama last.
+         __import__("mock_llm_test").appending_local_keeps_the_hosted_provider()),
         ("the example config ships a working local model",
          # config.example.json is what a new operator copies, and it had an
          # empty llm_fallback_providers - so anyone starting from it got a

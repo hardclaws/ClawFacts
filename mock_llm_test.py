@@ -75,6 +75,64 @@ def test_the_running_log_prefers_the_local_model():
         llm._model_unavailable = saved_unavail
 
 
+def test_appending_a_local_model_does_not_displace_the_hosted_one():
+    """Live-fire: the operator read the example config's single local entry
+    as a REPLACEMENT for the Google entry already in their
+    llm_fallback_providers - which would have silently taken Gemini out of
+    the chat fallback chain and left chat one provider short.
+
+    It is a list. Appending keeps both: chat still tries the hosted
+    providers in the same order with Ollama as the new last resort, while
+    the running log - which looks for the first LOCAL entry - goes to
+    Ollama wherever it sits."""
+    import json
+
+    hosted = {
+        "llm_api_key": "k",
+        "llm_base_url": "https://api.groq.com/openai/v1",
+        "llm_model": "openai/gpt-oss-120b",
+        "llm_fallback_key": "k2",
+        "llm_fallback_base_url": "https://openrouter.ai/api/v1",
+        "llm_fallback_model": "some/model:free",
+        "llm_fallback_providers": [
+            {"base_url":
+             "https://generativelanguage.googleapis.com/v1beta/openai",
+             "key": "k3", "model": "gemini-3.8-flash"}]}
+    appended = json.loads(json.dumps(hosted))
+    appended["llm_fallback_providers"].append(
+        {"base_url": "http://localhost:11434/v1", "key": "",
+         "model": "qwen3:8b"})
+
+    before = [b for b, _k, _m in llm.fallback_providers(hosted)]
+    after = [b for b, _k, _m in llm.fallback_providers(appended)]
+    # Nothing displaced: the old chain survives as a prefix of the new one.
+    assert after[:len(before)] == before, (before, after)
+    assert len(after) == len(before) + 1, (before, after)
+    assert after[-1] == "http://localhost:11434/v1", after
+
+    calls = []
+    saved_chain, saved_unavail = llm._chat_call_chain, llm._model_unavailable
+    llm._chat_call_chain = (
+        lambda base, models, key, prompt, system, timeout, budget, cfg,
+        extra, **kw: (calls.append(base), "x")[1])
+    llm._model_unavailable = lambda b, m: False
+    try:
+        llm.summarize_stream("s", "u", appended)
+    finally:
+        llm._chat_call_chain = saved_chain
+        llm._model_unavailable = saved_unavail
+    assert calls and "localhost:11434" in calls[-1], calls
+
+
+def appending_local_keeps_the_hosted_provider():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_appending_a_local_model_does_not_displace_the_hosted_one()
+        return True
+    except Exception:
+        return False
+
+
 def running_log_prefers_the_local_model():
     """check_fixes entry point: a check reports False, it never raises."""
     try:
@@ -1052,6 +1110,14 @@ def main():
             _os.environ["NVIDIA_API_KEY"] = _had_nv
     print("[PASS] an ordered provider list carries chat: Groq -> NIM -> "
           "Gemini, each on its own key and its own rest window")
+
+    try:
+        test_appending_a_local_model_does_not_displace_the_hosted_one()
+        print("[PASS] appending a local model keeps the hosted one in the "
+              "chat chain")
+    except AssertionError as exc:
+        ok = False
+        print(f"[FAIL] appending a local model keeps the hosted one: {exc}")
 
     try:
         test_the_running_log_prefers_the_local_model()
