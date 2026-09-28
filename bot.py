@@ -2507,6 +2507,9 @@ class TwitchBot:
             cap = min(cap, max(20, int(
                 self.cfg.get("memory_summary_local_lines", 60))))
         previous = self._memory.summaries(resume - every, limit=1)
+        # A quiet slice gets a sentence or two and a busy one a paragraph,
+        # so the spine carries the hour's actual shape instead of thirty-
+        # six equal blurbs.
         budget = memory_mod.summary_budget(len(rows))
         want = 2 if len(rows) < 15 else (4 if len(rows) < 50 else 8)
         try:
