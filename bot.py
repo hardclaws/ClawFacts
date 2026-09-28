@@ -2498,7 +2498,8 @@ class TwitchBot:
         if len(rows) < need:
             age = now - resume
             if age < 6 * 3600:
-                self._log(f"stream memory: only {len(rows)} usable lines since {time.strftime('%H:%M', time.localtime(resume))} (need {need}), age {age/60:.0f}min - waiting (6h fallback at {6*3600/3600:.0f}h)")
+                if int(now) % 300 < 30:
+                    self._log(f"stream memory: only {len(rows)} usable lines since {time.strftime('%H:%M', time.localtime(resume))} (need {need}), age {age/60:.0f}min - waiting (6h fallback at {6*3600/3600:.0f}h)")
                 return False
             else:
                 self._log(f"stream memory: only {len(rows)} lines after {age/3600:.1f}h - forcing slice anyway (6h fallback)")
