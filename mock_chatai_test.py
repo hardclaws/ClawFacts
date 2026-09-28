@@ -521,6 +521,7 @@ def test_a_recap_covers_the_whole_stream_not_a_sample_of_it():
             return getattr(time_mod, name)
 
     saved_time, saved_reply = bot_mod.time, llm_mod.chat_reply
+    saved_summary = llm_mod.summarize_stream
     bot_mod.time = Shim()
     b._memory.clock = lambda: clock["t"]
     captured = {}
@@ -538,6 +539,9 @@ def test_a_recap_covers_the_whole_stream_not_a_sample_of_it():
         return "here is your recap"
 
     llm_mod.chat_reply = fake
+    # The running log is written by summarize_stream, not chat_reply: it
+    # needs the local model's patience, not chat's 30-second cap.
+    llm_mod.summarize_stream = fake
     try:
         for i in range(30):                 # the first hour
             clock["t"] = now - 12 * 3600 + i * 60
@@ -569,6 +573,7 @@ def test_a_recap_covers_the_whole_stream_not_a_sample_of_it():
     finally:
         bot_mod.time = saved_time
         llm_mod.chat_reply = saved_reply
+        llm_mod.summarize_stream = saved_summary
 
     prompt = captured.get("user") or ""
     assert "RUNNING LOG OF THE STREAM" in prompt, prompt[-400:]

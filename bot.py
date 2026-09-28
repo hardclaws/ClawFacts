@@ -209,6 +209,11 @@ DEFAULTS = {
     "memory_summary_minutes": 20,
     "memory_summary_min_lines": 8,
     "memory_summary_max_lines": 150,
+    # A local model on CPU is the right tool for this and the wrong tool
+    # for a reply: it is free and patient, but reading is what costs. It
+    # gets a smaller slice and a budget chat never gets.
+    "memory_summary_local_lines": 60,
+    "memory_summary_timeout": 240,
     "chat_ai_distill_minutes": 10,
     "chat_ai_chance": 0.10,
     "chat_ai_max_hour": 6,
@@ -2393,6 +2398,22 @@ class TwitchBot:
             except Exception as exc:
                 self._log(f"memory-keeper error: {exc!r}")
 
+    def _summary_is_local(self) -> bool:
+        """True when a local Ollama can do the summarising.
+
+        The local model is the right tool for the running log and the
+        wrong one for a reply: free, private, no rate limit, and patient -
+        but on CPU it is reading that costs, so it gets a smaller slice
+        per call than a hosted API would."""
+        import llm as llm_mod
+        if llm_mod._is_local((self._opts.get("llm_base_url") or "").strip()):
+            return True
+        try:
+            return any(llm_mod._is_local(b) and m
+                       for b, _k, m in llm_mod.fallback_providers(self._opts))
+        except Exception:
+            return False
+
     def _summarize_stream(self) -> bool:
         """One slice: distil the chat since the last one. True if stored."""
         import llm as llm_mod
@@ -2419,14 +2440,19 @@ class TwitchBot:
         if len(rows) < need and now - resume < 6 * 3600:
             return False              # nothing worth a slice yet
         cap = max(20, int(self.cfg.get("memory_summary_max_lines", 150)))
+        if getattr(llm_mod, "summarize_stream", None) and self._summary_is_local():
+            cap = min(cap, max(20, int(
+                self.cfg.get("memory_summary_local_lines", 60))))
         previous = self._memory.summaries(resume - every, limit=1)
         try:
-            raw = llm_mod.chat_reply(
+            raw = llm_mod.summarize_stream(
                 "You maintain the running log of a live stream. Factual, "
                 "plain, no persona, no greeting, no emoji.",
                 chatai.stream_summary_prompt(
                     rows[-cap:], previous[0][2] if previous else ""),
-                self._opts, max_tokens=300)
+                self._opts, max_tokens=300,
+                timeout=max(30.0, float(
+                    self.cfg.get("memory_summary_timeout", 240))))
         except Exception as exc:
             self._log(f"stream summary failed: {exc!r}")
             return False

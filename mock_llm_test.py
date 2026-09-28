@@ -26,6 +26,64 @@ def _fake_urlopen(req, timeout=60):
     return io.BytesIO(json.dumps(FAKE_BODY).encode("utf-8"))
 
 
+def test_the_running_log_prefers_the_local_model():
+    """The stream's running log is written by summarize_stream, not by
+    chat_reply, and the difference is the point.
+
+    chat_reply is capped at 30s on purpose: a chime that lands a minute
+    after the moment it was for is worse than silence. A running log has
+    no deadline - nobody is waiting - so it gets a budget an order of
+    magnitude longer, and it goes to the local model when there is one,
+    because that model is free, private, unrated and patient. Reading a
+    slice of chat on a mini PC's CPU is exactly the work a hosted API
+    should not be billed for."""
+    calls = []
+    saved_chain = llm._chat_call_chain
+    saved_unavail = llm._model_unavailable
+
+    def fake_chain(base, models, key, prompt, system, timeout, budget, cfg,
+                   extra, **kw):
+        calls.append((base, models[0], timeout))
+        return "two sentences about the slice"
+
+    llm._chat_call_chain = fake_chain
+    llm._model_unavailable = lambda b, m: False
+    try:
+        cases = [
+            ("local primary",
+             {"llm_base_url": "http://127.0.0.1:11434/v1",
+              "llm_model": "llama3.1:8b"}, "127.0.0.1"),
+            ("hosted primary with a local in the chain",
+             {"llm_api_key": "k", "llm_model": "gpt-oss-120b",
+              "llm_fallback_providers": [
+                  {"base_url": "http://localhost:11434/v1", "key": "",
+                   "model": "qwen3:8b"}]}, "localhost"),
+            ("hosted only",
+             {"llm_api_key": "k", "llm_model": "gpt-oss-120b"},
+             "api.groq.com"),
+        ]
+        for label, cfg, want_host in cases:
+            calls.clear()
+            assert llm.summarize_stream("s", "u", cfg) == \
+                "two sentences about the slice", (label, calls)
+            base, _model, timeout = calls[-1]
+            assert want_host in base, (label, base)
+            # The whole point: a budget chat is never allowed.
+            assert timeout > 30.0, (label, timeout)
+    finally:
+        llm._chat_call_chain = saved_chain
+        llm._model_unavailable = saved_unavail
+
+
+def running_log_prefers_the_local_model():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_the_running_log_prefers_the_local_model()
+        return True
+    except Exception:
+        return False
+
+
 def main():
     ok = True
     cfg = {"llm_api_key": "gsk-test", "llm_base_url": "https://api.groq.com/openai/v1",
@@ -994,6 +1052,14 @@ def main():
             _os.environ["NVIDIA_API_KEY"] = _had_nv
     print("[PASS] an ordered provider list carries chat: Groq -> NIM -> "
           "Gemini, each on its own key and its own rest window")
+
+    try:
+        test_the_running_log_prefers_the_local_model()
+        print("[PASS] the running log prefers the local model, on a budget "
+              "chat never gets")
+    except AssertionError as exc:
+        ok = False
+        print(f"[FAIL] the running log prefers the local model: {exc}")
 
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1

@@ -843,6 +843,67 @@ CHAT_MAX_TOKENS = 120
 PERFORMANCE_MAX_TOKENS = 400
 
 
+def summarize_stream(system: str, user: str, cfg: dict,
+                     max_tokens: int = 300, timeout: float = 240.0):
+    """A background distillation, on the local model when there is one.
+
+    chat_reply is deliberately capped at 30s, because a chime that lands
+    a minute after the moment it was for is worse than silence. The
+    running log has no such deadline: it is written between slices and
+    nobody is waiting on it. Reading a slice of chat on a mini PC's CPU
+    can take minutes - which is exactly why this job belongs on the local
+    model. It is free, it is private, it has no rate limit, and it is the
+    one thing in the bot that is allowed to be slow.
+
+    So: prefer a local endpoint, whether it is the primary or sitting in
+    the fallback chain, and give it a budget an order of magnitude longer
+    than chat gets. With no local model anywhere, the hosted chain still
+    does the work on the same long budget - the deadline was never the
+    point of the call.
+    """
+    if not any_configured(cfg):
+        return None
+    base = (cfg.get("llm_base_url") or DEFAULT_BASE_URL).rstrip("/")
+    key = (cfg.get("llm_api_key") or "").strip()
+    model = cfg.get("llm_model") or (
+        OLLAMA_MODEL if _is_local(base) else DEFAULT_MODEL)
+    where = None
+    if _is_local(base):
+        where = (base, key, _model_list(model), "local (primary)")
+    else:
+        try:
+            chain = fallback_providers(cfg)
+        except Exception:
+            chain = []
+        for fbase, fkey, fmodels in chain:
+            if _is_local(fbase) and fmodels:
+                where = (fbase, fkey, fmodels, f"local ({fbase})")
+                break
+    if where is None:
+        # No local model anywhere. Still background work, so it gets the
+        # long budget too rather than chat_reply's 30s cap - the deadline
+        # was never the point of this call.
+        where = (base, key, _model_list(model), "hosted (primary)")
+    base, key, models, label = where
+    models = [m for m in models if not _model_unavailable(base, m)]
+    if not models:
+        print("[llm] local summary skipped - every local model is resting",
+              flush=True)
+        return None
+    try:
+        text = _chat_call_chain(base, models, key, user, system,
+                                float(timeout), int(max_tokens), cfg, {})
+    except Exception as exc:
+        print(f"[llm] local summary on {models[0]} failed: {exc!r}",
+              flush=True)
+        return None
+    text = " ".join((text or "").split())
+    if text:
+        print(f"[llm] stream slice summarised by {models[0]} via {label}",
+              flush=True)
+    return text or None
+
+
 def _chat_call_chain(base: str, models: list, key: str, prompt: str,
                      system: str, timeout: float, budget: int, cfg: dict,
                      extra: dict, fallback: bool = False) -> str:

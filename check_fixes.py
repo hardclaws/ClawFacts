@@ -3004,6 +3004,14 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("the running log is written by the local model, slowly",
+         # chat_reply is capped at 30s because a late chime is worse than
+         # silence - which made it the wrong tool for the running log, the
+         # one job with no deadline. summarize_stream prefers a local
+         # endpoint (free, private, unrated, patient) and gets a budget an
+         # order of magnitude longer, so reading a slice of chat on a mini
+         # PC's CPU is not billed to a hosted API.
+         __import__("mock_llm_test").running_log_prefers_the_local_model()),
         ("a recap covers the whole stream, not a sample of it",
          # A twelve-hour stream logs thousands of lines and no prompt holds
          # them. Measured on a normal stream: 3,600 lines logged, 40 in the
