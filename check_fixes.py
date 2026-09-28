@@ -2827,8 +2827,10 @@ def main() -> int:
              "bot.py").read_text(encoding="utf-8")
          and "strip_address" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")
-         and "build unknown" in pathlib.Path(
-             "bot.py").read_text(encoding="utf-8")),
+         and ("build unknown" in pathlib.Path(
+             "bot.py").read_text(encoding="utf-8")
+              or "from BUILD file" in pathlib.Path(
+                  "bot.py").read_text(encoding="utf-8"))),
         ("chat and facts survive a rate-limited provider: fallback answers",
          callable(_llm2.fallback_endpoint)
          and callable(_llm2.fallback_problem)

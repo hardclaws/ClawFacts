@@ -48,6 +48,10 @@ import memory as memory_mod
 import moderation as moderation_mod
 import ongoing as ongoing_mod
 import names as names_mod
+
+# Embedded build id for hand-copied folders without .git. Updated on each
+# commit so console tells you what version you are on even without git.
+BUILD_ID = "afe8a3a"
 import trucker as trucker_mod
 import beef as beef_mod
 import beefstats as beefstats_mod
@@ -4962,7 +4966,8 @@ def main() -> None:
         adminpanel.install_log_ring(log_ring)
 
     # Which build is this? A pasted log should never require guessing
-    # whether a fix is actually running. Silent if git is unavailable.
+    # whether a fix is actually running. Shows commit hash even without git.
+    build_shown = False
     try:
         import subprocess
         commit = subprocess.run(
@@ -4971,11 +4976,23 @@ def main() -> None:
         ).stdout.strip()
         if commit:
             print(f"[bot] build {commit}")
-        else:
-            print("[bot] build unknown - no commit available; if this "
-                  "folder has no .git, updates were copied in by hand")
+            build_shown = True
     except Exception:
-        print("[bot] build unknown - git is unavailable here")
+        pass
+    if not build_shown:
+        try:
+            # Hand-copied folder: read BUILD file next to bot.py, or embedded id
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _build_file = os.path.join(_here, "BUILD")
+            _build = ""
+            if os.path.exists(_build_file):
+                with open(_build_file, "r", encoding="utf-8") as bf:
+                    _build = bf.read().strip().split()[0][:12]
+            if not _build:
+                _build = BUILD_ID
+            print(f"[bot] build {_build} (no git, from BUILD file / embedded)")
+        except Exception:
+            print(f"[bot] build {BUILD_ID} (embedded, git unavailable)")
 
     # ...and because hand-copied folders have no git at all, the fix
     # count IS the build number: 149 is a different build than 143,
