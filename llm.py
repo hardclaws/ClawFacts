@@ -701,20 +701,30 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 #: pays a full cold load from disk - measured elsewhere at 11.4s to first
 #: token against 0.9s warm.
 #:
-#: Deliberately the memory-conservative choice, matching Ollama's own
-#: default. A longer window would mean fewer cold loads, but the running
-#: log is a background job on a 240s budget where a few seconds of load
-#: time is invisible - while holding a model resident costs RAM for the
-#: whole stream, which is the scarcest thing on a small always-on box.
-#: Anyone with RAM to spare raises this to 30m and never pays a load.
+#: Empty by default, which means DO NOT ASK and let Ollama unload on its
+#: own five-minute schedule. That is a real choice, not an omission, and
+#: the reason is arithmetic: the keeper wakes every
+#: memory_summary_minutes - twenty by default - so ANY keep_alive shorter
+#: than that leaves the model already unloaded when the next slice is
+#: due, and every slice pays a cold load whatever the value says. Asking
+#: for 5m therefore changed nothing at all, because 5m is already
+#: Ollama's default; it only looked like a setting.
 #:
-#: Sent both ways on purpose. Older Ollama builds silently ignore a
+#: So the honest options are the two ends. Leave this empty and the box
+#: holds no model between slices, which is the right trade on a small
+#: always-on machine: the running log is a background job on a 240s
+#: budget, where a few seconds of load time is invisible to viewers. Or
+#: set it past the interval - "25m" against the twenty-minute default -
+#: and the model stays resident for the whole stream, which costs RAM
+#: continuously to save those seconds.
+#:
+#: Sent both ways when it IS sent. Older Ollama builds silently ignore a
 #: top-level keep_alive on the OpenAI-compatible endpoint (upstream issue
 #: #11458, still open); newer ones only honour it nested inside
 #: ``options``. Neither shape is an error, so sending both costs nothing
 #: and works on whichever build is installed. Server-side
 #: OLLAMA_KEEP_ALIVE still wins if the operator set it.
-LOCAL_KEEP_ALIVE = "5m"
+LOCAL_KEEP_ALIVE = ""
 
 
 def _local_keep_alive(cfg: dict) -> str:
