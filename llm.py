@@ -699,9 +699,14 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 #: How long a LOCAL model should stay resident after this call. Ollama
 #: unloads a model a few minutes after its last request, and the next one
 #: pays a full cold load from disk - measured elsewhere at 11.4s to first
-#: token against 0.9s warm. A summariser that wakes every twenty minutes
-#: outlives the default 5m, so it would be cold EVERY time: 36 cold
-#: starts across a twelve-hour stream.
+#: token against 0.9s warm.
+#:
+#: Deliberately the memory-conservative choice, matching Ollama's own
+#: default. A longer window would mean fewer cold loads, but the running
+#: log is a background job on a 240s budget where a few seconds of load
+#: time is invisible - while holding a model resident costs RAM for the
+#: whole stream, which is the scarcest thing on a small always-on box.
+#: Anyone with RAM to spare raises this to 30m and never pays a load.
 #:
 #: Sent both ways on purpose. Older Ollama builds silently ignore a
 #: top-level keep_alive on the OpenAI-compatible endpoint (upstream issue
@@ -709,7 +714,7 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 #: ``options``. Neither shape is an error, so sending both costs nothing
 #: and works on whichever build is installed. Server-side
 #: OLLAMA_KEEP_ALIVE still wins if the operator set it.
-LOCAL_KEEP_ALIVE = "30m"
+LOCAL_KEEP_ALIVE = "5m"
 
 
 def _local_keep_alive(cfg: dict) -> str:
