@@ -497,6 +497,55 @@ def recap_does_not_echo_the_request():
         return False
 
 
+def test_the_running_log_names_its_writer_and_can_refuse_a_hosted_one():
+    """"How do we make sure the local model gets used?" needs somewhere to
+    look and a way to enforce it. --doctor now names the writer, and
+    memory_summary_local_only refuses to spend a hosted call on the
+    running log rather than quietly spending it. Live-fire the operator's
+    own config had no local endpoint at all, so the running log was being
+    billed to Groq with nothing in the output to show it."""
+    import bot as bot_mod
+
+    hosted = {"llm_api_key": "k",
+              "llm_base_url": "https://api.groq.com/openai/v1",
+              "llm_model": "openai/gpt-oss-120b",
+              "llm_fallback_providers": [
+                  {"base_url": "https://openrouter.ai/api/v1",
+                   "key": "k2", "model": "some/model:free"}]}
+    in_chain = dict(
+        hosted, llm_fallback_providers=hosted["llm_fallback_providers"] + [
+            {"base_url": "http://localhost:11434/v1", "key": "",
+             "model": "qwen3:8b"}])
+    assert "HOSTED" in bot_mod._running_log_writer(hosted)
+    said = bot_mod._running_log_writer(in_chain)
+    assert "local Ollama" in said and "qwen3:8b" in said, said
+
+    b = _bot(llm_api_key="k")
+    b._distill = lambda *a, **k: None
+    logs = []
+    b._log = lambda *a, **k: logs.append(" ".join(str(x) for x in a))
+    b.cfg["chat_ai_enabled"] = True
+    b.cfg["memory_summary_local_only"] = True
+    now = time.time()
+    b._memory.clock = lambda: now - 3600
+    b._memory.note("Hardclaws", "hardclaws",
+                   "swapped a flat outside Lubbock today")
+    b._memory.clock = lambda: now
+    # No local model configured, so nothing is written - and the log says
+    # why instead of the running log quietly going quiet.
+    assert b._summarize_stream() is False
+    assert any("not being written" in ln for ln in logs), logs
+
+
+def running_log_names_its_writer():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_the_running_log_names_its_writer_and_can_refuse_a_hosted_one()
+        return True
+    except Exception:
+        return False
+
+
 def test_a_recap_covers_the_whole_stream_not_a_sample_of_it():
     """A twelve-hour stream logs thousands of lines and no prompt holds
     them, so a recap that sampled the transcript saw 40 of 3,600 lines -
@@ -3449,6 +3498,7 @@ def main():
     test_a_longer_recap_window_remembers_more()
     test_a_recap_does_not_quote_the_request_back_as_an_event()
     test_a_recap_covers_the_whole_stream_not_a_sample_of_it()
+    test_the_running_log_names_its_writer_and_can_refuse_a_hosted_one()
     test_a_direct_answer_is_never_refused_for_reusing_a_word()
     test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()

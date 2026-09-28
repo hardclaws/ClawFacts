@@ -3004,6 +3004,13 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("the running log names its writer, and can refuse a hosted one",
+         # 'How do we make sure the local model gets used?' The operator's
+         # own config had no local endpoint in it at all, so the running
+         # log was being billed to Groq with nothing in the output to show
+         # it. --doctor now names the writer, and memory_summary_local_only
+         # turns the preference into a guarantee.
+         __import__("mock_chatai_test").running_log_names_its_writer()),
         ("the running log is written by the local model, slowly",
          # chat_reply is capped at 30s because a late chime is worse than
          # silence - which made it the wrong tool for the running log, the

@@ -214,6 +214,11 @@ DEFAULTS = {
     # gets a smaller slice and a budget chat never gets.
     "memory_summary_local_lines": 60,
     "memory_summary_timeout": 240,
+    # Refuse to write the running log on a hosted provider. Off by
+    # default - a recap with a thin spine is worse than one that cost a
+    # few hosted calls - but this is the switch that makes "the local
+    # model does the summarising" a guarantee rather than a preference.
+    "memory_summary_local_only": False,
     "chat_ai_distill_minutes": 10,
     "chat_ai_chance": 0.10,
     "chat_ai_max_hour": 6,
@@ -2421,6 +2426,13 @@ class TwitchBot:
             return False              # memory belongs to the chat AI
         if not self._memory.ok or not llm_mod.any_configured(self._opts):
             return False
+        if (self.cfg.get("memory_summary_local_only", False)
+                and not self._summary_is_local()):
+            self._log("stream memory: memory_summary_local_only is on and "
+                      "no local model is configured - the running log is "
+                      "not being written rather than spending a hosted "
+                      "call on it")
+            return False
         every = max(1.0, float(
             self.cfg.get("memory_summary_minutes", 20))) * 60.0
         now = time.time()
@@ -4447,6 +4459,31 @@ class TwitchBot:
                      if result.get("source") else ""))
 
 
+def _running_log_writer(cfg: dict) -> str:
+    """Which model writes the stream's running log, for --doctor.
+
+    "Make sure the local model gets used" needs somewhere to look. The
+    answer is a config question - a local endpoint anywhere in the chain
+    wins the running log - and this says which one that turned out to be,
+    or that there is none and a hosted provider is paying for it.
+    """
+    import llm as llm_mod
+    base = (cfg.get("llm_base_url") or "").strip()
+    model = cfg.get("llm_model") or ""
+    if llm_mod._is_local(base):
+        return f"local Ollama ({model or 'default model'}) - free, no limits"
+    try:
+        for fbase, _k, fmodels in llm_mod.fallback_providers(cfg):
+            if llm_mod._is_local(fbase) and fmodels:
+                return (f"local Ollama ({fmodels[0]}) in the fallback "
+                        f"chain - free, no limits")
+    except Exception:
+        pass
+    return (f"HOSTED ({model or base or 'the primary provider'}) - the "
+            f"running log is spending hosted calls; add a local Ollama to "
+            f"llm_fallback_providers to stop that")
+
+
 def _doctor_questions(cfg: dict) -> None:
     """Report - and actually exercise - the free-form question path.
 
@@ -4477,6 +4514,7 @@ def _doctor_questions(cfg: dict) -> None:
     print(f"  search for answers: {line}")
     wkey = (cfg.get("weatherapi_key") or os.environ.get("WEATHERAPI_KEY", "")
             or "").strip()
+    print("  stream memory    : " + _running_log_writer(cfg))
     print("  weather          : " + (
         "weatherapi.com (one sentence to the asker), Open-Meteo fallback"
         if wkey else
