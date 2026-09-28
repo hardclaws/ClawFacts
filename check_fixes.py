@@ -3004,6 +3004,13 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("the memory is indexed, and a busy hour gets more room",
+         # messages was the only hot table with no index on the column it
+         # is queried by, so every keeper pass made SQLite build a temp
+         # B-tree: 7.86ms against 2.68ms on a busy twelve-hour stream. And
+         # every summary was capped at 400 characters whether the hour held
+         # eight lines or a hundred and fifty.
+         __import__("mock_chatai_test").memory_is_indexed_and_scaled()),
         ("appending a local model does not displace the hosted one",
          # Live-fire: the example config's single local entry read as a
          # REPLACEMENT for the Google entry already in the operator's

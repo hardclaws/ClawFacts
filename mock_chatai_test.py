@@ -497,6 +497,64 @@ def recap_does_not_echo_the_request():
         return False
 
 
+def test_memory_is_indexed_and_a_busy_hour_gets_more_room():
+    """Two efficiency asks, both measurable.
+
+    messages was the only hot table with no index on the column it is
+    queried by, so transcript() made SQLite build a temp B-tree on every
+    keeper pass - measured 7.86ms against 2.68ms on a busy twelve-hour
+    stream. And every summary was capped at 400 characters whether the
+    hour held eight lines or a hundred and fifty, which is how the main
+    trends of the busiest hour got lost while a dead one paid for room it
+    never used."""
+    import os
+    import sqlite3
+    import tempfile
+
+    import memory
+
+    path = os.path.join(tempfile.mkdtemp(), "m.db")
+    # An OLD database, built before the indexes existed: opening it must
+    # upgrade it in place, with nothing to migrate.
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE messages(id INTEGER PRIMARY KEY, ts REAL,"
+                " nick TEXT, login TEXT, text TEXT)")
+    con.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, ts REAL,"
+                " nick TEXT, fact TEXT)")
+    con.commit()
+    con.close()
+    m = memory.Memory(path)
+    try:
+        have = {r[0] for r in sqlite3.connect(path).execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+            " AND name LIKE 'idx%'")}
+        assert {"idx_msg_ts", "idx_sum_to", "idx_mem_nick"} <= have, have
+        plan = sqlite3.connect(path).execute(
+            "EXPLAIN QUERY PLAN SELECT ts FROM messages WHERE ts >= 0"
+            " ORDER BY ts DESC LIMIT 10").fetchall()[-1][-1]
+        assert "idx_msg_ts" in plan, plan
+
+        # A quiet hour and a busy one are not the same size, and the
+        # ceiling still holds however busy it gets.
+        assert memory.summary_budget(8) < memory.summary_budget(80)
+        assert memory.summary_budget(8) >= memory.SUMMARY_MIN_CHARS
+        assert memory.summary_budget(10 ** 6) == memory.SUMMARY_MAX_CHARS
+        assert m.add_summary(0.0, 1.0, "x" * 2000, max_chars=300)
+        got = m.summaries(0.0)
+        assert len(got) == 1 and len(got[0][2]) == 300, got
+    finally:
+        m.close()
+
+
+def memory_is_indexed_and_scaled():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_memory_is_indexed_and_a_busy_hour_gets_more_room()
+        return True
+    except Exception:
+        return False
+
+
 def test_the_running_log_names_its_writer_and_can_refuse_a_hosted_one():
     """"How do we make sure the local model gets used?" needs somewhere to
     look and a way to enforce it. --doctor now names the writer, and
@@ -3499,6 +3557,7 @@ def main():
     test_a_recap_does_not_quote_the_request_back_as_an_event()
     test_a_recap_covers_the_whole_stream_not_a_sample_of_it()
     test_the_running_log_names_its_writer_and_can_refuse_a_hosted_one()
+    test_memory_is_indexed_and_a_busy_hour_gets_more_room()
     test_a_direct_answer_is_never_refused_for_reusing_a_word()
     test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()

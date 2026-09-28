@@ -143,7 +143,8 @@ _RECAP_WINDOW = re.compile(
     r"(hours?|hrs?|days?|weeks?|months?)\b", re.IGNORECASE)
 
 
-def stream_summary_prompt(lines: list, previous: str = "") -> str:
+def stream_summary_prompt(lines: list, previous: str = "",
+                          sentences: int = 5) -> str:
     """The distil ask for one slice of the stream.
 
     A running log, not a performance: names, vehicles, places, what broke,
@@ -161,7 +162,8 @@ def stream_summary_prompt(lines: list, previous: str = "") -> str:
     out.extend(f"- {n}: {t}" for n, t in lines)
     out.append("")
     out.append(
-        "Write 2-5 sentences logging what actually happened in this slice: "
+        f"Write up to {max(2, int(sentences))} sentences logging what "
+        "actually happened in this slice: "
         "who was there, what they were doing, vehicles, loads, routes, "
         "places, problems, plans and anything settled or left open. Plain "
         "factual prose, third person, no greeting, no persona, no emoji. "

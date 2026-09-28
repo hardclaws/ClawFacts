@@ -2456,20 +2456,27 @@ class TwitchBot:
             cap = min(cap, max(20, int(
                 self.cfg.get("memory_summary_local_lines", 60))))
         previous = self._memory.summaries(resume - every, limit=1)
+        # A quiet slice gets a sentence or two and a busy one a paragraph,
+        # so the spine carries the hour's actual shape instead of thirty-
+        # six equal blurbs.
+        budget = memory_mod.summary_budget(len(rows))
+        want = 2 if len(rows) < 15 else (4 if len(rows) < 50 else 8)
         try:
             raw = llm_mod.summarize_stream(
                 "You maintain the running log of a live stream. Factual, "
                 "plain, no persona, no greeting, no emoji.",
                 chatai.stream_summary_prompt(
-                    rows[-cap:], previous[0][2] if previous else ""),
-                self._opts, max_tokens=300,
+                    rows[-cap:], previous[0][2] if previous else "",
+                    sentences=want),
+                self._opts, max_tokens=max(200, budget // 3),
                 timeout=max(30.0, float(
                     self.cfg.get("memory_summary_timeout", 240))))
         except Exception as exc:
             self._log(f"stream summary failed: {exc!r}")
             return False
         text = " ".join((raw or "").split())
-        if not self._memory.add_summary(resume, now, text):
+        if not self._memory.add_summary(resume, now, text,
+                                        max_chars=budget):
             return False
         self._log(
             f"stream memory: logged {len(rows)} lines of chat from "
