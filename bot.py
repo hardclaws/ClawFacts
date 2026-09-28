@@ -2449,9 +2449,23 @@ class TwitchBot:
         every = max(1.0, float(
             self.cfg.get("memory_summary_minutes", 20))) * 60.0
         now = time.time()
-        resume = self._memory.last_summary_end() or (now - every)
-        if now - resume < every:
-            return False
+        last_end = self._memory.last_summary_end()
+        if last_end is None:
+            # First slice ever: do not slide the window, anchor it at the
+            # first message so a quiet chat can accumulate to 6h and still
+            # get a slice. Previously resume = now - every slid forward
+            # every 30s, so 5 lines in 20 mins never reached need=8 and
+            # never reached 6h, so slices stayed 0 forever.
+            first_ts = self._memory.first_message_ts() if hasattr(self._memory, "first_message_ts") else None
+            if first_ts is None:
+                return False
+            if now - first_ts < every:
+                return False
+            resume = first_ts
+        else:
+            resume = last_end
+            if now - resume < every:
+                return False
         mine = (self.nick or "").lower()
         rows = []
         for _ts, who, line in self._memory.transcript(resume, limit=4000):

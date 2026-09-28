@@ -318,6 +318,17 @@ class Memory:
         except sqlite3.Error:
             return []
 
+    def first_message_ts(self) -> float | None:
+        """Oldest message timestamp, or None if no messages."""
+        if not self.ok:
+            return None
+        try:
+            with self._lock:
+                row = self._db.execute("SELECT MIN(ts) FROM messages").fetchone()
+            return float(row[0]) if row and row[0] is not None else None
+        except Exception:
+            return None
+
     def last_summary_end(self) -> float:
         """Where the next slice picks up; 0.0 when nothing is summarised."""
         if not self.ok:
