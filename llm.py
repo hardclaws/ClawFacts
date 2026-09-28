@@ -617,11 +617,29 @@ def reset_disable_state() -> None:
     _MODEL_DISABLED_UNTIL.clear()
     _NARRATED.clear()
 
+def _no_em_dash(t: str) -> str:
+    # Preserve newlines for rewrite_fact which returns up to 10 lines.
+    # Only replace the dash characters, then tidy ", ," artifacts per line.
+    txt = t.replace(" \u2014 ", ", ").replace(" \u2013 ", ", ").replace(" -- ", ", ")
+    txt = txt.replace("\u2014", ", ").replace("\u2013", ", ")
+    # Do not collapse newlines - rewrite_fact relies on them.
+    lines = []
+    for line in txt.splitlines():
+        l = line.replace(", ,", ",").replace(" ,", ",").strip()
+        # Keep single spaces inside line but preserve line itself
+        l = " ".join(l.split())
+        l = l.replace(" ,", ",")
+        lines.append(l)
+    out = "\n".join(lines)
+    # Final tidy for the single-line case too
+    out = out.replace(", ,", ",").replace(" ,", ",")
+    return out
+
 SYSTEM_PROMPT = (
     "You write fun facts about places for a trucker's Twitch stream watched by "
     "adults. The tone is ADULT-ALIGNED, NOT sexual: grown-up, dry, barstool "
-    "storytelling about what actually makes the place interesting — its "
-    "history, its claims to fame, its oddities — and its real rowdy past "
+    "storytelling about what actually makes the place interesting, its "
+    "history, its claims to fame, its oddities, and its real rowdy past "
     "(crime, vice, gambling, booze, scandal) only when the supplied facts "
     "contain one.\n\n"
     "PRIORITY:\n"
@@ -639,7 +657,7 @@ SYSTEM_PROMPT = (
     "- No new crime, vice, disaster, record or superlative either. If no "
     "supplied fact mentions a hanging, a lynching, drugs, smuggling, a record "
     "or a 'the only / the first / the largest', then your answer must not "
-    "mention one — not as a joke, not as flavour.\n"
+    "mention one, not as a joke, not as flavour.\n"
     "- Facts supplied with an 'In the area:' prefix are about the surrounding "
     "county or state, NOT about the town. Keep that framing and name the "
     "county or state; never say the town did it, and never turn a county-wide "
@@ -657,10 +675,11 @@ SYSTEM_PROMPT = (
     "- Voice: blunt barstool storyteller. Salty language and a dry, rowdy wit "
     "are welcome, as long as they point at a real supplied fact.\n"
     "- ABSOLUTELY BANNED (these get a Twitch channel banned): any sexual "
-    "content — no explicit sex, no porn/XXX, no sexual acts or body parts, no "
-    "lewd come-ons — plus slurs and hate speech. Grown-up topics are fine; "
+    "content, no explicit sex, no porn/XXX, no sexual acts or body parts, no "
+    "lewd come-ons, plus slurs and hate speech. Grown-up topics are fine, "
     "explicit sexual content is never allowed.\n"
     "- No emoji, no hashtags, no markdown, no list numbering.\n"
+    "- Never use em dashes or en dashes. Use commas or periods instead.\n"
     "Return up to 10 one-line facts, the most interesting supplied fact first."
 )
 
@@ -668,7 +687,7 @@ _SUMMARIZE_SYSTEM = (
     "You shorten a fact so it fits a Twitch chat message. "
     "Shorten the fact to at most the given number of characters. "
     "Keep it one complete sentence with no trailing '...'. "
-    "Keep every specific detail — names, dates, numbers, places. "
+    "Keep every specific detail, names, dates, numbers, places. "
     "Do not add anything and do not invent details. "
     "Reply with only the shortened fact."
 )
@@ -878,6 +897,8 @@ def _request(base: str, key: str, body: bytes,
             text = text.rsplit("</think>", 1)[1].strip()
         else:
             text = ""
+    # No em dashes in any reply ever - operator hates them.
+    text = _no_em_dash(text)
     return text
 
 
@@ -1455,7 +1476,7 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
     if "openrouter/free" in model.lower() and "_warned_free" not in cfg:
         cfg["_warned_free"] = True
         print("[llm] note: model 'openrouter/free' is OpenRouter's auto-router "
-              "(random free model per call — can be slow, rate-limited, or a "
+              "(random free model per call, can be slow, rate-limited, or a "
               "reasoning model). Set OPENROUTER_MODEL to a specific model, e.g. "
               "nousresearch/hermes-4-70b.", flush=True)
 
@@ -1466,7 +1487,7 @@ def rewrite_fact(place: str, location: str, seed_facts: list, cfg: dict) -> str 
         f"known for, its history, its oddities, and any rowdy stories the "
         f"supplied facts actually contain. Each fact must be at most "
         f"{max_chars} characters, one complete line each, no numbering.\n"
-        f"Real facts found (ground truth — rewrite ONLY these, never add new "
+        f"Real facts found (ground truth, rewrite ONLY these, never add new "
         f"names, dates, places or events):\n"
     )
     user += "\n".join(f"- {f}" for f in seed_facts[:10])

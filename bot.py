@@ -766,6 +766,12 @@ class TwitchBot:
             self._log(f"send error: {exc}")
 
     def _say(self, text: str) -> None:
+        # The operator hates em dashes. Final safety net so no chat line ever
+        # leaves with one, even if a model ignored the prompt.
+        text = text.replace(" \u2014 ", ", ").replace(" \u2013 ", ", ").replace(" -- ", ", ")
+        text = text.replace("\u2014", ", ").replace("\u2013", ", ")
+        text = text.replace(", ,", ",").replace(" ,", ",")
+        text = " ".join(text.split()).replace(" ,", ",")
         # Pace chat messages by a small minimum gap so replies never bunch up
         # and trigger Twitch's "sending messages too quickly" rate limit.
         with self._say_lock:

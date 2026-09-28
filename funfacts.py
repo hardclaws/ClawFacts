@@ -876,13 +876,20 @@ def _sentence_parts(text: str) -> list:
     return parts
 
 
+def _no_em_dash(text: str) -> str:
+    t = text.replace(" \u2014 ", ", ").replace(" \u2013 ", ", ").replace(" -- ", ", ")
+    t = t.replace("\u2014", ", ").replace("\u2013", ", ")
+    t = t.replace(", ,", ",").replace(" ,", ",")
+    t = " ".join(t.split())
+    return t.replace(" ,", ",")
+
 def trim_to_fit(text: str, limit: int) -> str:
     """Fit text to `limit` chars, keeping whole sentences whenever one fits.
 
     Public so bot.py and the fact path share one implementation rather than two
     that can drift.
     """
-    text = " ".join(text.split())
+    text = _no_em_dash(" ".join(text.split()))
     if len(text) <= limit:
         return text
     parts = _sentence_parts(text)
@@ -902,13 +909,15 @@ def trim_to_fit(text: str, limit: int) -> str:
     # characters, the old 55% threshold rejected it, and the word chop that
     # won left "...to the Cafe and the gift…" - a dangler where a fact
     # should be. The longest cut keeps the most of the actual story.
+    # No em dashes in output ever - the operator hates them.
+    text = text.replace("\u2014", ", ").replace("\u2013", ", ").replace(" -- ", ", ")
     best = ""
-    for sep in ("; ", " — ", ", but ", ", and ", ", which ", ", "):
+    for sep in ("; ", ", but ", ", and ", ", which ", ", "):
         head = text[:limit + 1]
         idx = head.rfind(sep)
         if idx == -1:
             continue
-        cut = head[:idx].rstrip(" ,;:-—")
+        cut = head[:idx].rstrip(" ,;:-")
         if len(cut) > len(best):
             best = cut
     if len(best) >= int(limit * 0.40):
@@ -918,14 +927,14 @@ def trim_to_fit(text: str, limit: int) -> str:
         # "and the", "of the", "which was" - a cut that ends on a connector
         # is not a sentence, and posting the connector proves the chop.
         while True:
-            new = _DANGLING_TAIL.sub("", t).rstrip(" ,;:-—")
+            new = _DANGLING_TAIL.sub("", t).rstrip(" ,;:-")
             if new == t:
                 return t
             t = new
 
     # Last resort: a word-boundary cut, with every dangling connector
     # stripped - it ends on a noun or it does not post.
-    cut = strip_danglers(text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—"))
+    cut = strip_danglers(text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-"))
     if len(cut) >= 30:
         return cut + "…"
     return (best or cut) + "…"

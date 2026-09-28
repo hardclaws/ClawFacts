@@ -81,6 +81,7 @@ _RULES = (
     "- When asked your opinion of a person or their news, give your take "
     "on the SITUATION - never pivot to a different subject.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
+    "- Never use em dashes or en dashes. Use commas or periods instead.\n"
     "- Output ONLY the line itself, spoken in character. Never narrate, "
     "plan or explain what you are about to say ('The user is asking...', "
     "'I need to answer as...') - that is not a reply.\n"
@@ -474,9 +475,23 @@ def is_narration(line: str) -> bool:
         t, re.IGNORECASE))
 
 
+def _no_em_dash(text: str) -> str:
+    """The operator hates em dashes. Strip them at the gate so no reply ever uses them."""
+    # Replace em dash and en dash with a comma, then tidy double commas/spaces.
+    t = text.replace("\u2014", ", ").replace("\u2013", ", ")
+    # The model also loves " -- " as a typed em dash.
+    t = t.replace(" -- ", ", ")
+    # Clean up ", ," or " ,"
+    t = t.replace(", ,", ",").replace(" ,", ",")
+    t = " ".join(t.split())
+    # Fix space before comma
+    t = t.replace(" ,", ",")
+    return t
+
 def clean_line(line: str) -> str | None:
     """One safe line of chat, or None. The output gate."""
     line = " ".join((line or "").split()).strip('"\u201c\u201d')
+    line = _no_em_dash(line)
     if not line or len(line) < 12 or len(line) > 280:
         return None
     if is_narration(line):
