@@ -173,6 +173,26 @@ def test_a_local_call_asks_the_model_to_stay_loaded():
     assert llm._local_keep_alive({"memory_summary_minutes": 60}) == "65m"
     assert int(llm._local_keep_alive({"memory_summary_minutes": 45})
                .rstrip("m")) > 45
+
+    # think:false rides the same two ways, for the same reason: the
+    # operator's Ollama ignored the top-level form, qwen3:4b thought
+    # anyway, and every capped reply came back with an empty content.
+    nt = json.loads(llm._build_body(
+        "qwen3:4b", "hi", base="http://localhost:11434/v1",
+        hard_nothink=True))
+    assert nt["think"] is False, nt
+    assert nt.get("options", {}).get("think") is False, nt
+    # The gate that keeps the field away from hosted providers is real:
+    # _build_body trusts its caller, so this is what protects Groq.
+    assert llm._hard_nothink({"llm_no_think": True},
+                             "https://api.groq.com/openai/v1") is False
+    assert llm._hard_nothink({"llm_no_think": True},
+                             "http://localhost:11434/v1") is True
+    # Both switches share one options object rather than clobbering it.
+    both = json.loads(llm._build_body(
+        "qwen3:4b", "hi", base="http://localhost:11434/v1",
+        hard_nothink=True, keep_alive="25m"))
+    assert both["options"] == {"think": False, "keep_alive": "25m"}, both
     assert llm._local_keep_alive({"llm_local_keep_alive": "2h"}) == "2h"
     assert llm._local_keep_alive({"llm_local_keep_alive": ""}) == ""
 

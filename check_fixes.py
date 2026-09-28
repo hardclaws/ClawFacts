@@ -3179,7 +3179,14 @@ def main() -> int:
         ("qwen3's empty think block cannot eat the answer",
          'rsplit("</think>"' in pathlib.Path("llm.py").read_text(
              encoding="utf-8")
-         and "max_tokens=200" in pathlib.Path(
+         # A local thinking model that shrugs off both switches still
+         # needs room for the answer AFTER the think block; 200 tokens is
+         # what made the retry look exactly like the first failure.
+         and "max_tokens=800 if _is_local(base) else 200" in pathlib.Path(
+             "llm.py").read_text(encoding="utf-8")
+         # think:false must ride inside `options` as well - the operator's
+         # Ollama ignored the top-level form on the /v1 endpoint.
+         and 'body.setdefault("options", {})["think"] = False' in pathlib.Path(
              "llm.py").read_text(encoding="utf-8")
          and "_STAMPED" in pathlib.Path(
              "bot.py").read_text(encoding="utf-8")),

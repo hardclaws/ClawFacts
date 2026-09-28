@@ -759,6 +759,13 @@ def _build_body(model: str, user_prompt: str, system: str = None,
     body = {"model": model, "messages": messages}
     if hard_nothink:
         body["think"] = False
+        # And inside `options` too. The OpenAI-compatible endpoint
+        # ignored the top-level form on the operator's Ollama build - the
+        # same way it ignores a top-level keep_alive - so qwen3:4b thought
+        # anyway, spent its whole token budget inside the think block, and
+        # every reply came back with an empty `content`. Neither shape is
+        # an error, so sending both works on whichever build is installed.
+        body.setdefault("options", {})["think"] = False
     if _REASONING.search(model):
         # The completion budget covers thinking AND answer for a
         # reasoning model - too tight and the answer is what gets
@@ -1274,10 +1281,14 @@ def _warm_probe(base: str, model: str, key: str, cfg: dict,
         # tight cap can cut the answer right out of the budget. One
         # generous retry, still in the background where nobody waits.
         try:
+            # A local thinking model that shrugs off both switches still
+            # needs room for the answer AFTER the think block, or the cap
+            # eats it and the retry looks exactly like the first failure.
             text = _call(base, model, key,
                          _maybe_nothink("Reply with exactly: OK", cfg),
                          "You are a warm-up probe. Reply with exactly: OK.",
-                         timeout=90.0, max_tokens=200,
+                         timeout=90.0,
+                         max_tokens=800 if _is_local(base) else 200,
                          hard_nothink=_hard_nothink(cfg, base))
         except urllib.error.HTTPError as exc:
             detail = ""
