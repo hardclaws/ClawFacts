@@ -453,9 +453,23 @@ def user_prompt(lines: list, nick: str, text: str,
                    + (f" IN {window_label.upper()}" if window_label else "")
                    + " (real chat from the log, oldest first):")
         out.extend(f"- {h}" for h in history)
-        out.append("Answer ONLY from these lines and the facts above. If "
-                   "they do not cover what was asked, say so plainly - "
-                   "never invent an event, a count, a place or a name.")
+        out.append("Summarize what actually happened in these lines for "
+                   f"{window_label or 'the period'} - who was there and what "
+                   "was said or done, with names. If you have at least some "
+                   "lines, give a recap of what you have, even if it is not "
+                   "a full period. Only say you have no recap if you have "
+                   "zero lines. Never invent an event, a count, a place or a name "
+                   "not in these lines.")
+
+    if not summaries and not history and window_label:
+        # No spine and no verbatim lines for the requested window: say so
+        # plainly rather than hallucinating a 5K run or a Warzone push.
+        # Previously this case had no explicit instruction and the model
+        # invented events. Now the prompt says what to do when empty.
+        out.append("")
+        out.append(f"No chat was logged in {window_label}, so there is no recap "
+                   "to give for that period. Say so plainly.")
+
     out.append("")
     out.append("Your line:")
     return "\n".join(out)
