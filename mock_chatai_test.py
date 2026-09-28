@@ -336,7 +336,7 @@ def test_a_timed_out_model_is_not_asked_twice():
         assert got and got[0][1].get("_skip_llm") is True, got
         # A healthy chat call clears the flag; the engine runs plain.
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     timeout=60.0, max_tokens=None, hard_nothink=False, **_kw:
                      "Fastest? Mine.")
         assert b._chat_ai_line([], "hollieburgin", "hello") == "Fastest? Mine."
         got.clear()

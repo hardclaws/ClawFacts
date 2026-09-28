@@ -3004,6 +3004,12 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("a local call asks the model to stay loaded",
+         # Ollama unloads a model a few minutes after its last request and
+         # the next call pays a cold load from disk - 11.4s to first token
+         # against 0.9s warm. The keeper wakes every twenty minutes, so
+         # without asking for residency every slice is a cold start.
+         __import__("mock_llm_test").local_call_asks_the_model_to_stay_loaded()),
         ("the memory is indexed, and a busy hour gets more room",
          # messages was the only hot table with no index on the column it
          # is queried by, so every keeper pass made SQLite build a temp

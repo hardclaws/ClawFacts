@@ -133,6 +133,51 @@ def appending_local_keeps_the_hosted_provider():
         return False
 
 
+def test_a_local_call_asks_the_model_to_stay_loaded():
+    """Ollama unloads a model a few minutes after its last request, and the
+    next call pays a full cold load from disk - measured elsewhere at 11.4s
+    to first token against 0.9s warm. The keeper wakes every twenty
+    minutes, which outlives the default 5m, so without asking for residency
+    every slice would be a cold start: 36 of them across a twelve-hour
+    stream.
+
+    It is sent BOTH ways because older Ollama builds ignore a top-level
+    keep_alive on the OpenAI-compatible endpoint (upstream issue #11458,
+    still open) while newer ones only honour it nested inside `options`.
+    Neither shape is an error, so sending both works on whichever build is
+    installed. And it is never sent to a hosted provider, which would
+    reject an unknown field."""
+    import json
+
+    import llm
+
+    body = json.loads(llm._build_body(
+        "qwen3:8b", "hi", base="http://localhost:11434/v1",
+        keep_alive="30m"))
+    assert body["keep_alive"] == "30m", body
+    assert body.get("options", {}).get("keep_alive") == "30m", body
+
+    hosted = json.loads(llm._build_body(
+        "qwen3:8b", "hi", base="https://api.groq.com/openai/v1",
+        keep_alive="30m"))
+    assert "keep_alive" not in hosted, hosted
+    assert "options" not in hosted, hosted
+
+    # The knob: overridable, and an empty string stops asking.
+    assert llm._local_keep_alive({}) == llm.LOCAL_KEEP_ALIVE
+    assert llm._local_keep_alive({"llm_local_keep_alive": "2h"}) == "2h"
+    assert llm._local_keep_alive({"llm_local_keep_alive": ""}) == ""
+
+
+def local_call_asks_the_model_to_stay_loaded():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_a_local_call_asks_the_model_to_stay_loaded()
+        return True
+    except Exception:
+        return False
+
+
 def running_log_prefers_the_local_model():
     """check_fixes entry point: a check reports False, it never raises."""
     try:
@@ -340,7 +385,7 @@ def main():
     orig_call = llm._call
     try:
         def _boom(base, model, key, user, system=None, timeout=60.0,
-                  max_tokens=None, hard_nothink=False):
+                  max_tokens=None, hard_nothink=False, **_kw):
             calls.append((user, timeout))
             raise TimeoutError("timed out")
 
@@ -350,7 +395,7 @@ def main():
                                          "http://127.0.0.1:11434/v1"}) is None
         assert llm.chat_timed_out() is True
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     timeout=60.0, max_tokens=None, hard_nothink=False, **_kw:
                      "fine and rolling again")
         assert llm.chat_reply("s", "u", {"llm_api_key": "k"}) == \
             "fine and rolling again"
@@ -359,7 +404,7 @@ def main():
         # hosted.
         seen = []
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     timeout=60.0, max_tokens=None, hard_nothink=False, **_kw:
                      (seen.append((user, timeout)) or "a line."))
         llm.answer_question(
             "q?", ["source %d." % i for i in range(10)],
@@ -405,7 +450,7 @@ def main():
         caps = []
 
         def _two(base, model, key, user, system=None, timeout=60.0,
-                 max_tokens=None, hard_nothink=False):
+                 max_tokens=None, hard_nothink=False, **_kw):
             caps.append(max_tokens)
             return "OK" if len(caps) > 1 else ""
 
@@ -1113,6 +1158,8 @@ def main():
 
     try:
         test_appending_a_local_model_does_not_displace_the_hosted_one()
+        test_a_local_call_asks_the_model_to_stay_loaded()
+        print("[PASS] a local call asks the model to stay loaded")
         print("[PASS] appending a local model keeps the hosted one in the "
               "chat chain")
     except AssertionError as exc:

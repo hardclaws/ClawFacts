@@ -696,10 +696,33 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
     return user
 
 
+#: How long a LOCAL model should stay resident after this call. Ollama
+#: unloads a model a few minutes after its last request, and the next one
+#: pays a full cold load from disk - measured elsewhere at 11.4s to first
+#: token against 0.9s warm. A summariser that wakes every twenty minutes
+#: outlives the default 5m, so it would be cold EVERY time: 36 cold
+#: starts across a twelve-hour stream.
+#:
+#: Sent both ways on purpose. Older Ollama builds silently ignore a
+#: top-level keep_alive on the OpenAI-compatible endpoint (upstream issue
+#: #11458, still open); newer ones only honour it nested inside
+#: ``options``. Neither shape is an error, so sending both costs nothing
+#: and works on whichever build is installed. Server-side
+#: OLLAMA_KEEP_ALIVE still wins if the operator set it.
+LOCAL_KEEP_ALIVE = "30m"
+
+
+def _local_keep_alive(cfg: dict) -> str:
+    """The keep-alive to ask a local model for; "" means do not ask."""
+    val = cfg.get("llm_local_keep_alive", LOCAL_KEEP_ALIVE)
+    return str(val).strip() if val is not None else ""
+
+
 def _build_body(model: str, user_prompt: str, system: str = None,
                 max_tokens: int = None, hard_nothink: bool = False,
                 reasoning_budget: int = None,
-                temperature: float = None, base: str = "") -> str:
+                temperature: float = None, base: str = "",
+                keep_alive: str = None) -> str:
     messages = [
         {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -723,6 +746,11 @@ def _build_body(model: str, user_prompt: str, system: str = None,
     else:
         body["max_tokens"] = max_tokens or 300
         body["temperature"] = 0.9 if temperature is None else temperature
+    if keep_alive and _is_local(base):
+        # Only ever sent to a local model: a hosted provider would reject
+        # an unknown field, and the field means nothing to it anyway.
+        body["keep_alive"] = keep_alive
+        body.setdefault("options", {})["keep_alive"] = keep_alive
     return json.dumps(body).encode("utf-8")
 
 
@@ -821,13 +849,14 @@ def _call(base: str, model: str, key: str, user_prompt: str,
           system: str = None, timeout: float = 60.0,
           max_tokens: int = None, hard_nothink: bool = False,
           reasoning_budget: int = None,
-          temperature: float = None) -> str:
+          temperature: float = None, keep_alive: str = None) -> str:
     return _request(base, key,
                     _build_body(model, user_prompt, system,
                                 max_tokens=max_tokens,
                                 hard_nothink=hard_nothink,
                                 reasoning_budget=reasoning_budget,
-                                temperature=temperature, base=base),
+                                temperature=temperature, base=base,
+                                keep_alive=keep_alive),
                     timeout=timeout)
 
 
@@ -921,7 +950,8 @@ def _chat_call_chain(base: str, models: list, key: str, prompt: str,
         try:
             text = _call(base, m, key, prompt, system, timeout=timeout,
                          max_tokens=budget,
-                         hard_nothink=_hard_nothink(cfg, base), **extra)
+                         hard_nothink=_hard_nothink(cfg, base),
+                         keep_alive=_local_keep_alive(cfg), **extra)
             _LAST_CHAT_MODEL = m
             return text
         except urllib.error.HTTPError as exc:
