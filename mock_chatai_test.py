@@ -497,6 +497,97 @@ def recap_does_not_echo_the_request():
         return False
 
 
+def test_a_recap_covers_the_whole_stream_not_a_sample_of_it():
+    """A twelve-hour stream logs thousands of lines and no prompt holds
+    them, so a recap that sampled the transcript saw 40 of 3,600 lines -
+    about one percent. The stream is now distilled as it runs and the
+    recap reads that spine, so the period is covered end to end instead
+    of being whatever happened to fit."""
+    import time as time_mod
+
+    import bot as bot_mod
+    import llm as llm_mod
+
+    b = _bot(llm_api_key="k")
+    b._distill = lambda *a, **k: None
+    now = time.time()
+    clock = {"t": now - 12 * 3600}
+
+    class Shim:
+        def time(self):
+            return clock["t"]
+
+        def __getattr__(self, name):
+            return getattr(time_mod, name)
+
+    saved_time, saved_reply = bot_mod.time, llm_mod.chat_reply
+    bot_mod.time = Shim()
+    b._memory.clock = lambda: clock["t"]
+    captured = {}
+    counts = []
+
+    def fake(system, user, opts=None, **kw):
+        if "running log" in (system or ""):
+            body = [ln for ln in user.splitlines() if ln.startswith("- ")]
+            counts.append(len(body))
+            tag = ("reefer" if any("reefer" in ln for ln in body)
+                   else "flat" if any("flat" in ln for ln in body)
+                   else "quiet")
+            return f"{len(body)} lines of chat, about the {tag}"
+        captured["user"] = user
+        return "here is your recap"
+
+    llm_mod.chat_reply = fake
+    try:
+        for i in range(30):                 # the first hour
+            clock["t"] = now - 12 * 3600 + i * 60
+            b._memory.note("Hardclaws", "hardclaws",
+                           f"early line {i} about the reefer alarm")
+        for i in range(30):                 # the last hour
+            clock["t"] = now - 3600 + i * 60
+            b._memory.note("iKembo", "ikembo",
+                           f"late line {i} about the flat")
+        clock["t"] = now - 12 * 3600
+        step = float(b.cfg.get("memory_summary_minutes", 20)) * 60.0
+        built = 0
+        for _ in range(int(12 * 3600 // step) + 2):
+            clock["t"] += step
+            if b._summarize_stream():
+                built += 1
+        assert built >= 30, built            # a twelve-hour stream, sliced
+        assert b._memory.summary_count() == built
+        assert counts and all(n > 0 for n in counts), counts
+
+        clock["t"] = now
+        b._on_message("Hardclaws", "#t",
+                      "Docbot give us the highlights over the last 12 hours",
+                      "hardclaws", "broadcaster/1")
+        _join_acks(b)
+        for _ in range(4):
+            _drain(b)
+        _drain(b)
+    finally:
+        bot_mod.time = saved_time
+        llm_mod.chat_reply = saved_reply
+
+    prompt = captured.get("user") or ""
+    assert "RUNNING LOG OF THE STREAM" in prompt, prompt[-400:]
+    spine = prompt[prompt.index("RUNNING LOG OF THE STREAM"):]
+    assert spine.count("\n- ") >= 30, spine[:300]
+    # Both ends of the twelve hours are in the material, not just the end.
+    assert "about the reefer" in spine, spine[:300]
+    assert "about the flat" in spine, spine[:300]
+
+
+def recap_covers_the_whole_stream():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_a_recap_covers_the_whole_stream_not_a_sample_of_it()
+        return True
+    except Exception:
+        return False
+
+
 def test_a_recap_does_not_quote_the_request_back_as_an_event():
     """Captured off the real bot, not a paraphrase: the recap's own ask
     arrived as the last of the week's events -
@@ -3352,6 +3443,7 @@ def main():
     test_emoji_walls_never_chime()
     test_a_longer_recap_window_remembers_more()
     test_a_recap_does_not_quote_the_request_back_as_an_event()
+    test_a_recap_covers_the_whole_stream_not_a_sample_of_it()
     test_a_direct_answer_is_never_refused_for_reusing_a_word()
     test_a_held_question_is_acknowledged_with_the_wait()
     test_a_held_mention_is_answered_late_to_the_right_person()

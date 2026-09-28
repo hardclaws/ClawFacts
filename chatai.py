@@ -143,6 +143,33 @@ _RECAP_WINDOW = re.compile(
     r"(hours?|hrs?|days?|weeks?|months?)\b", re.IGNORECASE)
 
 
+def stream_summary_prompt(lines: list, previous: str = "") -> str:
+    """The distil ask for one slice of the stream.
+
+    A running log, not a performance: names, vehicles, places, what broke,
+    what was decided, what is still open. The recap is written from these
+    slices later, so anything dropped here is gone for good - which is
+    why the ask is for events rather than for flavour.
+    """
+    out = []
+    if previous:
+        out.append("Already logged for the previous slice (do not repeat "
+                   "it, but do follow up on it if it developed):")
+        out.append(previous)
+        out.append("")
+    out.append("Chat from the last slice of a live stream:")
+    out.extend(f"- {n}: {t}" for n, t in lines)
+    out.append("")
+    out.append(
+        "Write 2-5 sentences logging what actually happened in this slice: "
+        "who was there, what they were doing, vehicles, loads, routes, "
+        "places, problems, plans and anything settled or left open. Plain "
+        "factual prose, third person, no greeting, no persona, no emoji. "
+        "Only what these lines support - if the slice is thin, say so in "
+        "one sentence rather than padding it.")
+    return "\n".join(out)
+
+
 def recap_window(text: str):
     """(seconds, 'the last 5 days') when the message asks about a period.
 
@@ -181,7 +208,8 @@ def user_prompt(lines: list, nick: str, text: str,
                 own: list = None, overheard: bool = False,
                 notice: str = None, knowledge: bool = False,
                 ongoing: list = None, task: str = None,
-                history: list = None, window_label: str = "") -> str:
+                history: list = None, window_label: str = "",
+                summaries: list = None) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
@@ -308,8 +336,17 @@ def user_prompt(lines: list, nick: str, text: str,
                        "reason - in your own voice, one line. If you "
                        "genuinely do not know, say so; never invent a "
                        "number.")
+    if summaries:
+        # The spine: every slice of the period, distilled as the stream
+        # ran. This is what lets a recap cover twelve hours instead of
+        # the forty lines a prompt can hold verbatim.
+        out.append("")
+        out.append("RUNNING LOG OF THE STREAM"
+                   + (f" OVER {window_label.upper()}" if window_label else "")
+                   + " (written as it happened, oldest first):")
+        out.extend(f"- {s}" for s in summaries)
     if history:
-        # The period's real chat, straight from the log. Without it a
+        # Verbatim colour on top of the spine. Without it a
         # recap had only eight distilled facts to work from, so every
         # window came back with the same four events - and a model asked
         # for a week it cannot see will invent one.

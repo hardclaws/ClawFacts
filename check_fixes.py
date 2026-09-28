@@ -3004,6 +3004,14 @@ def main() -> int:
              ":tmi.twitch.tv PONG tmi.twitch.tv :tmi.twitch.tv") == "PONG"
          and _bot.TwitchBot._irc_command("PING :tmi.twitch.tv") == "PING"
          and 'command == "PONG"' in _bot2),
+        ("a recap covers the whole stream, not a sample of it",
+         # A twelve-hour stream logs thousands of lines and no prompt holds
+         # them. Measured on a normal stream: 3,600 lines logged, 40 in the
+         # recap - 1.1%, and 0.37% on a busy one. Sampling harder cannot fix
+         # that, so the stream is distilled as it runs and the recap reads
+         # the spine. Drives the real keeper, the real store and the real
+         # prompt; verified to fail when the keeper is stubbed out.
+         __import__("mock_chatai_test").recap_covers_the_whole_stream()),
         ("a recap does not quote the request back as an event",
          # Captured off the real bot: the recap's own ask arrived as the
          # last of the week's events, '[Mon 00:09] Hardclaws: Docbot tell

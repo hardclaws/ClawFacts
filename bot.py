@@ -202,6 +202,13 @@ DEFAULTS = {
     # many minutes. It was every reply; that was a third of the token
     # budget spent on 'NOTHING WORTH KEEPING'.
     "chat_ai_distill_lines": 4,
+    # How often the stream is distilled into its running log, and how
+    # much of one slice the model is shown. A twelve-hour stream logs
+    # thousands of lines; at one slice every twenty minutes that is
+    # thirty-six slices, which is what a recap reads.
+    "memory_summary_minutes": 20,
+    "memory_summary_min_lines": 8,
+    "memory_summary_max_lines": 150,
     "chat_ai_distill_minutes": 10,
     "chat_ai_chance": 0.10,
     "chat_ai_max_hour": 6,
@@ -888,6 +895,14 @@ class TwitchBot:
                 target=self._chat_ai_keeper, name="chat-ai", daemon=True
             )
             talker.start()
+            # The stream's running log, distilled while it happens. It
+            # cannot be reconstructed afterwards: a recap that sampled
+            # the transcript saw 40 of 3,600 lines, about one percent.
+            librarian = threading.Thread(
+                target=self._memory_keeper, name="memory-keeper",
+                daemon=True
+            )
+            librarian.start()
             # Pay the model's cold start NOW, in the background: a local
             # 8B model takes 10-25s to load into RAM, longer than any
             # chat timeout - the first line of chat must not pay it.
@@ -2363,6 +2378,68 @@ class TwitchBot:
             except Exception as exc:
                 self._log(f"chat-ai error: {exc!r}")
 
+    def _memory_keeper(self) -> None:
+        """Distil the stream into a running log while it is running.
+
+        Runs on its own thread, never on the read loop: the model call
+        takes seconds and a recap is owed an answer, not a stall.
+        """
+        while self.running:
+            time.sleep(30.0)
+            if not self.running:
+                return
+            try:
+                self._summarize_stream()
+            except Exception as exc:
+                self._log(f"memory-keeper error: {exc!r}")
+
+    def _summarize_stream(self) -> bool:
+        """One slice: distil the chat since the last one. True if stored."""
+        import llm as llm_mod
+        if not self.cfg.get("chat_ai_enabled", False):
+            return False              # memory belongs to the chat AI
+        if not self._memory.ok or not llm_mod.any_configured(self._opts):
+            return False
+        every = max(1.0, float(
+            self.cfg.get("memory_summary_minutes", 20))) * 60.0
+        now = time.time()
+        resume = self._memory.last_summary_end() or (now - every)
+        if now - resume < every:
+            return False
+        mine = (self.nick or "").lower()
+        rows = []
+        for _ts, who, line in self._memory.transcript(resume, limit=4000):
+            flat = " ".join((line or "").split())
+            if len(flat) < 6 or flat.startswith(("!", "/")):
+                continue
+            if (who or "").lower() == mine:
+                continue
+            rows.append((who, flat))
+        need = max(1, int(self.cfg.get("memory_summary_min_lines", 8)))
+        if len(rows) < need and now - resume < 6 * 3600:
+            return False              # nothing worth a slice yet
+        cap = max(20, int(self.cfg.get("memory_summary_max_lines", 150)))
+        previous = self._memory.summaries(resume - every, limit=1)
+        try:
+            raw = llm_mod.chat_reply(
+                "You maintain the running log of a live stream. Factual, "
+                "plain, no persona, no greeting, no emoji.",
+                chatai.stream_summary_prompt(
+                    rows[-cap:], previous[0][2] if previous else ""),
+                self._opts, max_tokens=300)
+        except Exception as exc:
+            self._log(f"stream summary failed: {exc!r}")
+            return False
+        text = " ".join((raw or "").split())
+        if not self._memory.add_summary(resume, now, text):
+            return False
+        self._log(
+            f"stream memory: logged {len(rows)} lines of chat from "
+            f"{time.strftime('%H:%M', time.localtime(resume))} to "
+            f"{time.strftime('%H:%M', time.localtime(now))} "
+            f"({self._memory.summary_count()} slices held)")
+        return True
+
     def _tick_reminders(self) -> int:
         """One pass of the reminder clock. Returns how many it posted."""
         if not self.running or self.paused:
@@ -3256,12 +3333,18 @@ class TwitchBot:
         # all drew the same eight most-recent facts and came back with
         # the same four events. Read the window's real chat - the log has
         # always been written and was never read.
-        history, window_label = [], ""
+        history, window_label, spine = [], "", []
         window = chatai.recap_window(text)
         if window and self._memory.ok:
             secs, window_label = window
             names = tuple(n.lower() for n in self._chat_ai_names if n)
             ask = " ".join((text or "").split()).lower()
+            since = time.time() - secs
+            spine = [
+                "[%s-%s] %s" % (
+                    time.strftime("%a %H:%M", time.localtime(a)),
+                    time.strftime("%H:%M", time.localtime(b)), body)
+                for a, b, body in self._memory.summaries(since)]
             history = []
             for ts, who, line in self._memory.digest(
                     time.time() - secs, skip=(self.nick,)):
@@ -3275,9 +3358,10 @@ class TwitchBot:
                 history.append("[%s] %s: %s" % (
                     time.strftime("%a %H:%M", time.localtime(ts)),
                     who, flat))
-            self._log(f"recap over {window_label}: {len(history)} lines of "
-                      f"real chat")
-            if not history:
+            self._log(f"recap over {window_label}: {len(spine)} logged "
+                      f"slices covering the whole period, plus "
+                      f"{len(history)} verbatim lines")
+            if not spine and not history:
                 self._log(f"nothing logged in {window_label} - the recap "
                           f"will say so rather than invent events")
         # A local model on CPU reads the whole prompt before writing a
@@ -3314,7 +3398,8 @@ class TwitchBot:
                                    knowledge=knowledge,
                                    ongoing=going_on, task=task,
                                    history=history,
-                                   window_label=window_label),
+                                   window_label=window_label,
+                                   summaries=spine),
                 self._opts)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")

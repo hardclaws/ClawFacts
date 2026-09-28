@@ -31,6 +31,11 @@ DB_PATH = "chat_memory.db"
 LOG_DAYS = 90
 #: Per viewer. Oldest facts fall off the end first.
 MAX_PER_NICK = 25
+#: A rolling summary covers a slice of the stream. Capped so a recap's
+#: spine stays readable: thirty-six slices of a twelve-hour stream is
+#: about fourteen thousand characters, which fits a hosted model with
+#: room to spare and is still a fraction of the transcript it replaces.
+MAX_SUMMARY_CHARS = 400
 
 
 class Memory:
@@ -53,6 +58,10 @@ class Memory:
                 "id INTEGER PRIMARY KEY, ts REAL, nick TEXT, fact TEXT)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_mem_nick"
                        " ON memories(nick)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS summaries("
+                "id INTEGER PRIMARY KEY, ts_from REAL, ts_to REAL,"
+                " text TEXT)")
             db.commit()
             self._db = db
         except sqlite3.Error as exc:
@@ -203,6 +212,70 @@ class Memory:
         for i, row in enumerate(kept):
             buckets[i * len(buckets) // len(kept)].append(row)
         return [max(b, key=lambda r: len(r[2])) for b in buckets if b]
+
+    # ---- the rolling summary of the stream -------------------------
+    def add_summary(self, ts_from: float, ts_to: float, text: str) -> bool:
+        """Store one distilled slice of the stream."""
+        if not self.ok:
+            return False
+        text = " ".join((text or "").split())[:MAX_SUMMARY_CHARS]
+        if len(text) < 20:
+            return False
+        try:
+            with self._lock:
+                self._db.execute(
+                    "INSERT INTO summaries(ts_from, ts_to, text)"
+                    " VALUES(?,?,?)", (ts_from, ts_to, text))
+                self._db.execute(
+                    "DELETE FROM summaries WHERE ts_to < ?",
+                    (ts_from - LOG_DAYS * 86400,))
+                self._db.commit()
+            return True
+        except sqlite3.Error:
+            return False
+
+    def summaries(self, since: float, limit: int = 96) -> list:
+        """The slices covering a period, oldest first: [(from, to, text)].
+
+        This is what makes a recap scale. A twelve-hour stream logs
+        thousands of lines and no prompt holds them, so the transcript is
+        distilled as the stream runs and the recap reads the spine -
+        complete coverage in a fraction of the tokens.
+        """
+        if not self.ok:
+            return []
+        try:
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT ts_from, ts_to, text FROM summaries"
+                    " WHERE ts_to >= ? ORDER BY ts_to DESC LIMIT ?",
+                    (since, max(1, int(limit)))).fetchall()
+            return [(r[0], r[1], r[2]) for r in reversed(rows)]
+        except sqlite3.Error:
+            return []
+
+    def last_summary_end(self) -> float:
+        """Where the next slice picks up; 0.0 when nothing is summarised."""
+        if not self.ok:
+            return 0.0
+        try:
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT MAX(ts_to) FROM summaries").fetchone()
+            return float(row[0]) if row and row[0] is not None else 0.0
+        except sqlite3.Error:
+            return 0.0
+
+    def summary_count(self) -> int:
+        """How much of the stream is on the spine."""
+        if not self.ok:
+            return 0
+        try:
+            with self._lock:
+                return int(self._db.execute(
+                    "SELECT COUNT(*) FROM summaries").fetchone()[0])
+        except sqlite3.Error:
+            return 0
 
     # ---- the exit ----------------------------------------------------
     def purge(self, nick: str) -> int:
