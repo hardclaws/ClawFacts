@@ -143,6 +143,26 @@ _RECAP_WINDOW = re.compile(
     r"twelve|twenty|thirty|a|an|couple(?:\s+of)?|few)\s*)?"
     r"(hours?|hrs?|days?|weeks?|months?)\b", re.IGNORECASE)
 
+#: "summary of the stream so far", "recap so far", "what happened today",
+#: "stream today", "so far" - these have no hour/day unit but are still
+#: a recap request. They should not be missed because the regex above
+#: needs a unit.
+_RECAP_SO_FAR = re.compile(
+    r"\b(?:summary|recap|so\s+far|what\s+happened|stream\s+so\s+far|"
+    r"today|this\s+stream|stream\s+today|today'?s?\s+stream)\b",
+    re.IGNORECASE)
+
+#: "who gave a story about a 5k run", "who spoke about X", "who mentioned X"
+#: The operator asked "who gave a story about a 5k run today" and the bot
+#: answered "Nobody" because it only had the last 15 lines and no search.
+_WHO_SPOKE = re.compile(
+    r"\bwho\s+(?:gave|spoke|talked|mentioned|said|brought\s+up)\b"
+    r"(?:.*?(?:about|on)\s+(.+?))?(?:\?|\b(?:today|in\s+chat|in\s+the\s+chat|this\s+stream)\b|$)",
+    re.IGNORECASE)
+_WHO_SPOKE_SIMPLE = re.compile(
+    r"\bwho\s+.*?(?:about|mentioned|spoke)\s+(.+)",
+    re.IGNORECASE)
+
 
 def stream_summary_prompt(lines: list, previous: str = "",
                           sentences: int = 5) -> str:
@@ -165,11 +185,12 @@ def stream_summary_prompt(lines: list, previous: str = "",
     out.append(
         f"Write up to {max(2, int(sentences))} sentences logging what "
         "actually happened in this slice: "
-        "who was there, what they were doing, vehicles, loads, routes, "
-        "places, problems, plans and anything settled or left open. Plain "
-        "factual prose, third person, no greeting, no persona, no emoji. "
-        "Only what these lines support - if the slice is thin, say so in "
-        "one sentence rather than padding it.")
+        "who was there and who said or did what, with names, vehicles, "
+        "loads, routes, places, problems, plans and anything settled or "
+        "left open. Plain factual prose, third person, no greeting, no "
+        "persona, no emoji. Only what these lines support - if the slice "
+        "is thin, say so in one sentence rather than padding it. Never "
+        "invent a 5K, a run, a game or any event not in these lines.")
     return "\n".join(out)
 
 
@@ -182,27 +203,70 @@ def recap_window(text: str):
     eight most-recent facts whichever window was named. None means the
     message is not a recap, and the caller leaves memory alone.
     """
-    m = _RECAP_WINDOW.search(text or "")
-    if not m:
+    t = text or ""
+    m = _RECAP_WINDOW.search(t)
+    if m:
+        unit = _WINDOW_UNIT.get(m.group(2).lower())
+        if unit is not None:
+            raw = (m.group(1) or "").lower().replace(" of", "").strip()
+            if raw.isdigit():
+                count = int(raw)
+            else:
+                count = _WINDOW_NUM.get(raw, 0)
+            if not count:
+                # "over the week" / "this month": the unit alone means one of it.
+                count = 1
+            count = min(count, 366)             # a recap is not an archive
+            secs = unit * count
+            said = m.group(2).lower()
+            one = {"hr": "hour", "hrs": "hour"}.get(said, said.rstrip("s"))
+            label = f"the last {one}" if count == 1 \
+                else f"the last {count} {said}"
+            return secs, label
+    # "summary of the stream so far", "what happened today", "this stream"
+    # have no hour/day unit but are still a recap request. Previously
+    # "Docbot give us a summary of the stream so far" returned None and
+    # the model hallucinated a 5K run recap with no attribution.
+    if _RECAP_SO_FAR.search(t):
+        low = t.lower()
+        if "today" in low:
+            return 86400.0, "today"
+        # "so far", "this stream", "stream so far" -> 12h typical stream
+        return 43200.0, "so far today"
+    return None
+
+
+def who_spoke_about(text: str) -> str | None:
+    """If the message asks who spoke about X, return X, else None.
+
+    "who gave a story about a 5k run today" -> "5k run"
+    "who in the chat spoke about a 5k run" -> "5k run"
+    The keyword is then searched in the transcript so the model can
+    attribute it instead of saying Nobody.
+    """
+    t = (text or "").strip()
+    if not t:
         return None
-    unit = _WINDOW_UNIT.get(m.group(2).lower())
-    if unit is None:
+    if "who" not in t.lower():
         return None
-    raw = (m.group(1) or "").lower().replace(" of", "").strip()
-    if raw.isdigit():
-        count = int(raw)
-    else:
-        count = _WINDOW_NUM.get(raw, 0)
-    if not count:
-        # "over the week" / "this month": the unit alone means one of it.
-        count = 1
-    count = min(count, 366)             # a recap is not an archive
-    secs = unit * count
-    said = m.group(2).lower()
-    one = {"hr": "hour", "hrs": "hour"}.get(said, said.rstrip("s"))
-    label = f"the last {one}" if count == 1 \
-        else f"the last {count} {said}"
-    return secs, label
+    def _clean_topic(topic: str) -> str:
+        topic = re.sub(r"\b(?:today|in\s+chat|in\s+the\s+chat|this\s+stream)\b.*$", "", topic, flags=re.IGNORECASE).strip()
+        topic = re.sub(r"^(?:about|on)\s+", "", topic, flags=re.IGNORECASE).strip()
+        topic = re.sub(r"^(?:a\s+story\s+about|story\s+about)\s+", "", topic, flags=re.IGNORECASE).strip()
+        topic = re.sub(r"^(?:a|an|the)\s+", "", topic, flags=re.IGNORECASE).strip()
+        topic = topic.strip(" ?.,!").strip()
+        return topic
+    m = _WHO_SPOKE.search(t)
+    if m:
+        topic = _clean_topic((m.group(1) or "").strip())
+        if topic and len(topic) >= 2:
+            return topic
+    m2 = _WHO_SPOKE_SIMPLE.search(t)
+    if m2:
+        topic = _clean_topic((m2.group(1) or "").strip())
+        if topic and len(topic) >= 2:
+            return topic
+    return None
 
 
 def user_prompt(lines: list, nick: str, text: str,

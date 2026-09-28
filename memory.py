@@ -209,6 +209,36 @@ class Memory:
         except sqlite3.Error:
             return []
 
+    def search(self, keyword: str, since: float, limit: int = 40, skip=()) -> list:
+        """Chat lines containing keyword, newest last, filtered like digest."""
+        if not self.ok or not keyword:
+            return []
+        kw = f"%{keyword.strip()}%"
+        drop = {(n or "").strip().lower() for n in skip if n and n.strip()}
+        sql = "SELECT ts, nick, text FROM messages WHERE ts >= ? AND text LIKE ? ORDER BY ts DESC LIMIT ?"
+        args = [since, kw, max(1, int(limit) * 4)]
+        try:
+            with self._lock:
+                rows = self._db.execute(sql, tuple(args)).fetchall()
+        except Exception:
+            return []
+        kept = []
+        low_kw = keyword.lower()
+        for ts, nick, text in reversed(rows):
+            t = " ".join((text or "").split())
+            if len(t) < 6:
+                continue
+            if (nick or "").strip().lower() in drop:
+                continue
+            if low_kw not in t.lower():
+                continue
+            if t.startswith(("!", "/")):
+                continue
+            kept.append((ts, nick, t))
+            if len(kept) >= limit:
+                break
+        return kept
+
     def digest(self, since: float, limit: int = 40, skip=()) -> list:
         """A spread of the period's real chat, not its last `limit` lines.
 

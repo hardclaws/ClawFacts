@@ -3393,6 +3393,7 @@ class TwitchBot:
         # always been written and was never read.
         history, window_label, spine = [], "", []
         window = chatai.recap_window(text)
+        who_topic = chatai.who_spoke_about(text) if hasattr(chatai, "who_spoke_about") else None
         if window and self._memory.ok:
             secs, window_label = window
             names = tuple(n.lower() for n in self._chat_ai_names if n)
@@ -3404,24 +3405,71 @@ class TwitchBot:
                     time.strftime("%H:%M", time.localtime(b)), body)
                 for a, b, body in self._memory.summaries(since)]
             history = []
-            for ts, who, line in self._memory.digest(
-                    time.time() - secs, skip=(self.nick,)):
-                flat = " ".join(line.split())
-                # The recap request is not one of the week's events, and
-                # neither is anyone else's ask of the bot. Left in, the
-                # model was handed its own question as a thing that
-                # happened - live-fire it appeared as the last entry.
-                if flat.lower() == ask or flat.lower().startswith(names):
-                    continue
-                history.append("[%s] %s: %s" % (
-                    time.strftime("%a %H:%M", time.localtime(ts)),
-                    who, flat))
+            # If the question is "who spoke about X", search for X specifically
+            # instead of just a recency-weighted sample, so the model can attribute.
+            if who_topic and hasattr(self._memory, "search"):
+                for ts, who, line in self._memory.search(
+                        who_topic, since, limit=20, skip=(self.nick,)):
+                    flat = " ".join(line.split())
+                    if flat.lower() == ask or flat.lower().startswith(names):
+                        continue
+                    history.append("[%s] %s: %s" % (
+                        time.strftime("%a %H:%M", time.localtime(ts)),
+                        who, flat))
+                # If search found nothing, fall back to digest so we don't go empty
+                if not history:
+                    for ts, who, line in self._memory.digest(
+                            time.time() - secs, skip=(self.nick,)):
+                        flat = " ".join(line.split())
+                        if flat.lower() == ask or flat.lower().startswith(names):
+                            continue
+                        history.append("[%s] %s: %s" % (
+                            time.strftime("%a %H:%M", time.localtime(ts)),
+                            who, flat))
+            else:
+                for ts, who, line in self._memory.digest(
+                        time.time() - secs, skip=(self.nick,)):
+                    flat = " ".join(line.split())
+                    # The recap request is not one of the week's events, and
+                    # neither is anyone else's ask of the bot. Left in, the
+                    # model was handed its own question as a thing that
+                    # happened - live-fire it appeared as the last entry.
+                    if flat.lower() == ask or flat.lower().startswith(names):
+                        continue
+                    history.append("[%s] %s: %s" % (
+                        time.strftime("%a %H:%M", time.localtime(ts)),
+                        who, flat))
             self._log(f"recap over {window_label}: {len(spine)} logged "
                       f"slices covering the whole period, plus "
-                      f"{len(history)} verbatim lines")
+                      f"{len(history)} verbatim lines"
+                      + (f" (who_topic={who_topic!r})" if who_topic else ""))
             if not spine and not history:
                 self._log(f"nothing logged in {window_label} - the recap "
                           f"will say so rather than invent events")
+        elif who_topic and self._memory.ok:
+            # "who gave a story about a 5k run today" without an explicit window:
+            # treat as today + search.
+            secs, window_label = 86400.0, "today"
+            names = tuple(n.lower() for n in self._chat_ai_names if n)
+            ask = " ".join((text or "").split()).lower()
+            since = time.time() - secs
+            spine = [
+                "[%s-%s] %s" % (
+                    time.strftime("%a %H:%M", time.localtime(a)),
+                    time.strftime("%H:%M", time.localtime(b)), body)
+                for a, b, body in self._memory.summaries(since)]
+            history = []
+            if hasattr(self._memory, "search"):
+                for ts, who, line in self._memory.search(
+                        who_topic, since, limit=20, skip=(self.nick,)):
+                    flat = " ".join(line.split())
+                    if flat.lower() == ask or flat.lower().startswith(names):
+                        continue
+                    history.append("[%s] %s: %s" % (
+                        time.strftime("%a %H:%M", time.localtime(ts)),
+                        who, flat))
+            self._log(f"who search for {who_topic!r} over {window_label}: "
+                      f"{len(spine)} slices, {len(history)} matching lines")
         # A local model on CPU reads the whole prompt before writing a
         # word - that read, not the generation, is what blew a 20s
         # timeout on a warm model. Send it a smaller room and fewer
