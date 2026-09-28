@@ -48,11 +48,15 @@ USER_AGENT = ("ClawFacts/1.0 "
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 DDG_API = "https://api.duckduckgo.com/"
 OSM_API = "https://nominatim.openstreetmap.org/search"  # free geocoder
+PHOTON_API = "https://photon.komoot.io/api/"  # keyless OSM geocoder, fuzzy
 OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"  # weather + solar
 OPEN_METEO_GEOCODE_API = "https://geocoding-api.open-meteo.com/v1/search"
+WEATHERAPI_API = "https://api.weatherapi.com/v1/current.json"  # needs a key
 GOOGLE_API = "https://www.googleapis.com/customsearch/v1"  # needs key + cx
 SERPER_API = "https://google.serper.dev/search"  # needs one free key
 TAVILY_API = "https://api.tavily.com/search"     # built for LLM retrieval
+GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"  # keyless headlines
+GOOGLE_NEWS_TOP = "https://news.google.com/rss"  # the day's top stories
 SPICY_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "spicy_facts.json"
 )
@@ -420,6 +424,33 @@ def _is_dangling(sentence: str) -> bool:
     return bool(_DANGLE_START.match(sentence) or _ANAPHOR.search(sentence))
 
 
+_FORUM_TAG = re.compile(
+    r"(?:^|[\s:|(\-])r/[A-Za-z0-9_]+\b|\b(?:reddit|quora|yahoo answers|"
+    r"stack ?exchange|answers\.com|(?:forum|community)\s+(?:thread|post|"
+    r"discussion))\b|\bposted by\b|\bu/[A-Za-z0-9_-]+\b", re.IGNORECASE)
+_QUESTION_OPEN = re.compile(
+    r"^(?:what|whats|what's|who|whos|who's|how|why|when|where|which|is|are|"
+    r"do|does|did|can|could|should|would|will|has|have|was|were|any(?:one|"
+    r"body)?)\b", re.IGNORECASE)
+
+
+def _is_forum_title(sentence: str) -> bool:
+    """A forum thread title, or a question with something glued after it:
+    'Whats a good average time to do 5K? : r/C25K.' Live-fire it was
+    posted as the ANSWER to 'whats the avg time to run 5k' - a question,
+    answered with the same question from Reddit. A question is never a
+    fact and never a source: it carries no figure the asker lacks."""
+    t = " ".join((sentence or "").split())
+    if not t:
+        return False
+    if _FORUM_TAG.search(t):
+        return True
+    if "?" in t and (re.search(r"\?\s*[:|\-\u2013\u2014]", t)
+                     or _QUESTION_OPEN.match(t)):
+        return True
+    return False
+
+
 def _is_fragment(sentence: str) -> bool:
     """True for a heading, a list item or a question - none of which is a fact.
 
@@ -433,6 +464,12 @@ def _is_fragment(sentence: str) -> bool:
         # A list item cut out of a bulleted list. Never a sentence.
         return True
     if t.endswith("?"):
+        return True
+    # 'Whats a good average time to do 5K? : r/C25K.' - a forum thread
+    # title with the subreddit glued on after the question mark, posted
+    # as the ANSWER to 'whats the avg time to run 5k'. A question is a
+    # question wherever its '?' sits.
+    if _is_forum_title(t):
         return True
     # "meet the world's longest truck \u2026 a 175-foot road train" - a
     # scraped teaser. Prose starts with a capital (brands like eBay keep an
@@ -839,13 +876,20 @@ def _sentence_parts(text: str) -> list:
     return parts
 
 
+def _no_em_dash(text: str) -> str:
+    t = text.replace(" \u2014 ", ", ").replace(" \u2013 ", ", ").replace(" -- ", ", ")
+    t = t.replace("\u2014", ", ").replace("\u2013", ", ")
+    t = t.replace(", ,", ",").replace(" ,", ",")
+    t = " ".join(t.split())
+    return t.replace(" ,", ",")
+
 def trim_to_fit(text: str, limit: int) -> str:
     """Fit text to `limit` chars, keeping whole sentences whenever one fits.
 
     Public so bot.py and the fact path share one implementation rather than two
     that can drift.
     """
-    text = " ".join(text.split())
+    text = _no_em_dash(" ".join(text.split()))
     if len(text) <= limit:
         return text
     parts = _sentence_parts(text)
@@ -865,13 +909,15 @@ def trim_to_fit(text: str, limit: int) -> str:
     # characters, the old 55% threshold rejected it, and the word chop that
     # won left "...to the Cafe and the gift…" - a dangler where a fact
     # should be. The longest cut keeps the most of the actual story.
+    # No em dashes in output ever - the operator hates them.
+    text = text.replace("\u2014", ", ").replace("\u2013", ", ").replace(" -- ", ", ")
     best = ""
-    for sep in ("; ", " — ", ", but ", ", and ", ", which ", ", "):
+    for sep in ("; ", ", but ", ", and ", ", which ", ", "):
         head = text[:limit + 1]
         idx = head.rfind(sep)
         if idx == -1:
             continue
-        cut = head[:idx].rstrip(" ,;:-—")
+        cut = head[:idx].rstrip(" ,;:-")
         if len(cut) > len(best):
             best = cut
     if len(best) >= int(limit * 0.40):
@@ -881,14 +927,14 @@ def trim_to_fit(text: str, limit: int) -> str:
         # "and the", "of the", "which was" - a cut that ends on a connector
         # is not a sentence, and posting the connector proves the chop.
         while True:
-            new = _DANGLING_TAIL.sub("", t).rstrip(" ,;:-—")
+            new = _DANGLING_TAIL.sub("", t).rstrip(" ,;:-")
             if new == t:
                 return t
             t = new
 
     # Last resort: a word-boundary cut, with every dangling connector
     # stripped - it ends on a noun or it does not post.
-    cut = strip_danglers(text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-—"))
+    cut = strip_danglers(text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-"))
     if len(cut) >= 30:
         return cut + "…"
     return (best or cut) + "…"
@@ -1962,7 +2008,11 @@ def _parse_geocode(item: dict):
             or addr.get("city") or addr.get("municipality") or addr.get("suburb")
             or addr.get("locality") or addr.get("road") or item.get("name")
             or "").strip()
-    state = (addr.get("state") or addr.get("territory") or "").strip()
+    # Thailand, Japan and much of the world file their region under
+    # 'province' or 'region', not 'state'; a label with no region at
+    # all reads like a typo.
+    state = (addr.get("state") or addr.get("territory") or addr.get("province")
+             or addr.get("region") or "").strip()
     county = (addr.get("county") or "").strip()
     country = (addr.get("country") or "").strip()
     try:
@@ -1976,26 +2026,221 @@ def _parse_geocode(item: dict):
         "state": state,
         "county": county,
         "country": country,
+        "country_code": str(addr.get("country_code") or "").strip().lower(),
+        "kind": str(item.get("addresstype") or item.get("type") or "").strip(),
         "lat": lat,
         "lon": lon,
         "display_name": item.get("display_name", "").strip(),
     }
 
 
+#: Nominatim result types that are a PLACE someone can ask the sunrise
+#: or weather for. A footpath, a shop or a bus stop is not one - and a
+#: name-only match on one of those is how 'Hintok, ok' became a trail
+#: in Thailand.
+_SETTLEMENT_KINDS = frozenset((
+    "city", "town", "village", "hamlet", "municipality", "suburb", "locality",
+    "borough", "quarter", "neighbourhood", "neighborhood", "isolated_dwelling",
+    "farm", "county", "state", "province", "region", "district", "country",
+    "island", "administrative", "census", "city_district", "township",
+    "postcode", "state_district", "territory",
+))
+
+
+def _region_of(query: str) -> tuple:
+    """The region a viewer typed with the place, if any: 'Hintok, ok' ->
+    ('ok', 'oklahoma', 'us'); 'Cuba Missouri' -> ('missouri', 'missouri',
+    'us'); 'Paris' -> ('', '', ''). The third value is the country code
+    the region implies (a US state or a Canadian province) so a
+    geocoder can be pinned to it."""
+    region = _query_region(query)
+    if not region:
+        return "", "", ""
+    key = region.strip().lower().strip(".")
+    if key in _US_STATES:
+        return key, _US_STATES[key], "us"
+    if key in _US_STATE_BY_NAME:
+        return key, key, "us"
+    if key in _CA_PROVINCES:
+        return key, _CA_PROVINCES[key], "ca"
+    if key in _CA_PROVINCE_BY_NAME:
+        return key, key, "ca"
+    full = _COUNTRIES.get(key, key)
+    code = {"united states": "us", "united kingdom": "gb", "canada": "ca",
+            "australia": "au", "new zealand": "nz", "ireland": "ie",
+            "england": "gb", "scotland": "gb", "wales": "gb",
+            "northern ireland": "gb", "united arab emirates": "ae",
+            "mexico": "mx", "germany": "de", "france": "fr"}.get(full, "")
+    return key, full, code
+
+
+def _geo_in_region(geo: dict, region_name: str, country_code: str) -> bool:
+    """Does a geocoder hit sit in the region the viewer named? A state or
+    province must match by name; a bare country by code."""
+    if not geo:
+        return False
+    if region_name and region_name not in ("united states", "canada"):
+        state = (geo.get("state") or "").strip().lower()
+        if state and state == region_name:
+            return True
+        if country_code in ("us", "ca"):
+            return False        # a US state / CA province was named: no
+        return region_name in (geo.get("country") or "").strip().lower() \
+            or region_name in (geo.get("display_name") or "").lower()
+    if country_code:
+        return (geo.get("country_code") or "").lower() == country_code
+    return True
+
+
+def _nominatim(query: str, limit: int = 5, country_code: str = "") -> list:
+    """Nominatim hits for a query, parsed, English labels. Live-fire,
+    'Hintok, ok' was answered under the header 'ไทรโยค' - Nominatim
+    names places in the local language unless asked otherwise."""
+    params = {"q": query, "format": "json", "limit": limit,
+              "addressdetails": 1, "accept-language": "en"}
+    if country_code:
+        params["countrycodes"] = country_code
+    data = _http_get_json(OSM_API, params, timeout=10)
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data:
+        geo = _parse_geocode(item) if isinstance(item, dict) else None
+        if geo:
+            out.append(geo)
+    return out
+
+
+def _photon_geocode(query: str, region_name: str = "",
+                    country_code: str = "") -> dict | None:
+    """A settlement from Photon (komoot's keyless OSM geocoder), which
+    matches FUZZILY: 'Hintok' finds Hinton. Nominatim needs the exact
+    spelling, and chat does not spell. Only places (city/town/village/
+    hamlet...) count, and the region the viewer named must match."""
+    params = {"q": " ".join(x for x in (query, region_name) if x),
+              "limit": 10, "lang": "en"}
+    data = _http_get_json(PHOTON_API, params, timeout=10)
+    feats = data.get("features") if isinstance(data, dict) else None
+    if not isinstance(feats, list):
+        return None
+    for feat in feats:
+        props = feat.get("properties") or {}
+        if props.get("osm_key") != "place" or props.get("osm_value") not in (
+                "city", "town", "village", "hamlet", "municipality",
+                "borough", "suburb", "locality", "isolated_dwelling"):
+            continue
+        try:
+            lon, lat = (float(x) for x in feat["geometry"]["coordinates"][:2])
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        geo = {"name": str(props.get("name") or "").strip(),
+               "state": str(props.get("state") or "").strip(),
+               "county": str(props.get("county") or "").strip(),
+               "country": str(props.get("country") or "").strip(),
+               "country_code": str(props.get("countrycode") or "").lower(),
+               "kind": str(props.get("osm_value") or ""),
+               "lat": lat, "lon": lon}
+        geo["display_name"] = ", ".join(
+            x for x in (geo["name"], geo["state"], geo["country"]) if x)
+        if not geo["name"]:
+            continue
+        if (region_name or country_code) and not _geo_in_region(
+                geo, region_name, country_code):
+            continue
+        return geo
+    return None
+
+
 def _osm_geocode(query: str):
-    """Geocode an arbitrary place name. Covers even very remote villages."""
+    """Geocode a place name the way a viewer typed it - even a very
+    remote village, even misspelt.
+
+    Live-fire: 'what time is sunrise in Hintok, ok' was answered for
+    'ไทรโยค' - Sai Yok, Thailand. Nominatim had no town called Hintok,
+    so its best string match was 'Hintok Cut', a footpath at Hellfire
+    Pass, and the ', ok' (Oklahoma) was ignored. The viewer meant
+    Hinton, Oklahoma. So: the region typed with the place is a hard
+    constraint (a US state pins the country too); a name-only hit on a
+    road, shop or trail is not a place; labels come back in English;
+    and when the exact spelling finds nothing, Photon's fuzzy match
+    gets a turn before giving up - a corrected place is logged."""
+    query = " ".join((query or "").split())
+    if not query:
+        return None
+    region_key, region_name, country_code = _region_of(query)
+    core = query
+    if region_key:
+        # 'Hintok, ok' / 'Hintok ok' -> 'Hintok' + region 'oklahoma':
+        # Nominatim does better with the full state name.
+        core = re.split(r"[,;|]", query, maxsplit=1)[0].strip()
+        if _norm(core) == _norm(query):
+            core = _split_trailing_region(query)[0] or query
+    attempts = []
+    if region_name:
+        attempts.append((f"{core}, {region_name}", country_code))
+    attempts.append((query, ""))
+    hits = []
+    for q, cc in attempts:
+        try:
+            hits = _nominatim(q, 5, cc)
+        except Exception as exc:
+            print(f"[funfacts] nominatim error: {exc!r}", flush=True)
+            hits = []
+        if hits:
+            break
+    # The region typed with the place is a hard constraint: a hit in
+    # the wrong state or the wrong country is not a near miss, it is
+    # a different place.
+    if region_name or country_code:
+        wrong = [g for g in hits
+                 if not _geo_in_region(g, region_name, country_code)]
+        hits = [g for g in hits if g not in wrong]
+        if wrong and not hits:
+            print(f"[funfacts] geocoder's matches for {query!r} were all "
+                  f"outside {region_name or country_code}: "
+                  + "; ".join(repr(g.get("display_name")) for g in wrong[:3]),
+                  flush=True)
+    settled = [g for g in hits if (g.get("kind") or "administrative")
+               in _SETTLEMENT_KINDS]
+    if settled:
+        return settled[0]
+    # No town by that spelling there. Before settling for a trail or a
+    # shop that happens to carry the name, try a fuzzy match on PLACES:
+    # 'Hintok' in Oklahoma is Hinton. Photon only, and only a name
+    # close enough to be a typo of what was typed.
     try:
-        data = _http_get_json(
-            OSM_API,
-            {"q": query, "format": "json", "limit": 1, "addressdetails": 1},
-            timeout=10,
-        )
+        fuzzy = _photon_geocode(core, region_name if region_key else "",
+                                country_code)
     except Exception as exc:
-        print(f"[funfacts] nominatim error: {exc!r}", flush=True)
-        return None
-    if not isinstance(data, list) or not data:
-        return None
-    return _parse_geocode(data[0])
+        print(f"[funfacts] photon geocoder error: {exc!r}", flush=True)
+        fuzzy = None
+    if fuzzy and _close_name(fuzzy["name"], core):
+        if _norm(fuzzy["name"]) != _norm(core):
+            print(f"[funfacts] geocoder read {query!r} as "
+                  f"{fuzzy['display_name']!r} (closest place by that name)",
+                  flush=True)
+        return fuzzy
+    if hits:
+        # A landmark, a park, a road - in the right region. Fine for a
+        # sunrise or a weather reading; the label says what it is.
+        return hits[0]
+    return None
+
+
+def _close_name(found: str, typed: str) -> bool:
+    """Is a geocoder's fuzzy hit a plausible spelling of what was typed?
+    'Hinton' for 'Hintok' yes; 'Red Rock' for 'Red Rock Canyon State
+    Park' no - that is a different thing, not a typo."""
+    import difflib
+    a, b = _norm(found), _norm(typed)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # A prefix is a different, longer name ('Red Rock' vs 'Red Rock
+    # Canyon State Park'), not a misspelling - unless it is nearly all
+    # of it ('Wilkes-Barr' for 'Wilkes-Barre').
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.8
 
 
 def _open_meteo_geocode(query: str):
@@ -3107,6 +3352,82 @@ _SPECIFIC_Q = re.compile(
 _CAP_MID = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _DIGIT = re.compile(r"\d")
 
+#: The KIND of answer a question wants, when it wants a particular kind.
+#: 'how long does it take to run 5k' wants a DURATION; the encyclopedia's
+#: 'The 5K run is a long-distance road running competition over a
+#: distance of five kilometres (3.107 mi)' has a figure in it (so it
+#: passed the specific-answer check) but the figure is a distance. Two
+#: rounds of that question live got a Reddit thread title and a
+#: definition of the race. Each kind is (question pattern, answer
+#: pattern): a question that matches the first must be answered by a
+#: line that matches the second, or the line is not the answer.
+_ANSWER_KINDS = (
+    # duration: 'how long does it take', 'avg/average/typical time to',
+    # 'how many minutes/hours', 'what time does X take'
+    (re.compile(r"\bhow\s+long\s+(?:does|do|did|will|would|should|it|"
+                r"to)\b(?!.*\b(?:ago|since)\b)|\b(?:avg|average|typical|"
+                r"normal|usual|good|decent|fast|slow)\s+(?:\w+\s+){0,2}"
+                r"(?:time|pace)\b|\bhow\s+many\s+(?:minutes|hours|days|"
+                r"weeks|months|years|seconds)\b|\bhow\s+(?:fast|quick(?:ly)?"
+                r"|slow)\b|\btime\s+(?:does|do|did|will)\s+it\s+take\b|"
+                r"\btakes?\s+to\b", re.IGNORECASE),
+     re.compile(r"\b\d+(?:\.\d+)?\s*(?:-|\u2013|to)?\s*\d*\s*(?:min(?:ute)?s?"
+                r"|hours?|hrs?|h|days?|weeks?|months?|years?|yrs?|sec(?:ond)?s?)"
+                r"\b|\b\d{1,2}:\d{2}(?::\d{2})?\b|\b(?:half|quarter)\s+"
+                r"an?\s+hour\b|\b(?:an?|one|two|three|four|five|six|seven|"
+                r"eight|nine|ten|fifteen|twenty|thirty|forty|forty-five|sixty|"
+                r"ninety)\s+(?:to\s+\w+\s+)?(?:minutes?|hours?|days?|weeks?|"
+                r"months?|years?|seconds?)\b", re.IGNORECASE)),
+    # distance: 'how far is', 'how many miles/km', 'what distance'
+    (re.compile(r"\bhow\s+far\b|\bhow\s+many\s+(?:miles|km|kilomet(?:er|re)s?|"
+                r"feet|meters|metres)\b|\bwhat\s+distance\b", re.IGNORECASE),
+     re.compile(r"\b\d[\d,.]*\s*(?:miles?|mi|km|kilomet(?:er|re)s?|feet|ft|"
+                r"meters?|metres?|m)\b|\b(?:one|two|three|four|five|six|seven|"
+                r"eight|nine|ten|twenty|hundred|thousand)\s+(?:miles?|"
+                r"kilomet(?:er|re)s?|feet|meters?|metres?)\b", re.IGNORECASE)),
+    # cost: 'how much does X cost', 'what does X cost', 'price of'
+    (re.compile(r"\bhow\s+much\s+(?:does|do|did|is|are|would|will)\b.*"
+                r"\b(?:cost|pay|paid|charge|worth|price)\b|\bwhat\s+(?:does|"
+                r"do|did)\b.*\bcost\b|\bprice\s+of\b|\bhow\s+expensive\b",
+                re.IGNORECASE),
+     re.compile(r"[$\u20ac\u00a3\u00a5]\s*\d|\b\d[\d,.]*\s*(?:dollars?|bucks|"
+                r"cents|euros?|pounds?|usd|eur|gbp)\b|\b(?:free of charge|"
+                r"for free)\b", re.IGNORECASE)),
+    # temperature: 'how hot/cold'. NOT 'what temperature does X': that
+    # question's honest answer can be a concept ('the dew point'), which
+    # is the standing decision behind _SPECIFIC_Q too.
+    (re.compile(r"\bhow\s+(?:hot|cold|warm)\s+(?:is|was|does|do|did|are|"
+                r"were|will|would|it|the)\b", re.IGNORECASE),
+     re.compile(r"\b-?\d+(?:\.\d+)?\s*(?:\u00b0|degrees?)\s*[cf]?\b|"
+                r"\b\d+\s*[cf]\b|\bbelow\s+(?:zero|freezing)\b", re.IGNORECASE)),
+    # weight: 'how heavy', 'how much does X weigh'
+    (re.compile(r"\bhow\s+heavy\b|\bhow\s+much\s+(?:does|do|did)\b.*"
+                r"\bweigh", re.IGNORECASE),
+     re.compile(r"\b\d[\d,.]*\s*(?:lbs?|pounds?|kg|kilos?|kilograms?|tons?|"
+                r"tonnes?|ounces?|oz|grams?|g)\b", re.IGNORECASE)),
+)
+
+
+def answer_kind(question: str):
+    """(name, answer_pattern) for a question that wants a particular
+    kind of figure - a duration, a distance, a cost, a temperature, a
+    weight - else None. Weather and news never come here."""
+    q = " ".join((question or "").split())
+    names = ("duration", "distance", "cost", "temperature", "weight")
+    for name, (ask, ans) in zip(names, _ANSWER_KINDS):
+        if ask.search(q):
+            return name, ans
+    return None
+
+
+def answers_kind(line: str, question: str) -> bool:
+    """True when the line carries the kind of figure the question asked
+    for - or the question did not ask for a particular kind."""
+    kind = answer_kind(question)
+    if not kind:
+        return True
+    return bool(kind[1].search(line or ""))
+
 
 def _question_subject(question: str) -> str:
     """The searchable core of a free-form question.
@@ -3139,6 +3460,40 @@ def _question_wiki_hits(subject: str):
 
 
 _WEATHER_Q = re.compile(r"\bweather\b", re.IGNORECASE)
+
+#: A conditions question that never says the word "weather". Live-fire:
+#: "what's the temperature in kingman, AZ" fell through to the chat AI,
+#: which invented a number - the one thing this path exists to prevent.
+#: These count only when a place is attached, or "what is the
+#: temperature of the sun" would be hijacked into a forecast.
+_WEATHER_HINT = re.compile(
+    r"\b(?:temperature|temperatures|temp|temps|degrees|"
+    r"rain|raining|rainfall|snow|snowing|sleet|hailing|"
+    r"humid|humidity|windy|wind|gusting|gusts|"
+    r"overcast|drizzle|thunderstorm|lightning|"
+    r"dew\s?point|heat\s?index|wind\s?chill|uv\s?index|"
+    r"feels\s?like|current\s+conditions|"
+    r"how\s+hot|how\s+cold|how\s+warm|how\s+windy|how\s+humid|"
+    r"is\s+it\s+(?:hot|cold|warm|sunny|cloudy|foggy|storming|freezing|"
+    r"raining|snowing|hailing|windy|overcast))\b", re.IGNORECASE)
+
+#: A hint word alone is too loose - "who is the boss of wind in sails"
+#: matched it. A conditions question is ASKED, so the sentence has to
+#: open like one.
+_WEATHER_ASK = re.compile(
+    r"^\s*(?:what|whats|how|hows|is|are|does|do|will|current|"
+    r"temperature|temperatures|temp|temps|degrees|wind|windspeed|"
+    r"rain|raining|rainfall|snow|snowing|humidity|humid|feels|dew|"
+    r"uv|heat|weather|forecast|tell|give|any)\b", re.IGNORECASE)
+
+#: The same words measured on something other than the sky. Without
+#: this, "what temperature in the oven for chicken" asks for a city.
+_NOT_WEATHER = re.compile(
+    r"\b(?:oven|stove|fridge|freezer|refrigerator|cooker|grill|smoker|"
+    r"kettle|bath|shower|pool|engine|coolant|radiator|exhaust|tyre|tire|"
+    r"cpu|gpu|server|laptop|soldering|kiln|forge|incubator|"
+    r"fever|thermometer|chicken|turkey|roast|steak|bread|bake|baking|"
+    r"meat|candy|fudge|yeast)\b", re.IGNORECASE)
 _IN_PLACE = re.compile(
     r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
@@ -3228,11 +3583,20 @@ def _weather_header(question: str):
     76.7F...' - the DATA was right, the label was wrong. Weather is
     data, not trivia: it gets its own header and the place as the
     label instead of the whole question."""
-    if not _WEATHER_Q.search(question or ""):
-        return None, None
-    m = _IN_PLACE.search((question or "").strip().rstrip(" ?!."))
+    question = question or ""
+    m = _IN_PLACE.search(question.strip().rstrip(" ?!."))
     place = " ".join(m.group(1).split()) if m else None
-    return place, "Weather"
+    if _WEATHER_Q.search(question):
+        # "weather" is unambiguous: with no place it asks for one rather
+        # than guessing, which is the behaviour the channel already has.
+        return place, "Weather"
+    if place and _WEATHER_ASK.match(question) \
+            and _WEATHER_HINT.search(question) \
+            and not _NOT_WEATHER.search(question):
+        # A measurement plus a place is a conditions question even
+        # without the word "weather" in it.
+        return place, "Weather"
+    return None, None
 
 
 _WEATHER_CODES = {
@@ -3277,7 +3641,548 @@ def _weather_number(value):
     return number if math.isfinite(number) else None
 
 
-def _weather_answer(question: str):
+def _weatherapi_answer(place: str, options: dict) -> dict | None:
+    """Current conditions from WeatherAPI.com, or None to fall back.
+
+    Used when ``weatherapi_key`` is set (weatherapi.com, free tier). One
+    call does the geocoding and the conditions together, and the reply is
+    the sentence the channel asked for:
+
+        it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F (17°C).
+        Feels like 61°F (16°C). Wind is blowing from the SW at 4 mph
+        (7 km/h). 61% humidity. Visibility: 6 miles (10 km).
+        Precipitation: 0.0 in (0.0 mm).
+
+    None means "let Open-Meteo answer": no key, the key was rejected, the
+    place was not found, or the service is down. The caller logs why.
+    """
+    key = (options.get("weatherapi_key") or "").strip()
+    if not key:
+        print("[funfacts] no weatherapi_key set - answering from "
+              "Open-Meteo instead of the sentence format; free key at "
+              "weatherapi.com/signup", flush=True)
+        return None
+    try:
+        data = _http_get_json(WEATHERAPI_API,
+                              {"key": key, "q": place, "aqi": "no"},
+                              timeout=10)
+    except urllib.error.HTTPError as exc:
+        # 400 = no matching location (code 1006), 401/403 = key trouble.
+        # Both are worth a log line; neither should mute the weather.
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8", "replace")) \
+                .get("error", {}).get("message", "")
+        except Exception:
+            pass
+        print(f"[funfacts] weatherapi.com HTTP {exc.code}"
+              f"{': ' + detail if detail else ''} - falling back to "
+              f"Open-Meteo", flush=True)
+        return None
+    except Exception as exc:
+        print(f"[funfacts] weatherapi.com error: {exc!r} - falling back to "
+              f"Open-Meteo", flush=True)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("current"),
+                                                    dict):
+        print("[funfacts] weatherapi.com returned no current conditions - "
+              "falling back to Open-Meteo", flush=True)
+        return None
+    loc = data.get("location") if isinstance(data.get("location"),
+                                             dict) else {}
+    cur = data["current"]
+    condition = cur.get("condition") if isinstance(cur.get("condition"),
+                                                   dict) else {}
+    temp_f = _weather_number(cur.get("temp_f"))
+    if temp_f is None:
+        print("[funfacts] weatherapi.com returned no temperature - falling "
+              "back to Open-Meteo", flush=True)
+        return None
+
+    # The location as the API resolved it: 'Wilkes-Barre, Pennsylvania'
+    # at home, 'Paris, France' abroad - the country only when it is not
+    # the channel's own.
+    name = str(loc.get("name") or place).strip()
+    region = str(loc.get("region") or "").strip()
+    country = str(loc.get("country") or "").strip()
+    where = name
+    if region and region.lower() != name.lower():
+        where += f", {region}"
+    if country and country.lower() not in ("united states of america",
+                                           "usa", "united states") \
+            and country.lower() not in (name.lower(), region.lower()):
+        where += f", {country}"  # 'Paris, Ile-de-France, France'
+
+    def both(imp, met, unit_i, unit_m, digits=0):
+        i = _weather_number(imp)
+        m = _weather_number(met)
+        if i is None:
+            return None
+        text = f"{i:.{digits}f}{unit_i}"
+        if m is not None:
+            text += f" ({m:.{digits}f}{unit_m})"
+        return text
+
+    text = str(condition.get("text") or "").strip() or "unknown conditions"
+    pieces = [f"it is currently {text} in {where}.",
+              f"{both(temp_f, cur.get('temp_c'), '°F', '°C')}."]
+    feels = both(cur.get("feelslike_f"), cur.get("feelslike_c"), "°F", "°C")
+    if feels:
+        pieces.append(f"Feels like {feels}.")
+    wind = both(cur.get("wind_mph"), cur.get("wind_kph"), " mph", " km/h")
+    if wind:
+        wind_dir = str(cur.get("wind_dir") or "").strip()
+        pieces.append((f"Wind is blowing from the {wind_dir} at {wind}."
+                       if wind_dir else f"Wind is {wind}."))
+    humidity = _weather_number(cur.get("humidity"))
+    if humidity is not None:
+        pieces.append(f"{humidity:.0f}% humidity.")
+    vis = both(cur.get("vis_miles"), cur.get("vis_km"), " miles", " km")
+    if vis:
+        pieces.append(f"Visibility: {vis}.")
+    precip = both(cur.get("precip_in"), cur.get("precip_mm"), " in", " mm",
+                  digits=1)
+    if precip:
+        pieces.append(f"Precipitation: {precip}.")
+    fact = " ".join(pieces)
+    print(f"[funfacts] current weather for {where} (weatherapi.com): {fact}",
+          flush=True)
+    # 'sentence' tells the bot to post this as a line addressed to the
+    # asker ('kvack, it is currently...') rather than under a header.
+    return {"place": where, "kind": "Weather", "_ttl": 300,
+            "facts": [fact], "sentence": True, "source": "weatherapi.com"}
+
+
+#: A question about something that HAPPENED - recency words, or a date.
+#: Live-fire: 'who got into a helicopter crash today 15th September 2026
+#: in California' went down the encyclopedia path and came back with a
+#: 2012 Interstate Aviation Committee finding about an unrelated crash.
+#: Wikipedia and DuckDuckGo do not know what happened this morning;
+#: a news feed does.
+_NEWS_Q = re.compile(
+    r"\b(?:today|tonight|this\s+(?:morning|afternoon|evening|week|weekend)|"
+    r"yesterday|last\s+night|latest|breaking|right\s+now|just\s+(?:happened|"
+    r"now)|in\s+the\s+news|(?:the\s+)?news\s+(?:on|about|for)|recent(?:ly)?|"
+    r"currently\s+happening|happening\s+(?:now|today)|"
+    r"\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|"
+    r"sep|sept|oct|nov|dec)[a-z]*\.?(?:\s+\d{4})?|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+"
+    r"\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?)\b", re.IGNORECASE)
+#: What happened - an event word - so 'whats the weather today' (weather
+#: path) and 'whos the best QB today' (opinion) do not become news.
+_NEWS_EVENT = re.compile(
+    r"\b(?:crash(?:ed|es)?|accident|died?|dead|death|killed|shot|shooting|"
+    r"fire|explosion|earthquake|hurricane|tornado|storm|flood|arrest(?:ed)?|"
+    r"charged|indicted|elect(?:ed|ion)|resign(?:ed|s)?|announce[ds]?|"
+    r"launch(?:ed|es)?|release[ds]?|won|win|lost|score[ds]?|game|match|"
+    r"happen(?:ed|ing|s)?|going\s+on|news|headline[s]?|trade[ds]?|signed|"
+    r"fired|hired|verdict|sentenced|passed\s+away|attack(?:ed)?|strike|"
+    r"protest|recall(?:ed)?|outage|crisis|missing|found|rescued|collapse[ds]?|"
+    r"derail(?:ed|ment)?|evacuat(?:ed|ion)|wildfire|blaze)\b", re.IGNORECASE)
+_NEWS_STRIP = frozenset((
+    "today", "tonight", "yesterday", "latest", "breaking", "currently",
+    "right", "now", "just", "happened", "happening", "news", "recently",
+    "recent", "this", "morning", "afternoon", "evening", "week", "weekend",
+    "last", "night", "got", "get", "gets", "into", "did", "does", "who",
+    "whos", "what", "whats", "when", "where", "how", "why", "is", "are",
+    "was", "were", "the", "a", "an", "of", "in", "on", "at", "to", "and",
+    "any", "there", "anything", "something", "about", "tell", "me", "us",
+    "please", "plz", "do", "you", "know", "heard", "hear", "have", "has",
+    "had", "up", "with", "for", "from", "by", "it", "that", "which",
+    "give", "read", "some", "few", "hows", "todays", "lately", "far", "so",
+    "else", "out", "much", "going", "rundown", "roundup", "briefing",
+    "update", "updates", "summary", "quick", "not", "isnt", "thats", "hit",
+    "show", "whatre", "gimme", "lemme", "then", "well", "ok", "okay", "hey",
+    "yo", "wheres", "whos", "whens", "theres", "lets", "headline",
+    "headlines", "see", "seen", "saw", "think", "thoughts", "docbot", "doc",
+    "him", "her", "them", "everyone", "everybody", "chat", "yall", "ya",
+    "guys", "folks",
+))
+#: The words of a headline ASK that are also parts of real names ('Big
+#: Bend fire', 'Top Gun', 'Toy Story', 'Major League'). Live-fire, 'whats
+#: the leading headlines for today' went to the search feed as the
+#: subject 'leading headlines'. Stripped when typed lowercase (or as the
+#: first word); a capitalised one mid-question is a name and stays.
+_NEWS_ASK = frozenset((
+    "leading", "top", "stories", "story", "big", "biggest", "main", "major",
+    "current", "events", "day", "world", "global",
+))
+#: Words that name the WHOLE news rather than a subject in it. Kept out
+#: of _NEWS_STRIP because they are also parts of real subjects ('World
+#: Series', 'National Guard') - they only decide whether an ask has a
+#: subject at all.
+_NEWS_GENERIC = frozenset((
+    "world", "global", "national", "international", "us", "usa", "u.s.",
+    "america", "american", "states", "country", "nation", "everything",
+    "anything", "general", "local", "around", "worldwide", "wide", "all",
+    "important", "interesting", "good", "bad", "real", "actual", "proper",
+    "headline", "headlines", "news", "newest", "new", "looking", "like",
+    "lately", "these", "days", "week", "morning", "tonight", "today",
+    "leading", "top", "stories", "story", "big", "biggest", "main", "major",
+    "current", "events", "day", "latest", "breaking", "hot", "juicy",
+))
+#: The day's headlines with no subject, asked without a recency word:
+#: 'whats the news', 'docbot headlines?', 'give us the top stories',
+#: 'where the news' (the follow-up after a bad first answer), 'whats
+#: going on in the world'. An asking word must come BEFORE 'news' -
+#: 'did you hear the news, I got a new truck' is someone sharing news,
+#: not asking for it, and stays with the persona.
+_TOP_NEWS_Q = re.compile(
+    r"(?:\b(?:what|whats|what's|whatre|where|wheres|where's|any|tell|"
+    r"give|gimme|read|show|hit|hows|how's)\b[^.?!]{0,40}?\b(?:news|headlines?|"
+    r"(?:top|big|biggest|main|leading|major)\s+stor(?:y|ies)|"
+    r"current\s+events)\b(?!\s+(?:is|was|are|were|will|would|got|had|has|"
+    r"said|says|did|does)\b)"
+    r"|\b(?:news|headlines?|top\s+stories)\s+(?:today|tonight|this\s+morning|"
+    r"right\s+now|for\s+today|of\s+the\s+day|for\s+the\s+day|so\s+far)\b"
+    r"|\b(?:whats|what's|what\s+is)\s+(?:going\s+on|happening)\s+(?:in\s+the\s+"
+    r"world|out\s+there|around\s+the\s+world|in\s+the\s+news)\b"
+    r"|^\W*(?:the\s+)?(?:news|headlines?|top\s+stories)(?:\s+(?:please|plz|"
+    r"pls|now|today|tonight|update|report))*\W*$)", re.IGNORECASE)
+#: 'whats your news source' / 'i got news, my truck is fixed' / 'did
+#: you see what the news said' - about the bot, or someone SHARING
+#: news, not an ask for the day's headlines.
+_YOUR_NEWS = re.compile(
+    r"\b(?:your|ur|my|our)\s+(?:news|headlines?)\b"
+    r"|\b(?:i|ive|i've|we|weve|we've)\s+(?:got|have|has|had|heard|saw|seen|"
+    r"read|watched)\b[^.?!]{0,30}?\b(?:news|headlines?)\b"
+    r"|\bnews\s+(?:said|says|is\s+saying|called|reported|guy|lady|anchor|"
+    r"channel|station|crew|van)\b",
+    re.IGNORECASE)
+#: A page title posing as a headline. Live-fire, the search feed's top
+#: item for 'leading headlines' was 'Top news of the day September 16
+#: 2026' from a roundup page: a headline ABOUT headlines. A story names
+#: something that happened; these name the page. Anchored so 'News
+#: Corp shares fall' and 'Breaking news: quake hits Tokyo' survive.
+_ROUNDUP = re.compile(
+    r"^\W*(?:(?:the\s+)?(?:top|todays|today's|latest|morning|evening|daily|"
+    r"weekly|weekend|world|national|international|business|sports|local|"
+    r"tonights|tonight's|this\s+weeks|this\s+week's|big|major|leading)\s+)*"
+    r"(?:news|headlines?|stories|briefing|roundup|round-up|wrap(?:-up)?|"
+    r"digest|bulletin|recap|rundown|in\s+brief)"
+    r"(?:\s+(?:headlines?|roundup|round-up|wrap(?:-up)?|digest|update|"
+    r"updates|summary|stories|in\s+brief|briefing|bulletin|recap|rundown))*"
+    r"\s*(?:[:\-\u2013\u2014|,]|$|in\s+\d+\s+minutes?\b|(?:for|of|on|from)\s+"
+    r"(?:the\s+day|today|tonight|this\s+(?:morning|evening|week)|"
+    r"(?:mon|tues|wednes|thurs|fri|satur|sun)day|\d|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)))"
+    r"|^\W*\d+\s+things\s+to\s+know\b"
+    r"|\bwhat\s+(?:to|you\s+need\s+to)\s+know\s+(?:today|tonight|this\s+"
+    r"(?:morning|week))\b"
+    r"|^\W*live\s*(?:updates?|blog|news)\W*$"
+    r"|^\W*(?:latest|breaking)\s+(?:news|headlines?|stories)\W*$",
+    re.IGNORECASE)
+#: The header the bot files the day's headlines under.
+_TOP_NEWS_PLACE = "top headlines"
+_MONTH = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+          "oct", "nov", "dec")
+
+
+def news_question(question: str) -> bool:
+    """True when the question asks what HAPPENED lately - the news path,
+    not the encyclopedia. Needs a recency marker (today, yesterday, this
+    week, latest, a date) AND an event word (crash, died, arrested, won,
+    happened...). Weather and sunrise are their own paths and are
+    excluded first; so is an opinion aimed at the bot."""
+    q = " ".join((question or "").split())
+    if not q or _WEATHER_Q.search(q) or _SOLAR_Q.search(q):
+        return False
+    if _YOUR_NEWS.search(q):
+        return False            # sharing news, or asking about the bot's
+    # "interesting chat going on today" is about the stream's chat history,
+    # not the news. Previously "today" + "going on" matched news and the bot
+    # answered a chat-history question with a Polygon headline.
+    low = q.lower()
+    if "chat" in low or "in chat" in low:
+        return False
+    if re.search(r"\b(?:stream|recap|summary)\b.*\b(?:today|so\s+far)\b|\b(?:today|so\s+far)\b.*\b(?:stream|recap|summary)\b", low):
+        return False
+    if _TOP_NEWS_Q.search(q):
+        # 'whats the news' / 'headlines?' / 'where the news' - the
+        # day's headlines, no recency word needed: the ask IS recent.
+        return True
+    if not _NEWS_Q.search(q):
+        return False
+    return bool(_NEWS_EVENT.search(q))
+
+
+def _news_topic(question: str) -> str:
+    """The SUBJECT of a news question, '' when it has none. 'whats the
+    news on the LA helicopter crash' -> 'LA helicopter crash'; 'whats
+    the leading headlines for today' -> '' (it is about the day)."""
+    q = _news_query(question)
+    return " ".join(w for w in q.split() if w.lower() not in _NEWS_GENERIC)
+
+
+def _news_generic(question: str) -> bool:
+    """A news question with no subject: the day's top headlines."""
+    return news_question(question) and not _news_topic(question)
+
+
+def _roundup(title: str) -> bool:
+    """A page title posing as a headline - 'Top news of the day
+    September 16 2026', 'Today's top stories', 'Morning briefing: what
+    to know today'. Also anything too short to be a story."""
+    t = " ".join((title or "").split())
+    if len(t) < 16:
+        return True
+    return bool(_ROUNDUP.search(t))
+
+
+def _news_edition(options) -> dict:
+    """Google News edition parameters: news_country 'US' (default),
+    'AU', 'GB', 'CA'... - the top stories of the streamer's country."""
+    cc = re.sub(r"[^A-Za-z]", "", str((options or {}).get("news_country")
+                                     or "US")).upper()[:2] or "US"
+    return {"hl": f"en-{cc}", "gl": cc, "ceid": f"{cc}:en"}
+
+
+def _pack_headlines(lines: list, budget: int, per: int = 3) -> list:
+    """Group headline lines into messages: up to `per` per message,
+    joined by ' | ', each group within `budget` characters. A single
+    line over the budget stands alone (the bot trims it to fit)."""
+    packs, cur = [], []
+    for line in lines:
+        cand = cur + [line]
+        if cur and (len(cand) > per or len(" | ".join(cand)) > budget):
+            packs.append(" | ".join(cur))
+            cur = [line]
+        else:
+            cur = cand
+    if cur:
+        packs.append(" | ".join(cur))
+    return packs
+
+
+def _news_query(question: str) -> str:
+    """The searchable core of a news question: the event words and the
+    proper nouns, minus the asking words and the date. 'who got into a
+    helicopter crash today 15th September 2026 in California' ->
+    'helicopter crash California'."""
+    q = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|"
+               r"jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(?:\s+\d{4})?\b",
+               " ", question or "", flags=re.IGNORECASE)
+    q = re.sub(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+               r"[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b",
+               " ", q, flags=re.IGNORECASE)
+    q = re.sub(r"\b(?:19|20)\d{2}\b", " ", q)
+    words = []
+    for i, w in enumerate(re.findall(r"[A-Za-z][A-Za-z'\u2019\-]*", q)):
+        # "what's" / "what\u2019s" is 'whats' - the strip list has one spelling
+        bare = w.lower().replace("'", "").replace("\u2019", "")
+        if bare in _NEWS_STRIP or len(w) < 2:
+            continue
+        if bare in _NEWS_ASK and (i == 0 or not w[0].isupper()):
+            continue
+        words.append(w)
+    return " ".join(words[:8])
+
+
+def _news_when(question: str) -> str:
+    """How far back to look: a named date or 'yesterday' widens to two
+    days, 'this week' to seven; plain 'today/latest' is one day."""
+    q = (question or "").lower()
+    if re.search(r"\bthis\s+week|past\s+week|last\s+week|recent", q):
+        return "7d"
+    if re.search(r"\byesterday|last\s+night|\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?"
+                 r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|"
+                 r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+                 r"\s+\d{1,2}", q):
+        return "2d"
+    return "1d"
+
+
+def _age(published: str) -> str:
+    """'Wed, 16 Sep 2026 05:07:49 GMT' -> '3h ago' / 'yesterday'."""
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(published)
+        secs = time.time() - dt.timestamp()
+    except Exception:
+        return ""
+    if secs < 0:
+        return "just now"
+    if secs < 3600:
+        return f"{max(1, int(secs // 60))}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    days = int(secs // 86400)
+    return "yesterday" if days == 1 else f"{days}d ago"
+
+
+def _google_news_rss(query: str, when: str, limit: int = 6,
+                     options: dict = None) -> list:
+    """Headlines from Google News' RSS search: keyless, seconds fresh.
+    Returns [(title, source, published)], newest first as served."""
+    params = {"q": f"{query} when:{when}"}
+    params.update(_news_edition(options))
+    return _google_news_items(
+        GOOGLE_NEWS_RSS + "?" + urllib.parse.urlencode(params), limit)
+
+
+def _google_news_top(limit: int = 12, options: dict = None) -> list:
+    """The day's TOP STORIES - Google News' front page as a feed, no
+    query. This is what 'whats the leading headlines' means; searching
+    the words 'leading headlines' finds pages about headlines."""
+    return _google_news_items(
+        GOOGLE_NEWS_TOP + "?" + urllib.parse.urlencode(_news_edition(options)),
+        limit)
+
+
+def _google_news_items(url: str, limit: int) -> list:
+    """Fetch and parse one Google News feed into [(title, source,
+    published)]."""
+    import xml.etree.ElementTree as ET
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        raw = resp.read()
+    root = ET.fromstring(raw)
+    out = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        source = (item.findtext("source") or "").strip()
+        pub = (item.findtext("pubDate") or "").strip()
+        if not title:
+            continue
+        # Google appends ' - Source' to the title; the source tag has it.
+        if source and title.endswith(" - " + source):
+            title = title[:-(len(source) + 3)].rstrip()
+        out.append((html.unescape(title), source, pub))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tavily_news(query: str, when: str, options: dict, limit: int = 6) -> list:
+    """Tavily's news topic when a key is set: same shape as the RSS."""
+    tkey = (options.get("tavily_api_key") or "").strip()
+    if not tkey:
+        return []
+    days = {"1d": "day", "2d": "week", "7d": "week"}.get(when, "day")
+    req = urllib.request.Request(
+        TAVILY_API,
+        data=json.dumps({"query": query, "topic": "news", "max_results": limit,
+                         "time_range": days, "search_depth": "basic"}
+                        ).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {tkey}", "User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    out = []
+    for item in (data.get("results") or [])[:limit]:
+        title = " ".join((item.get("title") or "").split())
+        if not title:
+            continue
+        host = urllib.parse.urlsplit(item.get("url") or "").hostname or ""
+        source = re.sub(r"^www\.", "", host)
+        out.append((title, source, item.get("published_date") or ""))
+    return out
+
+
+def _news_answer(question: str, options: dict = None):
+    """Headlines for a what-happened question, ``False`` when it is not
+    one. The answer is the HEADLINE, verbatim, with its outlet and age -
+    no model rewrites it, no encyclopedia line can stand in for it. An
+    empty feed is an honest 'nothing in the last day', not a 2012 fact.
+    Cached 10 minutes (news moves; the daily cache would pin a stale
+    headline on a developing story)."""
+    if not news_question(question):
+        return False
+    opts = options or {}
+    topic = _news_topic(question)
+    generic = not topic
+    when = _news_when(question)
+    if generic:
+        # No subject: the day's TOP STORIES, not a search. Live-fire,
+        # 'whats the leading headlines for today' was searched as the
+        # words 'leading headlines' and the best match was a roundup
+        # page's title. The front-page feed is the answer to that ask;
+        # Tavily's news topic stands in when the feed is down.
+        query = _TOP_NEWS_PLACE
+        sources = (("google news top stories",
+                    lambda: _google_news_top(12, opts)),
+                   ("tavily", lambda: _tavily_news(
+                       "top news headlines today", "1d", opts, 10)))
+    else:
+        query = _news_query(question)
+        sources = (("tavily", lambda: _tavily_news(query, when, opts)),
+                   ("google news",
+                    lambda: _google_news_rss(query, when, 6, opts)))
+    items = []
+    errors = []
+    for name, fetch in sources:
+        try:
+            items = fetch()
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                ValueError) as exc:
+            errors.append(f"{name}: {exc!r}")
+            items = []
+        except Exception as exc:                # a feed parse surprise
+            errors.append(f"{name}: {exc!r}")
+            items = []
+        # A page title is not a story. Whatever the source, a roundup
+        # ('Top news of the day September 16 2026') or an echo of the
+        # question itself is dropped before it can be quoted.
+        kept = [it for it in items
+                if not _roundup(it[0])
+                and _fold(it[0]).strip() != _fold(query).strip()]
+        if len(kept) < len(items):
+            print(f"[funfacts] dropped {len(items) - len(kept)} roundup page "
+                  f"title(s) from {name}: "
+                  + "; ".join(repr(it[0][:60]) for it in items
+                              if it not in kept), flush=True)
+        items = kept
+        if items:
+            break
+    if errors:
+        print(f"[funfacts] news lookup trouble ({query!r}): "
+              + "; ".join(errors), flush=True)
+    if not items:
+        if errors and len(errors) >= 2:
+            return {"place": query, "kind": "News", "_ttl": _BUSY_TTL,
+                    "facts": ["I couldn't reach the news feeds right now; "
+                              "try me again in a minute."]}
+        if generic:
+            print("[funfacts] the top-stories feed came back empty",
+                  flush=True)
+            return {"place": query, "kind": "News", "_ttl": _BUSY_TTL,
+                    "facts": ["The top-stories feed came back empty just "
+                              "now; try me again in a minute."]}
+        print(f"[funfacts] no headlines in the last {when} for {query!r}",
+              flush=True)
+        return {"place": query, "kind": "News", "_ttl": _MISS_TTL,
+                "facts": [f"Nothing in the headlines about that in the last "
+                          f"{'day' if when == '1d' else when.rstrip('d') + ' days'}."]}
+    facts = []
+    seen = set()
+    for title, source, pub in items:
+        key = _fold(title)[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        tail = ", ".join(x for x in (source, _age(pub)) if x)
+        facts.append(f"{title}" + (f" ({tail})" if tail else ""))
+    if generic:
+        # 'The headlines' are several: three real stories per message,
+        # each quoted with outlet and age, packed to the bot's message
+        # budget - a repeat of the ask rotates to the next three.
+        try:
+            limit = int(opts.get("max_message_chars") or 450)
+        except (TypeError, ValueError):
+            limit = 450
+        budget = max(120, min(500, limit) - 40)
+        packs = _pack_headlines(facts[:9], budget, per=3)
+        print(f"[funfacts] answered from {len(facts[:9])} top headlines in "
+              f"{len(packs)} line(s)", flush=True)
+        return {"place": _TOP_NEWS_PLACE, "kind": "News", "facts": packs,
+                "_ttl": 600, "news": True}
+    print(f"[funfacts] answered from {len(facts)} headline(s) for {query!r}",
+          flush=True)
+    return {"place": query, "kind": "News", "facts": facts[:4],
+            "_ttl": 600, "news": True}
+
+
+def _weather_answer(question: str, options: dict = None):
     """Current conditions from Open-Meteo, or ``False`` when not weather.
 
     Weather search results routinely describe archive pages (the exact field
@@ -3292,6 +4197,13 @@ def _weather_answer(question: str):
     if not place:
         return {"place": "requested place", "kind": "Weather",
                 "facts": ["I need a city or town to check the weather."]}
+
+    # weatherapi.com first when a key is configured: one call, the
+    # channel's sentence format. Any trouble there falls through to the
+    # keyless Open-Meteo path below, so weather never goes quiet.
+    from_api = _weatherapi_answer(place, options or {})
+    if from_api is not None:
+        return from_api
 
     geo = _osm_geocode(place) or _open_meteo_geocode(place)
     label = place
@@ -3351,9 +4263,10 @@ def _weather_answer(question: str):
     if precipitation is not None and precipitation > 0:
         pieces.append(f"precipitation {precipitation:.2f} in")
     fact = "; ".join(pieces) + "."
-    print(f"[funfacts] current weather for {label}: {fact}", flush=True)
+    print(f"[funfacts] current weather for {label} (open-meteo "
+          f"fallback): {fact}", flush=True)
     return {"place": label, "kind": "Weather", "_ttl": 300,
-            "facts": [fact]}
+            "facts": [fact], "source": "open-meteo"}
 
 
 def _question_place(question: str) -> str:
@@ -3462,7 +4375,7 @@ def _question_sources(question: str, options: dict) -> list:
                 # numbers in it disappear from under a grounded answer.
                 if (len(sentence) < 12 or not re.search(r"[.!]$", sentence)
                         or _is_junk_seed(sentence) or _is_dangling(sentence)
-                        or _is_boring(sentence)):
+                        or _is_boring(sentence) or _is_forum_title(sentence)):
                     continue
                 seen.add(sentence.lower())
                 out.append(sentence)
@@ -3578,18 +4491,37 @@ def _answer_question(question: str, opts: dict, limit: int):
     the model: the records miner needs only Wikipedia, so it runs
     whenever the model path has nothing. A broken model must not turn an
     answerable question into a decline.
+
+    None means 'the engine does not know', and the bot relies on that:
+    a mention or !ask that gets None here goes on to the chat model,
+    which answers general knowledge from what it knows. So a how-long
+    question whose sources hold no duration ends here as None - never
+    as the race's distance, and never as a shrug that would stand in
+    front of a model that knows the answer.
     """
     result = _answer_question_llm(question, opts, limit)
     if result:
         return result
     if _SPECIFIC_Q.search(question):
         facts, src = _mine_records(_question_subject(question) or question)
+        # The kind check runs on what would actually POST: the trimmed
+        # line. '...introduced by IAAF as a world record event in
+        # November 2017, with ... 13:10 for men' carries a time deep in
+        # its tail, and the trim cuts it to the date - a duration
+        # question answered with a year.
+        facts = [f for f in facts if answers_kind(_trim(f, limit) or f,
+                                                  question)]
         if facts:
             print(f"[funfacts] answered from the record lines of {src} "
                   f"(the model path had nothing)", flush=True)
             wplace, kind = _weather_header(question)
             return {"place": wplace or _question_place(question),
                     "facts": facts[:4], "kind": kind}
+    kind = answer_kind(question)
+    if kind:
+        print(f"[funfacts] no {kind[0]} for the question in any source - "
+              f"nothing posted; the chat model gets the question",
+              flush=True)
     return None
 
 
@@ -3629,8 +4561,13 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
     # with none of those, ask once more with the demand made explicit; if
     # the model still has nothing concrete, decline rather than post it.
     specific = bool(_SPECIFIC_Q.search(question))
+    kind = answer_kind(question)
     attempts = [question]
-    if specific:
+    if kind:
+        attempts.append(question + f" Answer with the {kind[0]} the sources "
+                        f"give (a figure with its unit), or NOTHING RELIABLE "
+                        f"if they give none.")
+    elif specific:
         attempts.append(question + " Answer with the specific name, number "
                         "or date the sources give - not a statement that "
                         "the answer exists.")
@@ -3660,7 +4597,28 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
             ln = _finish_line(ln)
             if not ln:
                 continue
-            if _EXPLICIT.search(ln) or _TASTELESS.search(ln):
+            # Educational sexual health exception: allow pregnancy/sperm/uterus explanations
+            # even when they contain explicit terms like blowjob/oral sex.
+            if _EXPLICIT.search(ln):
+                low = ln.lower()
+                # Hard porn always blocked
+                if re.search(r"\b(?:porn\w*|xxx|bukkake|fisting|cumshot\w*|gangbang\w*)\b", low):
+                    continue
+                has_edu = ("pregnancy" in low or "pregnant" in low or "sperm" in low or "uterus" in low)
+                has_neg = ("cannot" in low or "can't" in low or "can not" in low or "does not" in low or "doesn't" in low or "no" in low or "not possible" in low or "would need" in low)
+                if has_edu and has_neg:
+                    pass  # allow this educational line
+                elif "oral sex" in low and ("pregnancy" in low or "pregnant" in low or "sperm" in low or "uterus" in low):
+                    pass
+                elif "sperm" in low and "uterus" in low:
+                    pass
+                elif "blowjob" in low and ("sperm" in low or "uterus" in low or "pregnancy" in low or "pregnant" in low):
+                    pass
+                elif ("pregnancy" in low or "pregnant" in low) and ("oral" in low or "blowjob" in low):
+                    pass
+                else:
+                    continue
+            if _TASTELESS.search(ln):
                 continue
             if (_is_dangling(ln) or _is_fragment(ln) or _is_boring(ln)
                     or _TEASE.match(ln) or _is_contentless_claim(ln)
@@ -3682,7 +4640,14 @@ def _answer_question_llm(question: str, opts: dict, limit: int):
             # answer.
             if specific and not _has_specific(ln):
                 continue
+            # 'how long does it take to run 5k' -> a line with a DURATION
+            # in it, not the race's distance. The right kind of figure,
+            # or it is not the answer to this question.
             fact = _trim(ln, limit)
+            if fact and not answers_kind(fact, question):
+                print(f"[funfacts] answer is not a "
+                      f"{answer_kind(question)[0]}: {fact[:80]!r}", flush=True)
+                continue
             if fact:
                 lines.append(fact)
         if lines:
@@ -3721,6 +4686,11 @@ def get_funfact(location: str, options=None):
     spicy, limit, opts, llm_only = _norm_opts(options)
     key = (("llm:" if llm_only else "spicy:" if spicy else "clean:")
            + " ".join(location.strip().lower().split()))
+    if _news_generic(location):
+        # Every phrasing of 'the headlines' is the same ask, so 'whats
+        # the news' after 'top headlines today' rotates to the NEXT
+        # three stories instead of repeating the first three.
+        key = "news:" + _TOP_NEWS_PLACE
     now = time.time()
 
     with _cache_lock:
@@ -3735,12 +4705,20 @@ def get_funfact(location: str, options=None):
         # go through a search snippet or an LLM. ``False`` means the specialist
         # did not recognise its query; a dict (including a transparent fetch
         # failure) is the whole answer.
-        weather = _weather_answer(location.strip())
+        weather = _weather_answer(location.strip(), opts)
         if weather is not False:
             result = weather
         else:
             solar = _solar_answer(location.strip())
             result = None if solar is False else solar
+        if result is None:
+            # What HAPPENED (today, yesterday, a date) is news, and the
+            # encyclopedia does not have it: a question about this
+            # morning's helicopter crash came back with a 2012 finding
+            # about a different one. Headlines, or an honest 'nothing'.
+            news = _news_answer(location.strip(), opts)
+            if news is not False:
+                result = news
         if result is None and llm_only:
             facts = _llm_only_facts(location.strip(), limit, opts)
             if facts:
@@ -3763,6 +4741,23 @@ def get_funfact(location: str, options=None):
                   "for a specific question - answering it properly",
                   flush=True)
             result = None
+        # 'how long it take to run 5k' found the 5K run ARTICLE and posted
+        # its first line - a distance - as the answer to a how-long
+        # question. An article's facts answer a question only when one
+        # of them is the kind of figure asked for.
+        if (result and result.get("facts") and not result.get("kind")
+                and answer_kind(location)):
+            # Judged on what would POST (the trimmed line): a figure in
+            # the tail that the trim cuts off is not an answer.
+            fitting = [f for f in result["facts"]
+                       if answers_kind(_trim(f, limit) or f, location)]
+            if fitting:
+                result = dict(result, facts=fitting)
+            else:
+                print(f"[funfacts] the fact path's lines carry no "
+                      f"{answer_kind(location)[0]} for the question - "
+                      f"answering it properly", flush=True)
+                result = None
         # 4. Not a place and not a thing with an article - a question. Answer
         #    it from the search results, grounded in them, rather than saying
         #    nothing. Skipped in spicy mode, which has its own path.
@@ -3788,7 +4783,9 @@ def get_funfact(location: str, options=None):
                 # call so the reply matches the place's most famous story.
                 entry = {"place": result["place"], "facts": list(result["facts"]),
                          "kind": result.get("kind"), "shown": 0, "t": now,
-                         "ttl": result.get("_ttl", _HIT_TTL)}
+                         "ttl": result.get("_ttl", _HIT_TTL),
+                         "sentence": bool(result.get("sentence")),
+                         "news": bool(result.get("news"))}
             else:
                 entry = {"place": None, "facts": [], "shown": 0,
                          "t": now, "ttl": _MISS_TTL}
@@ -3819,9 +4816,21 @@ def get_funfact(location: str, options=None):
         entry["shown"] = shown + 1
         entry["last"] = fact
 
-    out = {"place": place, "fact": _fit_fact(fact, limit, opts)}
+    # A live-data sentence (weatherapi.com) is measured numbers, not prose
+    # to summarise: max_fact_chars must not hand it to the model or cut
+    # it mid-reading. The bot still fits it to the message limit.
+    # A headline is quoted, never summarised: three top stories in one
+    # line are longer than max_fact_chars, and the summariser would
+    # hand them to a model to rewrite. The bot fits them to the message.
+    verbatim = entry.get("sentence") or entry.get("news")
+    out = {"place": place,
+           "fact": fact if verbatim else _fit_fact(fact, limit, opts)}
     if entry.get("kind"):
         out["kind"] = entry["kind"]
+    if entry.get("sentence"):
+        out["sentence"] = True
+    if entry.get("news"):
+        out["news"] = True
     return out
 
 

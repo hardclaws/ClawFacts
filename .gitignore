@@ -23,4 +23,9 @@ chat_memory.db*
 # the mod-chosen voice and the sub goal (runtime state)
 persona.json
 subgoal.json
+# the chat AI's working memory: the game it is hosting, the counts it keeps
+ongoing.json
 *.log
+
+# admin panel logins (salted hashes, but still yours alone)
+admin_users.json

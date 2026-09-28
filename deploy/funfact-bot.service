@@ -31,8 +31,16 @@ EnvironmentFile=-/opt/funfact-bot/bot.env
 # APIs keep working, but drop all privileges we can).
 NoNewPrivileges=true
 ProtectSystem=strict
+# strict makes the whole filesystem read-only; the bot's own folder must stay
+# writable for tokens.json, the state files, the memory DB and the admin
+# panel's config editor.
+ReadWritePaths=/opt/funfact-bot
 ProtectHome=read-only
 PrivateTmp=true
+# The admin panel's Restart button exits with code 75 on purpose;
+# Restart=always brings the bot back either way, this just keeps the exit
+# from being logged as a failure.
+SuccessExitStatus=75
 
 [Install]
 WantedBy=multi-user.target

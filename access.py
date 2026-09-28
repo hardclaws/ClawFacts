@@ -433,7 +433,7 @@ class Helix:
             self.errors += 1
             print(f"[access] helix followers HTTP {exc.code} — is the "
                   f"'moderator:read:followers' scope on the token? Run "
-                  f"'python3 bot.py --login' to re-authorise.", flush=True)
+                  f"'{auth.PY} bot.py --login' to re-authorise.", flush=True)
             return None
         except (urllib.error.URLError, OSError, ValueError) as exc:
             self.errors += 1
@@ -480,7 +480,7 @@ class Helix:
             if exc.code == 401:
                 print("[access]   The token cannot read this channel's followers. "
                       "Either it is missing the moderator:read:followers scope "
-                      "(run 'python3 bot.py --login' to re-authorise) or the bot "
+                      f"(run '{auth.PY} bot.py --login' to re-authorise) or the bot "
                       "account is not the broadcaster or a moderator of it.",
                       flush=True)
             return False
