@@ -701,22 +701,21 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 #: pays a full cold load from disk - measured elsewhere at 11.4s to first
 #: token against 0.9s warm.
 #:
-#: Empty by default, which means DO NOT ASK and let Ollama unload on its
-#: own five-minute schedule. That is a real choice, not an omission, and
-#: the reason is arithmetic: the keeper wakes every
-#: memory_summary_minutes - twenty by default - so ANY keep_alive shorter
-#: than that leaves the model already unloaded when the next slice is
-#: due, and every slice pays a cold load whatever the value says. Asking
-#: for 5m therefore changed nothing at all, because 5m is already
-#: Ollama's default; it only looked like a setting.
+#: The model stays resident, by default, for five minutes PAST the
+#: keeper's interval - so 25m against the twenty-minute default. The
+#: arithmetic is the whole reason: Ollama unloads a few minutes after the
+#: last call, so any keep_alive SHORTER than memory_summary_minutes leaves
+#: the model already gone when the next slice is due, and every slice pays
+#: a cold load whatever the number says. A short value is not a compromise
+#: between warm and cold, it is cold with extra steps - and 5m, the value
+#: this used to carry, changed nothing at all because it is Ollama's own
+#: default. It only looked like a setting.
 #:
-#: So the honest options are the two ends. Leave this empty and the box
-#: holds no model between slices, which is the right trade on a small
-#: always-on machine: the running log is a background job on a 240s
-#: budget, where a few seconds of load time is invisible to viewers. Or
-#: set it past the interval - "25m" against the twenty-minute default -
-#: and the model stays resident for the whole stream, which costs RAM
-#: continuously to save those seconds.
+#: The ask therefore tracks the interval rather than being a fixed number
+#: that silently stops bridging the gap the moment the operator moves it.
+#: Set llm_local_keep_alive to an explicit duration to override, or to ""
+#: to stop asking entirely - which is the memory-conservative end, and
+#: costs a cold load on every slice.
 #:
 #: Sent both ways when it IS sent. Older Ollama builds silently ignore a
 #: top-level keep_alive on the OpenAI-compatible endpoint (upstream issue
@@ -724,13 +723,28 @@ def _maybe_nothink(user: str, cfg: dict) -> str:
 #: ``options``. Neither shape is an error, so sending both costs nothing
 #: and works on whichever build is installed. Server-side
 #: OLLAMA_KEEP_ALIVE still wins if the operator set it.
-LOCAL_KEEP_ALIVE = ""
+LOCAL_KEEP_ALIVE = "25m"
+#: Slack past the keeper's interval, so the model is still warm when the
+#: next slice is due rather than unloading in the final seconds.
+KEEP_ALIVE_MARGIN_MINUTES = 5
 
 
 def _local_keep_alive(cfg: dict) -> str:
-    """The keep-alive to ask a local model for; "" means do not ask."""
-    val = cfg.get("llm_local_keep_alive", LOCAL_KEEP_ALIVE)
-    return str(val).strip() if val is not None else ""
+    """The keep-alive to ask a local model for; "" means do not ask.
+
+    An explicit setting always wins, including "". With none, the ask
+    tracks the keeper: five minutes past memory_summary_minutes, so the
+    model is still loaded when the next slice is due."""
+    val = cfg.get("llm_local_keep_alive")
+    if val is not None:
+        return str(val).strip()
+    try:
+        mins = int(cfg.get("memory_summary_minutes") or 20)
+    except (TypeError, ValueError):
+        return LOCAL_KEEP_ALIVE
+    if mins < 1:
+        return LOCAL_KEEP_ALIVE
+    return "%dm" % (mins + KEEP_ALIVE_MARGIN_MINUTES)
 
 
 def _build_body(model: str, user_prompt: str, system: str = None,

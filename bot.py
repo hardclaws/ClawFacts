@@ -219,17 +219,13 @@ DEFAULTS = {
     # few hosted calls - but this is the switch that makes "the local
     # model does the summarising" a guarantee rather than a preference.
     "memory_summary_local_only": False,
-    # How long a local model stays loaded after the bot's last call. Empty
-    # means do not ask: Ollama unloads on its own five-minute schedule and
-    # the box holds nothing between slices. That is deliberate on a small
-    # machine - the keeper is a background job on a 240s budget, so a cold
-    # load is invisible, while a resident model costs RAM all stream. Note
-    # that ANY value shorter than memory_summary_minutes gives a cold load
-    # every slice, so a short value is not a compromise: set it PAST the
-    # interval ("25m" against the default 20) to keep the model warm, or
-    # leave it empty. Halfway is the same as empty and only looks like a
-    # setting.
-    "llm_local_keep_alive": "",
+    # llm_local_keep_alive is deliberately NOT pinned here: with no value
+    # set, llm asks a local model to stay loaded five minutes PAST
+    # memory_summary_minutes, so the model is still warm when the next
+    # slice is due and moving the interval cannot silently break it. Set
+    # it to a duration to override, or to "" to stop asking and take a
+    # cold load on every slice. Any value SHORTER than the interval gives
+    # a cold load every slice anyway, so halfway is the same as "".
     "chat_ai_distill_minutes": 10,
     "chat_ai_chance": 0.10,
     "chat_ai_max_hour": 6,

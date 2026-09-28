@@ -165,6 +165,14 @@ def test_a_local_call_asks_the_model_to_stay_loaded():
 
     # The knob: overridable, and an empty string stops asking.
     assert llm._local_keep_alive({}) == llm.LOCAL_KEEP_ALIVE
+    # The ask TRACKS the keeper's interval, so moving it cannot silently
+    # leave the model unloaded before the next slice is due. A fixed
+    # number is the bug this replaces: 5m against a 20-minute interval
+    # was a cold load every time, and identical to sending nothing.
+    assert llm._local_keep_alive({"memory_summary_minutes": 20}) == "25m"
+    assert llm._local_keep_alive({"memory_summary_minutes": 60}) == "65m"
+    assert int(llm._local_keep_alive({"memory_summary_minutes": 45})
+               .rstrip("m")) > 45
     assert llm._local_keep_alive({"llm_local_keep_alive": "2h"}) == "2h"
     assert llm._local_keep_alive({"llm_local_keep_alive": ""}) == ""
 
