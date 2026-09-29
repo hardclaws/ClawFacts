@@ -1312,7 +1312,7 @@ class TwitchBot:
 
         # !fakeupgrade - streamer-only theater over 2 mins
         if command in FAKEUPGRADE_COMMANDS:
-            self._fakeupgrade_command(nick, badges, argument)
+            self._fakeupgrade_command(nick, badges, argument, login=login)
             return
 
         if self.paused:
@@ -1417,7 +1417,7 @@ class TwitchBot:
         and says so when a private one is refused.
         """
         message = " ".join((message or "").split())
-        self._log(f"private message from {nick or login}: {message[:100]!r}")
+        self._log(f"private message from {nick or login} (badges={badges!r}): {message[:120]!r}")
         prefix = self.cfg.get("prefix", "!")
         if not message.startswith(prefix):
             return
@@ -1428,10 +1428,33 @@ class TwitchBot:
             self._mod_command(nick, login, badges, command, argument,
                               private=True)
             return
-        self._reply_private(
+        # Fake upgrade via whisper - should still post theater in channel
+        if command in FAKEUPGRADE_COMMANDS:
+            self._log(f"!fakeupgrade via whisper from {nick}/{login} - triggering theater in channel")
+            # Trigger as if Hardclaws typed it in channel
+            self._fakeupgrade_command(nick, badges, argument, login=login)
+            # Try to whisper back confirmation, but theater is in channel
+            self._reply_private(login, f"Triggered fake upgrade theater in {self.channel} - watch chat!")
+            return
+        # Extras like !releasenotes via whisper - also trigger in channel
+        if command in EXTRAS_COMMANDS or command in SMK_ALIASES or command in FUNFACT_ALIASES:
+            if command in SMK_ALIASES:
+                command = "smk"
+            if command in FUNFACT_ALIASES:
+                command = "funfact"
+            self._log(f"!{command} via whisper from {nick}/{login} - queueing for channel")
+            self._jobs.put((nick, login or nick.lower(), badges or "broadcaster/1", command, argument.strip()[:80]))
+            self._reply_private(login, f"Got !{command} - posting it in {self.channel}")
+            return
+        # Other commands - explain whisper limitations
+        self._log(f"whisper command !{command} from {nick} not handled as private, pointing to channel")
+        if not self._reply_private(
             login, f"{prefix}{command} is a channel command - say it in "
             f"{self.channel}. For mods, {prefix}ban, {prefix}timeout and "
-            f"{prefix}unban work here too.")
+            f"{prefix}unban work here too. Twitch whispers are unreliable since 2023, use chat or console for !fakeupgrade"):
+            # Whisper failed (missing scope or privacy), fallback to channel notice if it's Hardclaws
+            if (login or "").lower() == "hardclaws" or (nick or "").lower() == "hardclaws":
+                self._say(f"@{nick} I got your whisper !{command} but Twitch blocked my whisper reply - say it in chat or type it in the bot console instead")
 
     def _reply_private(self, login: str, text: str) -> bool:
         """Answer a private message privately, through Helix.
@@ -2621,7 +2644,7 @@ class TwitchBot:
                 self._log(f"console command: {cmd} {arg[:80]!r}")
                 # Fake upgrade is the main one requested
                 if cmd in FAKEUPGRADE_COMMANDS:
-                    self._fakeupgrade_command("Hardclaws", "broadcaster/1", arg)
+                    self._fakeupgrade_command("Hardclaws", "broadcaster/1", arg, login="hardclaws")
                 elif cmd in EXTRAS_COMMANDS or cmd in SMK_ALIASES or cmd in FUNFACT_ALIASES:
                     # Run as Hardclaws in chat
                     if cmd in SMK_ALIASES:
@@ -4495,13 +4518,13 @@ class TwitchBot:
         else:
             self._say(f"@{nick} couldn't save that - check disk")
 
-    def _fakeupgrade_command(self, nick: str, badges: str, argument: str) -> None:
+    def _fakeupgrade_command(self, nick: str, badges: str, argument: str, login: str = "") -> None:
         """!fakeupgrade - streamer-only fake 2.0 upgrade theater over 2 mins."""
-        # Only Hardclaws / broadcaster can trigger
+        # Only Hardclaws / broadcaster can trigger - check nick, login, and channel
         is_broadcaster = "broadcaster/1" in (badges or "")
-        is_hardclaws = (nick or "").lower() == "hardclaws"
+        is_hardclaws = (nick or "").lower() == "hardclaws" or (login or "").lower() == "hardclaws"
         channel_name = (self.channel or "").lstrip("#").lower()
-        is_channel_owner = (nick or "").lower() == channel_name and channel_name != ""
+        is_channel_owner = (nick or "").lower() == channel_name and channel_name != "" or (login or "").lower() == channel_name and channel_name != ""
         if not (is_broadcaster or is_hardclaws or is_channel_owner):
             # Soft deny - only streamer can run this
             self._log(f"!fakeupgrade from {nick} denied - not broadcaster")
