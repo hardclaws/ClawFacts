@@ -120,6 +120,8 @@ FORGET_COMMANDS = {"forget"}
 PERSONALITY_COMMANDS = {"persona", "personality", "voice"}
 # Permanent knowledge that survives any persona: !remember, !knowledge
 KNOWLEDGE_COMMANDS = {"remember", "knowledge", "lore"}
+# Fake upgrade theater: streamer-only !fakeupgrade over 2 mins
+FAKEUPGRADE_COMMANDS = {"fakeupgrade", "fakeupdate", "upgradebot"}
 # The sub goal: anyone can read it, moderators maintain it.
 SUBGOAL_COMMANDS = {"subgoal", "subgoals"}
 
@@ -137,6 +139,7 @@ RESERVED_COMMANDS = (
     | HELP_COMMANDS | WHOIS_COMMANDS | TWITCH_COMMANDS | REMINDER_COMMANDS
     | HAUL_COMMANDS | CB_COMMANDS | SO_COMMANDS | CMD_COMMANDS | {"bot"}
     | FORGET_COMMANDS | PERSONALITY_COMMANDS | KNOWLEDGE_COMMANDS | SUBGOAL_COMMANDS
+    | FAKEUPGRADE_COMMANDS
 )
 
 DEFAULTS = {
@@ -586,6 +589,7 @@ class TwitchBot:
         self._last_probe = 0.0              # last follower-permission probe
         self._follows_start = None           # followers at startup
         self.paused = False                 # !bot off (moderators only)
+        self._fakeupgrade_until = 0.0       # when fake upgrade theater ends
         # Mod-owned state, both persisted next to the code so they survive a
         # restart. A reminder set for tomorrow must not be lost to an update.
         self.reminders = reminders_mod.ReminderSet()
@@ -1300,6 +1304,11 @@ class TwitchBot:
         # !remember / !knowledge - permanent facts used by any persona
         if command in KNOWLEDGE_COMMANDS:
             self._knowledge_command(nick, badges, argument)
+            return
+
+        # !fakeupgrade - streamer-only theater over 2 mins
+        if command in FAKEUPGRADE_COMMANDS:
+            self._fakeupgrade_command(nick, badges, argument)
             return
 
         if self.paused:
@@ -4416,6 +4425,58 @@ class TwitchBot:
             self._log(f"knowledge added by {nick}: {fact_text[:80]!r} ({len(facts)} total)")
         else:
             self._say(f"@{nick} couldn't save that - check disk")
+
+    def _fakeupgrade_command(self, nick: str, badges: str, argument: str) -> None:
+        """!fakeupgrade - streamer-only fake 2.0 upgrade theater over 2 mins."""
+        # Only Hardclaws / broadcaster can trigger
+        is_broadcaster = "broadcaster/1" in (badges or "")
+        is_hardclaws = (nick or "").lower() == "hardclaws"
+        channel_name = (self.channel or "").lstrip("#").lower()
+        is_channel_owner = (nick or "").lower() == channel_name and channel_name != ""
+        if not (is_broadcaster or is_hardclaws or is_channel_owner):
+            # Soft deny - only streamer can run this
+            self._log(f"!fakeupgrade from {nick} denied - not broadcaster")
+            # Only reply if they are mod to avoid spam, else silent
+            if access.tier_from_badges(badges) in ("broadcaster", "moderator"):
+                self._say(f"@{nick} only Hardclaws can run the fake upgrade theater")
+            return
+        now = time.time()
+        if now < self._fakeupgrade_until:
+            remaining = int(self._fakeupgrade_until - now)
+            self._say(f"@{nick} upgrade already in progress, {remaining}s left")
+            return
+        # 2 minute theater
+        self._fakeupgrade_until = now + 122.0
+        limit = int(self.cfg.get("max_message_chars", 450))
+        self._log(f"!fakeupgrade started by {nick}")
+
+        # Define sequence: (delay from start, message)
+        steps = [
+            (0, "Initializing DocBot 2.0 upgrade sequence... Stand by chat!"),
+            (5, "Backing up memory... 1,247 chat logs, 89 Dirty Lepages, and 3 route maps saved to mini PC."),
+            (12, "Downloading update package v2.0 (420.69 MB) from the cloud... Wait, we are not in the cloud, we are on a Windows mini PC!"),
+            (25, "Installing [HEARING MODULE]... I can now hear the streamer talking! Say hi Doc!"),
+            (35, "Calibrating diesel sniffers and fresh coffee detectors... *sniff sniff* smells like truck stop coffee."),
+            (45, "Updating Dirty Lepage Detection System... Scanning bushes for hidden cruisers... If we hid there we'd be creeps, but cops it's cool."),
+            (55, "Patching sarcasm detector... Upgraded from 0% to 12% accuracy. Still thinks great job is always sincere."),
+            (70, "Compiling CB Radio Weather... 10-4 on that cold front, good buddy. Weather via CB static now live."),
+            (85, "Applying Em Dash Ban Enforcement... - and -- permanently purged. Commas only from now on, per user request."),
+            (95, "Finalizing upgrade... Rebooting DocBot... brb, closing console and running start-bot.bat"),
+            (110, "DocBot has rebooted! Now running v2.0 on Windows mini PC. Memory footprint still tiny and snappy with 4b model."),
+            (122, "Upgrade complete! Type !releasenotes to see whats new in DocBot 2.0"),
+        ]
+
+        # Immediate first message
+        self._say(steps[0][1][:limit])
+        # Schedule rest
+        for delay, msg in steps[1:]:
+            t = threading.Timer(
+                float(delay),
+                self._say,
+                args=(msg[:limit],),
+            )
+            t.daemon = True
+            t.start()
 
     def _subgoal_mutation(self, nick: str, badges: str,
                           argument: str) -> bool:
