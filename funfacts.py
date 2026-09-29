@@ -3805,6 +3805,62 @@ def _alerts_answer(question: str, options: dict = None):
             "facts": facts, "sentence": True, "source": "weather.gov"}
 
 
+def _route_map_answer(question: str, options: dict = None):
+    """Map link for current route from knowledge.json, or False."""
+    if not question or "map" not in question.lower():
+        return False
+    low = question.lower()
+    if "route" not in low and "map" not in low:
+        return False
+    # Load knowledge.json for route URL
+    try:
+        # Try bot's knowledge path first, then local file
+        kpath = None
+        if options:
+            kpath = options.get("knowledge_state_path") or options.get("knowledge_path")
+        if not kpath:
+            # Search common locations
+            for cand in ["knowledge.json", "D:\\funfact-bot\\knowledge.json"]:
+                try:
+                    import os
+                    if os.path.exists(cand):
+                        kpath = cand
+                        break
+                except Exception:
+                    pass
+        if not kpath:
+            kpath = "knowledge.json"
+        import json as _json
+        with open(kpath, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        facts = []
+        if isinstance(data, dict):
+            facts = data.get("facts") or data.get("knowledge") or []
+        elif isinstance(data, list):
+            facts = data
+        # Find fact containing route and URL
+        route_fact = None
+        for f in facts:
+            fs = str(f)
+            if "route" in fs.lower() and ("http" in fs.lower() or "tinyurl" in fs.lower()):
+                route_fact = fs.strip()
+                break
+        if not route_fact:
+            return False
+        # Extract URL
+        import re as _re
+        m = _re.search(r"https?://\S+", route_fact)
+        url = m.group(0).rstrip(").,!") if m else route_fact
+        # Return as sentence fact with URL
+        fact = f"Current route map: {url} - Davis, CA east on I-80 to Danbury, CT"
+        print(f"[funfacts] route map from knowledge: {url}", flush=True)
+        return {"place": "Route Map", "kind": "Route", "_ttl": 600,
+                "facts": [fact], "sentence": True, "source": "knowledge.json"}
+    except Exception as exc:
+        print(f"[funfacts] route map lookup failed: {exc!r}", flush=True)
+        return False
+
+
 _WEATHER_CODES = {
     0: "clear skies",
     1: "mainly clear skies",
@@ -4920,6 +4976,9 @@ def get_funfact(location: str, options=None):
         if result is None:
             alerts = _alerts_answer(location.strip(), opts)
             result = None if alerts is False else alerts
+        if result is None:
+            route_map = _route_map_answer(location.strip(), opts)
+            result = None if route_map is False else route_map
         if result is None:
             # What HAPPENED (today, yesterday, a date) is news, and the
             # encyclopedia does not have it: a question about this
