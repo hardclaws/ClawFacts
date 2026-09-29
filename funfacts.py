@@ -3832,53 +3832,53 @@ def _route_map_answer(question: str, options: dict = None):
         import json as _json
         with open(kpath, "r", encoding="utf-8") as fh:
             data = _json.load(fh)
-        facts = []
+        raw_facts = []
         if isinstance(data, dict):
-            facts = data.get("facts") or data.get("knowledge") or []
+            raw_facts = data.get("facts") or data.get("knowledge") or []
         elif isinstance(data, list):
-            facts = data
-        # Find route facts
-        route_facts = [str(f).strip() for f in facts if "route" in str(f).lower()]
-        if not route_facts:
+            raw_facts = data
+        # Normalize to list of (display_text, lower_text)
+        route_entries = []
+        for rf in raw_facts:
+            if isinstance(rf, dict):
+                txt = rf.get("fact") or rf.get("text") or rf.get("value") or ""
+                txt = str(txt).strip()
+            else:
+                txt = str(rf).strip()
+            if not txt:
+                continue
+            if "route" not in txt.lower():
+                continue
+            route_entries.append((txt, txt.lower()))
+        if not route_entries:
             return False
         # Try to match specific route by places in question
-        # Extract start/end from question
         start, end = _extract_route_places(question)
-        # Also try to get places from question via simple split if extract fails
-        # e.g., "route fresno to danbury" - extract_route_places should handle from/to, but
-        # "route fresno to danbury" without "from" may fail, so also look for "<place> to <place>"
         if not start and not end:
             import re as _re
             m = _re.search(r"\b([A-Za-z]{3,})\s+to\s+([A-Za-z]{3,})", question, flags=_re.I)
             if m:
                 start = m.group(1)
                 end = m.group(2)
-        # Score facts by how many query place keywords they contain
         q_low = low
         best = None
         best_score = -1
-        for f in route_facts:
-            f_low = f.lower()
+        for txt, f_low in route_entries:
             score = 0
             if start and start.lower() in f_low:
                 score += 2
             if end and end.lower() in f_low:
                 score += 2
-            # Also check for city names mentioned in question
             for token in re.findall(r"[A-Za-z]{3,}", q_low):
                 if len(token) >= 4 and token in f_low:
                     score += 1
             if score > best_score:
                 best_score = score
-                best = f
-        # If no place match, pick most recent route fact (last in list)
-        route_fact = best if best and best_score > 0 else route_facts[-1]
-        # Extract URL
+                best = txt
+        route_fact = best if best and best_score > 0 else route_entries[-1][0]
         import re as _re
         m = _re.search(r"https?://\S+", route_fact)
         url = m.group(0).rstrip(").,!") if m else ""
-        # Return the stored fact itself (it already contains URL and description)
-        # If it has URL, keep it, else just return fact
         fact = route_fact
         if url and url not in fact:
             fact = f"{fact} {url}"
