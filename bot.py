@@ -70,7 +70,7 @@ PORT = 6697  # TLS
 # !funfacts is the same command as !funfact - the plural is the natural typo.
 FUNFACT_ALIASES = {"funfact", "funfacts"}
 EXTRAS_COMMANDS = {"joke", "randomfact", "riddle", "wouldyourather", "wyr",
-                   "smk"}
+                   "smk", "releasenotes", "changelog", "whatsnew"}
 SMK_ALIASES = {"smk", "shagmarrykill", "marryshagkill"}
 # !help is documentation, not a game: it stays reachable for everyone so a
 # viewer can read what the bot does even if they may not run a command yet.
@@ -4655,6 +4655,21 @@ class TwitchBot:
             elif command in ("wouldyourather", "wyr"):
                 text = extras.get_wyr()
                 label = "WouldYouRather"
+            elif command in ("releasenotes", "changelog", "whatsnew"):
+                notes = extras.get_releasenotes()
+                if not notes:
+                    self._say(f"{self._mention(nick)}no release notes right now")
+                    return
+                self._say(f"DocBot 2.0 Release Notes | {notes[0]}"[:limit])
+                for i, note in enumerate(notes[1:], 1):
+                    t = threading.Timer(
+                        float(i * 2.5),
+                        self._say,
+                        args=(f"{i}. {note}"[:limit],),
+                    )
+                    t.daemon = True
+                    t.start()
+                return
             elif command == "smk":
                 picked = extras.get_smk(argument)
                 if not picked:
