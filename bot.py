@@ -2890,7 +2890,14 @@ class TwitchBot:
             threading.Thread(target=self._answer_live_data,
                              args=(nick, message), name="live-data",
                              daemon=True).start()
-            return
+            # Multi-part: "weather in Walnut Creek, CA and anything we need to look out for
+            # on our trip to Danbury..." - fast lane answers first weather, second part
+            # is trip advisory / forecast and should go to chat AI too.
+            low_msg = (message or "").lower()
+            if " and " in low_msg and ("trip to" in low_msg or "next few days" in low_msg or "danbury" in low_msg):
+                self._log(f"live data + chat: {nick} asked multi-part, fast lane posted first weather, queuing AI for second part")
+            else:
+                return
         recent_chat, busy = self._chat_activity(now)
         # Flowing human chat already has a conversation. Autonomous Doc listens;
         # mentions still pass straight through this gate.
@@ -3030,6 +3037,32 @@ class TwitchBot:
                 return
             self._reply(nick, question, result)
             self._log(f"live data answered for {nick}: {question[:60]!r}")
+            # Second location in same question: "weather in Walnut Creek, CA and
+            # anything we need to look out for on our trip to Danbury, Connecticut"
+            # Fast lane answered first place, now also answer second if present.
+            try:
+                low_q = (question or "").lower()
+                if "trip to" in low_q or "danbury" in low_q:
+                    # Extract second place after "trip to" or "to Danbury"
+                    import re
+                    m = re.search(r"trip to\s+([A-Za-z ,'-]{3,50})", question, flags=re.I)
+                    if not m:
+                        m = re.search(r"\bto\s+([A-Za-z][A-Za-z ,'-]{3,40}?)(?:\s+over|\s+for|\s*$)", question, flags=re.I)
+                    if m:
+                        second_place = " ".join(m.group(1).split()).strip().rstrip(",.?!")
+                        # Avoid re-answering same place
+                        first_place = (result.get("place") or "").lower()
+                        if second_place and second_place.lower() not in first_place and first_place not in second_place.lower():
+                            # Trim at " over " etc
+                            second_place = re.split(r"\s+over\s+", second_place, flags=re.I)[0].strip()
+                            if len(second_place) >= 3:
+                                self._log(f"live data second place detected: {second_place!r} for {nick}")
+                                result2 = get_funfact(f"weather in {second_place}", self._opts)
+                                if result2 and result2.get("fact"):
+                                    self._reply(nick, f"weather in {second_place}", result2)
+                                    self._log(f"live data answered second place for {nick}: {second_place!r}")
+            except Exception as exc2:
+                self._log(f"live data second place failed for {nick}: {exc2!r}")
         except Exception as exc:
             self._log(f"live data failed for {nick}: {exc!r}")
 
