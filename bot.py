@@ -118,6 +118,8 @@ CMD_COMMANDS = {"cmd", "customcmd"}
 FORGET_COMMANDS = {"forget"}
 # The bot's voice: !persona show/list/set/custom/reset, moderators only.
 PERSONALITY_COMMANDS = {"persona", "personality", "voice"}
+# Permanent knowledge that survives any persona: !remember, !knowledge
+KNOWLEDGE_COMMANDS = {"remember", "knowledge", "lore"}
 # The sub goal: anyone can read it, moderators maintain it.
 SUBGOAL_COMMANDS = {"subgoal", "subgoals"}
 
@@ -134,6 +136,7 @@ RESERVED_COMMANDS = (
     | SMK_ALIASES
     | HELP_COMMANDS | WHOIS_COMMANDS | TWITCH_COMMANDS | REMINDER_COMMANDS
     | HAUL_COMMANDS | CB_COMMANDS | SO_COMMANDS | CMD_COMMANDS | {"bot"}
+    | FORGET_COMMANDS | PERSONALITY_COMMANDS | KNOWLEDGE_COMMANDS | SUBGOAL_COMMANDS
 )
 
 DEFAULTS = {
@@ -289,6 +292,7 @@ DEFAULTS = {
     # the sub goal survive restarts without touching config.json.
     "persona_state_path": "persona.json",
     "subgoal_state_path": "subgoal.json",
+    "knowledge_state_path": "knowledge.json",
     # Subs the bot SEES in chat (sub, resub and gift announcements)
     # bump the sub goal on their own - Twitch lets only the
     # broadcaster's own token read the live count, so counting the
@@ -1291,6 +1295,11 @@ class TwitchBot:
         # A moderation command, reachable while the bot is switched off.
         if command in PERSONALITY_COMMANDS:
             self._persona_command(nick, badges, argument)
+            return
+
+        # !remember / !knowledge - permanent facts used by any persona
+        if command in KNOWLEDGE_COMMANDS:
+            self._knowledge_command(nick, badges, argument)
             return
 
         if self.paused:
@@ -4194,16 +4203,52 @@ class TwitchBot:
         except OSError as exc:
             self._log(f"could not save {path}: {exc!r}")
 
+    def _load_knowledge(self) -> list:
+        """Permanent facts that survive any persona, from knowledge.json."""
+        path = self.cfg.get("knowledge_state_path", "knowledge.json")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                facts = data.get("facts") or data.get("knowledge") or []
+            elif isinstance(data, list):
+                facts = data
+            else:
+                facts = []
+            return [str(f).strip() for f in facts if str(f).strip()][:50]
+        except (OSError, ValueError):
+            return []
+
+    def _save_knowledge(self, facts: list) -> bool:
+        path = self.cfg.get("knowledge_state_path", "knowledge.json")
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"facts": facts[:50]}, fh, ensure_ascii=False, indent=2)
+            return True
+        except OSError as exc:
+            self._log(f"could not save {path}: {exc!r}")
+            return False
+
     def _persona_text(self) -> str:
         """The persona the chat AI actually uses: the mod-chosen preset
-        or custom text, else the config's bot_personality, else Doc."""
+        or custom text, else the config's bot_personality, else Doc.
+        Permanent knowledge from knowledge.json is appended regardless of persona,
+        so 'what is a Dirty Lepage?' works in any voice."""
         p = self._persona or {}
         if p.get("name") == "custom" and (p.get("text") or "").strip():
-            return p["text"].strip()
-        text = chatai.persona(p.get("name") or "")
-        if text:
-            return text
-        return self.cfg.get("bot_personality", "") or chatai.DEFAULT_PERSONA
+            base = p["text"].strip()
+        else:
+            base = chatai.persona(p.get("name") or "") or ""
+            if not base:
+                base = self.cfg.get("bot_personality", "") or chatai.DEFAULT_PERSONA
+        # Append permanent knowledge that survives persona switches
+        try:
+            facts = self._load_knowledge()
+            if facts:
+                base = base.rstrip() + "\n\nPERMANENT KNOWLEDGE (use for any persona):\n" + "\n".join(f"- {f}" for f in facts)
+        except Exception:
+            pass
+        return base
 
     def _persona_command(self, nick: str, badges: str,
                          argument: str) -> None:
@@ -4283,6 +4328,94 @@ class TwitchBot:
             return
         self._say(f"@{nick} {pre}persona [list|set <name>|custom <text>|"
                   f"reset]")
+
+    def _knowledge_command(self, nick: str, badges: str, argument: str) -> None:
+        """!remember / !knowledge - permanent facts used by any persona. Mods only."""
+        pre = self.cfg.get("prefix", "!")
+        if access.tier_from_badges(badges) not in ("broadcaster", "moderator"):
+            self._log(f"!remember from {nick} ignored - not a mod")
+            return
+        args = (argument or "").strip()
+        if not args:
+            facts = self._load_knowledge()
+            if not facts:
+                self._say(f"@{nick} no permanent knowledge yet. {pre}remember <fact> to add, {pre}remember list, {pre}remember delete <n>")
+                return
+            self._say(f"@{nick} permanent knowledge ({len(facts)}):")
+            for i, f in enumerate(facts[:5], 1):
+                self._queue_fitted(f"{i}. ", f[:300])
+            if len(facts) > 5:
+                self._queue_fitted("", f"... and {len(facts)-5} more, {pre}remember list for all")
+            return
+        verb, _, rest = args.partition(" ")
+        verb = verb.lower()
+        rest = rest.strip()
+        if verb == "list":
+            facts = self._load_knowledge()
+            if not facts:
+                self._say(f"@{nick} no permanent knowledge yet.")
+                return
+            self._say(f"@{nick} permanent knowledge ({len(facts)}):")
+            for i, f in enumerate(facts, 1):
+                self._queue_fitted(f"{i}. ", f[:350])
+            return
+        if verb in ("delete", "del", "remove", "forget"):
+            try:
+                idx = int(rest.split()[0]) - 1 if rest else -1
+            except (ValueError, IndexError):
+                self._say(f"@{nick} {pre}remember delete <number> - see {pre}remember list")
+                return
+            facts = self._load_knowledge()
+            if 0 <= idx < len(facts):
+                removed = facts.pop(idx)
+                self._save_knowledge(facts)
+                self._say(f"@{nick} removed: {removed[:200]}")
+                self._log(f"knowledge deleted by {nick}: {removed[:80]!r}")
+            else:
+                self._say(f"@{nick} no entry {idx+1}, {len(facts)} total")
+            return
+        if verb in ("clear", "reset"):
+            self._save_knowledge([])
+            self._say(f"@{nick} permanent knowledge cleared.")
+            self._log(f"knowledge cleared by {nick}")
+            return
+        # Add: rest of args is the fact, or verb+rest if verb not a subcommand
+        fact = args if verb in ("add", "set") and rest else args
+        if verb in ("add", "set"):
+            fact = rest or verb
+            if not fact and verb == "add":
+                fact = args
+        # Actually if user typed "!remember A Dirty Lepage is..." then args = that whole fact
+        # If they typed "!remember add A Dirty..." then rest is fact
+        if verb in ("add", "set") and not rest:
+            self._say(f"@{nick} {pre}remember <fact> - what should I remember?")
+            return
+        # If verb is add/set, fact is rest, else fact is full args
+        if verb in ("add", "set"):
+            fact_text = rest
+        else:
+            fact_text = args
+        fact_text = " ".join(fact_text.split()).strip()
+        if not fact_text:
+            self._say(f"@{nick} {pre}remember <fact>")
+            return
+        if len(fact_text) < 10:
+            self._say(f"@{nick} too short - give me a full fact to remember")
+            return
+        if len(fact_text) > 500:
+            self._say(f"@{nick} too long - {len(fact_text)} chars, max 500")
+            return
+        facts = self._load_knowledge()
+        # Avoid exact duplicate
+        if any(f.lower() == fact_text.lower() for f in facts):
+            self._say(f"@{nick} I already know that one")
+            return
+        facts.append(fact_text)
+        if self._save_knowledge(facts):
+            self._say(f"@{nick} remembered: {fact_text[:300]}")
+            self._log(f"knowledge added by {nick}: {fact_text[:80]!r} ({len(facts)} total)")
+        else:
+            self._say(f"@{nick} couldn't save that - check disk")
 
     def _subgoal_mutation(self, nick: str, badges: str,
                           argument: str) -> bool:
