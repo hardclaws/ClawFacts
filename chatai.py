@@ -1514,6 +1514,11 @@ def knowledge_question(text: str, names=()) -> bool:
         return False
     if not _KNOWLEDGE_Q.match(t):
         return False
+    # Distance between places: "how long is it from Fairfield CA to Danbury CT"
+    # should go to LLM with search/maps, not funfact about Norwalk history.
+    # Proper noun check would otherwise send it to encyclopedia.
+    if re.search(r"\bfrom\b.*\bto\b", t, re.IGNORECASE) and re.search(r"\bhow\s+(?:long|far)\b", t, re.IGNORECASE):
+        return True
     # 'how long is the Golden Gate Bridge' / 'how old is Willie Nelson':
     # a named thing with an article - the engine's kind of question.
     return not _PROPER_NOUN.search(t)
