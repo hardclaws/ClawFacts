@@ -3496,6 +3496,13 @@ _NOT_WEATHER = re.compile(
     r"meat|candy|fudge|yeast)\b", re.IGNORECASE)
 _IN_PLACE = re.compile(
     r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
+# Trailing time phrases that are not part of the place: "in California at the moment"
+# should be "California", not "California at the moment" or "the moment".
+_TIME_TAIL = re.compile(
+    r"\s+(?:at\s+(?:the\s+)?(?:moment|present|current\s+time|this\s+moment|"
+    r"this\s+time|this\s+very\s+moment|minute|current\s+moment)|"
+    r"right\s+now|currently|for\s+now|at\s+present|at\s+this\s+time|"
+    r"right\s+at\s+the\s+moment)\s*$", re.IGNORECASE)
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
 _SOLAR_PLACE = re.compile(
     r"\b(?:in|for|at)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
@@ -3584,8 +3591,16 @@ def _weather_header(question: str):
     data, not trivia: it gets its own header and the place as the
     label instead of the whole question."""
     question = question or ""
-    m = _IN_PLACE.search(question.strip().rstrip(" ?!."))
+    # Strip trailing time phrases before place extraction: "in California at the moment"
+    # should give "California", not "California at the moment" or "the moment".
+    cleaned = question.strip().rstrip(" ?!.")
+    cleaned = _TIME_TAIL.sub("", cleaned).strip()
+    m = _IN_PLACE.search(cleaned)
     place = " ".join(m.group(1).split()) if m else None
+    if place:
+        place = _TIME_TAIL.sub("", place).strip()
+        if place.lower() in ("the moment", "moment", "now", "present", "current time"):
+            place = None
     if _WEATHER_Q.search(question):
         # "weather" is unambiguous: with no place it asks for one rather
         # than guessing, which is the behaviour the channel already has.
