@@ -3644,6 +3644,167 @@ def _weather_header(question: str):
     return None, None
 
 
+# ---- alerts / fires / floods / road closures along a route ----
+NWS_ALERTS_API = "https://api.weather.gov/alerts/active"
+_ALERTS_Q = re.compile(
+    r"\b(?:wild\s*fires?|wildfires?|fires?|floods?|flooding|road\s*closures?|closures?|"
+    r"alerts?|hazards?|red\s*flag|evacuation)\b", re.IGNORECASE)
+_ROUTE_RE = re.compile(
+    r"\bfrom\s+([A-Za-z][A-Za-z0-9 ,.'-]{2,50}?)\s+to\s+([A-Za-z][A-Za-z0-9 ,.'-]{2,50})",
+    re.IGNORECASE)
+
+
+def _extract_route_places(question: str):
+    """(start, end) for 'from X to Y' route, else (None, None)."""
+    if not question:
+        return None, None
+    # First try explicit from X to Y
+    m = _ROUTE_RE.search(question)
+    if m:
+        start = " ".join(m.group(1).split()).strip().rstrip(",.?!")
+        end = " ".join(m.group(2).split()).strip()
+        # Trim end at " are", " is", "?" etc
+        end = re.split(r"\s+(?:are|is|do|does|any|what|how)\b", end, flags=re.I)[0].strip()
+        end = re.split(r"\s+over\s+the\s+next", end, flags=re.I)[0].strip()
+        end = end.rstrip(",.?!")
+        # Clean time tails from end
+        end = _TIME_TAIL.sub("", end).strip() if '_TIME_TAIL' in globals() else end
+        if len(start) >= 2 and len(end) >= 2:
+            return start, end
+    # Fallback: "trip to X" or "to X" for single place alerts
+    m = re.search(r"trip to\s+([A-Za-z][A-Za-z ,.'-]{2,50})", question, flags=re.I)
+    if m:
+        end = " ".join(m.group(1).split()).strip()
+        end = re.split(r"\s+over\s+the\s+next", end, flags=re.I)[0].strip().rstrip(",.?!")
+        if len(end) >= 2:
+            return None, end
+    return None, None
+
+
+def _nws_alerts_for_point(lat: float, lon: float) -> list:
+    """Active NWS alerts for a lat/lon point, via api.weather.gov."""
+    try:
+        data = _http_get_json(NWS_ALERTS_API, {"point": f"{lat},{lon}"}, timeout=10)
+    except Exception as exc:
+        print(f"[funfacts] NWS alerts lookup failed for {lat},{lon}: {exc!r}", flush=True)
+        return []
+    features = data.get("features") if isinstance(data, dict) else None
+    if not isinstance(features, list):
+        return []
+    alerts = []
+    for feat in features:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        if not isinstance(props, dict):
+            continue
+        event = str(props.get("event") or "").strip()
+        headline = str(props.get("headline") or "").strip()
+        severity = str(props.get("severity") or "").strip()
+        area = str(props.get("areaDesc") or "").strip()
+        desc = str(props.get("description") or "").strip()
+        # Keep relevant: fire, flood, closure, red flag, evacuation, etc.
+        low_event = event.lower()
+        if _ALERTS_Q.search(low_event) or _ALERTS_Q.search(headline) or _ALERTS_Q.search(desc):
+            alerts.append({
+                "event": event,
+                "headline": headline,
+                "severity": severity,
+                "area": area,
+                "desc": desc[:400]
+            })
+        elif not _ALERTS_Q.search(" ".join([event, headline, desc])):
+            # For route questions, include all active alerts (road, weather) - better than silence
+            # But filter to avoid noise: only include if question is generic alerts
+            pass
+    # If no filtered alerts but features exist, return all as fallback for generic "any alerts"
+    if not alerts and features:
+        for feat in features[:5]:
+            props = feat.get("properties") if isinstance(feat, dict) else {}
+            if isinstance(props, dict):
+                alerts.append({
+                    "event": str(props.get("event") or "").strip(),
+                    "headline": str(props.get("headline") or "").strip(),
+                    "severity": str(props.get("severity") or "").strip(),
+                    "area": str(props.get("areaDesc") or "").strip(),
+                    "desc": str(props.get("description") or "")[:400]
+                })
+    return alerts
+
+
+def _alerts_answer(question: str, options: dict = None):
+    """Active alerts for a route or place, or False when not an alerts question."""
+    if not question or not _ALERTS_Q.search(question):
+        return False
+    # Must have route or place
+    start, end = _extract_route_places(question)
+    places = []
+    if start:
+        places.append(start)
+    if end:
+        places.append(end)
+    if not places:
+        # Try single place via weather header or in_place or near
+        cleaned = question.strip().rstrip(" ?!.")
+        m = _IN_PLACE.search(cleaned)
+        if m:
+            p = " ".join(m.group(1).split()).strip()
+            p = re.split(r"\s+over\s+the\s+next", p, flags=re.I)[0].strip().rstrip(",.?!")
+            if len(p) >= 2:
+                places.append(p)
+        if not places:
+            # "near Danbury, CT" or "in California"
+            m = re.search(r"\b(?:near|in|for|at)\s+([A-Za-z][A-Za-z ,.'-]{2,50})", cleaned, flags=re.I)
+            if m:
+                p = " ".join(m.group(1).split()).strip()
+                p = re.split(r"\s+over\s+the\s+next|\s+are\s+there|\s+is\s+there", p, flags=re.I)[0].strip().rstrip(",.?!")
+                if len(p) >= 2 and p.lower() not in ("the moment", "moment"):
+                    places.append(p)
+    if not places:
+        return False
+    # Geocode each place and fetch NWS alerts
+    all_alerts = []
+    seen = set()
+    for place in places[:2]:  # max 2 places (start/end)
+        geo = _osm_geocode(place) or _open_meteo_geocode(place)
+        if not geo:
+            print(f"[funfacts] could not geocode alert place: {place}", flush=True)
+            continue
+        lat = geo.get("lat") or geo.get("latitude")
+        lon = geo.get("lon") or geo.get("longitude")
+        if lat is None or lon is None:
+            continue
+        alerts = _nws_alerts_for_point(float(lat), float(lon))
+        for a in alerts:
+            key = (a.get("event"), a.get("area"))
+            if key in seen:
+                continue
+            seen.add(key)
+            all_alerts.append((place, a))
+    if not all_alerts:
+        # No active alerts
+        where = " to ".join(places) if len(places) > 1 else places[0]
+        fact = f"No active wildfire, flood, or road closure alerts for {where} per NWS at the moment. Check CalTrans QuickMap and local 511 for road closures."
+        print(f"[funfacts] no NWS alerts for {where}", flush=True)
+        return {"place": where, "kind": "Alerts", "_ttl": 600,
+                "facts": [fact], "sentence": True, "source": "weather.gov"}
+
+    facts = []
+    for place, a in all_alerts[:6]:
+        event = a.get("event") or "Alert"
+        headline = a.get("headline") or event
+        severity = a.get("severity")
+        # Format as one sentence per alert, with location
+        if severity:
+            facts.append(f"{event} ({severity}) for {place}: {headline}")
+        else:
+            facts.append(f"{event} for {place}: {headline}")
+    # Add guidance
+    facts.append("For live fire maps check inciweb.nwcg.gov and fire.airnow.gov, for road closures check CalTrans QuickMap and 511.")
+    where = " to ".join(places) if len(places) > 1 else places[0]
+    print(f"[funfacts] {len(all_alerts)} NWS alerts for {where}: {facts[0][:120]}", flush=True)
+    return {"place": where, "kind": "Alerts", "_ttl": 600,
+            "facts": facts, "sentence": True, "source": "weather.gov"}
+
+
 _WEATHER_CODES = {
     0: "clear skies",
     1: "mainly clear skies",
@@ -4756,6 +4917,9 @@ def get_funfact(location: str, options=None):
         else:
             solar = _solar_answer(location.strip())
             result = None if solar is False else solar
+        if result is None:
+            alerts = _alerts_answer(location.strip(), opts)
+            result = None if alerts is False else alerts
         if result is None:
             # What HAPPENED (today, yesterday, a date) is news, and the
             # encyclopedia does not have it: a question about this

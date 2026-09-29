@@ -1454,6 +1454,17 @@ def live_data_question(text: str, names=()) -> bool:
         # headline lookup, not trivia and not a persona take: same fast
         # lane as weather - no model, no mention clock.
         return True
+    # Alerts / fires / floods / road closures along a route - live NWS data, no model
+    try:
+        if funfacts._ALERTS_Q.search(t):
+            s, e = funfacts._extract_route_places(t)
+            if s or e:
+                return True
+            # Single place alerts like "any wildfires near Danbury, CT?" or "fires in California"
+            if funfacts._IN_PLACE.search(t) or __import__("re").search(r"\bnear\s+[A-Za-z]", t, __import__("re").I):
+                return True
+    except AttributeError:
+        pass
     if not funfacts._SOLAR_Q.search(t):
         return False
     place = funfacts._SOLAR_PLACE.search(t)
