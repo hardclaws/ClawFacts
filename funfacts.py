@@ -3597,8 +3597,38 @@ def _weather_header(question: str):
     cleaned = _TIME_TAIL.sub("", cleaned).strip()
     m = _IN_PLACE.search(cleaned)
     place = " ".join(m.group(1).split()) if m else None
+    if not place:
+        # Fallback for long queries like "weather in Alama, CA and anything we need..."
+        # _IN_PLACE is limited to 40 chars and fails when clause is long.
+        import re as _re
+        low = cleaned.lower()
+        w_idx = low.find("weather")
+        search_area = cleaned[w_idx:] if w_idx != -1 else cleaned
+        m2 = _re.search(r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,'-]{1,60})", search_area, flags=_re.I)
+        if m2:
+            cand = " ".join(m2.group(1).split()).strip()
+            cand = _re.split(r"\s+and\s+", cand, flags=_re.I)[0].strip()
+            for sep in [" for ", " with ", " over ", " during ", " on our ", " on the ", " to look", " to watch", " to danbury"]:
+                if sep.strip().lower() in cand.lower():
+                    idx = cand.lower().find(sep.strip().lower())
+                    if idx > 2:
+                        cand = cand[:idx].strip().rstrip(",")
+                        break
+            if len(cand) >= 2 and len(cand) <= 60:
+                place = cand
     if place:
         place = _TIME_TAIL.sub("", place).strip()
+        import re as _re
+        if _re.search(r"\s+and\s+", place, flags=_re.I):
+            first = _re.split(r"\s+and\s+", place, flags=_re.I)[0].strip()
+            if len(first) >= 2:
+                place = first
+        for sep in [" for ", " with ", " over ", " during ", " on our ", " on the ", " to ", " - ", " -- "]:
+            if sep in place.lower():
+                idx = place.lower().find(sep.strip())
+                if idx > 2 and len(place) > idx + len(sep):
+                    place = place[:idx].strip().rstrip(",")
+                    break
         if place.lower() in ("the moment", "moment", "now", "present", "current time"):
             place = None
     if _WEATHER_Q.search(question):
