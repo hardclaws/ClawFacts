@@ -1467,7 +1467,8 @@ def live_data_question(text: str, names=()) -> bool:
         pass
     # Route map from knowledge.json - live data, no model
     try:
-        if "map" in t.lower() and "route" in t.lower():
+        low = t.lower()
+        if "route" in low and ("map" in low or "what is the route" in low or "whats the route" in low or "route from" in low):
             return True
     except AttributeError:
         pass

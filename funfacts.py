@@ -3806,20 +3806,19 @@ def _alerts_answer(question: str, options: dict = None):
 
 
 def _route_map_answer(question: str, options: dict = None):
-    """Map link for current route from knowledge.json, or False."""
-    if not question or "map" not in question.lower():
+    """Map / route link for current route from knowledge.json, or False."""
+    if not question:
         return False
     low = question.lower()
+    # Trigger for any route question, not just map: "what is the route fresno to danbury"
     if "route" not in low and "map" not in low:
         return False
     # Load knowledge.json for route URL
     try:
-        # Try bot's knowledge path first, then local file
         kpath = None
         if options:
             kpath = options.get("knowledge_state_path") or options.get("knowledge_path")
         if not kpath:
-            # Search common locations
             for cand in ["knowledge.json", "D:\\funfact-bot\\knowledge.json"]:
                 try:
                     import os
@@ -3838,23 +3837,53 @@ def _route_map_answer(question: str, options: dict = None):
             facts = data.get("facts") or data.get("knowledge") or []
         elif isinstance(data, list):
             facts = data
-        # Find fact containing route and URL
-        route_fact = None
-        for f in facts:
-            fs = str(f)
-            if "route" in fs.lower() and ("http" in fs.lower() or "tinyurl" in fs.lower()):
-                route_fact = fs.strip()
-                break
-        if not route_fact:
+        # Find route facts
+        route_facts = [str(f).strip() for f in facts if "route" in str(f).lower()]
+        if not route_facts:
             return False
+        # Try to match specific route by places in question
+        # Extract start/end from question
+        start, end = _extract_route_places(question)
+        # Also try to get places from question via simple split if extract fails
+        # e.g., "route fresno to danbury" - extract_route_places should handle from/to, but
+        # "route fresno to danbury" without "from" may fail, so also look for "<place> to <place>"
+        if not start and not end:
+            import re as _re
+            m = _re.search(r"\b([A-Za-z]{3,})\s+to\s+([A-Za-z]{3,})", question, flags=_re.I)
+            if m:
+                start = m.group(1)
+                end = m.group(2)
+        # Score facts by how many query place keywords they contain
+        q_low = low
+        best = None
+        best_score = -1
+        for f in route_facts:
+            f_low = f.lower()
+            score = 0
+            if start and start.lower() in f_low:
+                score += 2
+            if end and end.lower() in f_low:
+                score += 2
+            # Also check for city names mentioned in question
+            for token in re.findall(r"[A-Za-z]{3,}", q_low):
+                if len(token) >= 4 and token in f_low:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best = f
+        # If no place match, pick most recent route fact (last in list)
+        route_fact = best if best and best_score > 0 else route_facts[-1]
         # Extract URL
         import re as _re
         m = _re.search(r"https?://\S+", route_fact)
-        url = m.group(0).rstrip(").,!") if m else route_fact
-        # Return as sentence fact with URL
-        fact = f"Current route map: {url} - Davis, CA east on I-80 to Danbury, CT"
-        print(f"[funfacts] route map from knowledge: {url}", flush=True)
-        return {"place": "Route Map", "kind": "Route", "_ttl": 600,
+        url = m.group(0).rstrip(").,!") if m else ""
+        # Return the stored fact itself (it already contains URL and description)
+        # If it has URL, keep it, else just return fact
+        fact = route_fact
+        if url and url not in fact:
+            fact = f"{fact} {url}"
+        print(f"[funfacts] route from knowledge: {fact[:120]}", flush=True)
+        return {"place": "Route", "kind": "Route", "_ttl": 600,
                 "facts": [fact], "sentence": True, "source": "knowledge.json"}
     except Exception as exc:
         print(f"[funfacts] route map lookup failed: {exc!r}", flush=True)
