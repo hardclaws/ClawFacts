@@ -950,6 +950,10 @@ class TwitchBot:
             target=self._names_keeper, name="names-topup", daemon=True
         )
         librarian.start()
+        console = threading.Thread(
+            target=self._console_keeper, name="console-keeper", daemon=True
+        )
+        console.start()
 
         backoff = 2
         while self.running:
@@ -2578,6 +2582,71 @@ class TwitchBot:
                 self._tick_reminders()
             except Exception as exc:      # a bad reminder must not kill the bot
                 self._log(f"reminder error: {exc!r}")
+
+    def _console_keeper(self) -> None:
+        """Read commands typed into the bot's own console window.
+
+        On the Windows mini PC the bot runs in a console. Typing
+        !fakeupgrade there should trigger the same theater as if
+        Hardclaws typed it in chat, without needing to tab into Twitch.
+
+        Also supports !releasenotes, !joke, etc for quick testing.
+        """
+        import sys
+        self._log("console commands ready: type !fakeupgrade, !releasenotes, !joke, etc")
+        while self.running:
+            try:
+                # input() blocks, but this is a daemon thread so shutdown is fine
+                try:
+                    line = input()
+                except EOFError:
+                    # No console (service / redirected) - sleep and retry
+                    time.sleep(5)
+                    continue
+                except Exception:
+                    time.sleep(1)
+                    continue
+                line = (line or "").strip()
+                if not line:
+                    continue
+                # Allow with or without !
+                if line.startswith(self.cfg.get("prefix", "!")):
+                    body = line[len(self.cfg.get("prefix", "!")):].strip()
+                else:
+                    body = line.strip()
+                if not body:
+                    continue
+                cmd, _, arg = body.partition(" ")
+                cmd = cmd.lower()
+                self._log(f"console command: {cmd} {arg[:80]!r}")
+                # Fake upgrade is the main one requested
+                if cmd in FAKEUPGRADE_COMMANDS:
+                    self._fakeupgrade_command("Hardclaws", "broadcaster/1", arg)
+                elif cmd in EXTRAS_COMMANDS or cmd in SMK_ALIASES or cmd in FUNFACT_ALIASES:
+                    # Run as Hardclaws in chat
+                    if cmd in SMK_ALIASES:
+                        cmd = "smk"
+                    if cmd in FUNFACT_ALIASES:
+                        cmd = "funfact"
+                    # Use same path as chat - queue it
+                    self._jobs.put(("Hardclaws", "hardclaws", "broadcaster/1", cmd, arg.strip()[:80]))
+                elif cmd == "say":
+                    # Raw say: console> say hello chat
+                    if arg.strip():
+                        self._say(arg.strip()[:450])
+                elif cmd in ("quit", "exit", "stop"):
+                    self._log("console requested quit")
+                    self.running = False
+                    try:
+                        self._close()
+                    except Exception:
+                        pass
+                    break
+                else:
+                    self._log(f"console: unknown command {cmd!r} - try !fakeupgrade, !releasenotes, !joke, say <text>")
+            except Exception as exc:
+                self._log(f"console keeper error: {exc!r}")
+                time.sleep(1)
 
     # ---- the cargo board ---------------------------------------------------
     def _haul_mutation(self, nick: str, badges: str, argument: str) -> bool:
