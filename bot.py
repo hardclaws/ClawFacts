@@ -2616,7 +2616,7 @@ class TwitchBot:
         Also supports !releasenotes, !joke, etc for quick testing.
         """
         import sys
-        self._log("console commands ready: type !fakeupgrade, !releasenotes, !joke, etc")
+        self._log("console commands ready: type !fakeupgrade, !releasenotes, !joke, recap 9h, summary, etc")
         while self.running:
             try:
                 # input() blocks, but this is a daemon thread so shutdown is fine
@@ -2645,6 +2645,9 @@ class TwitchBot:
                 # Fake upgrade is the main one requested
                 if cmd in FAKEUPGRADE_COMMANDS:
                     self._fakeupgrade_command("Hardclaws", "broadcaster/1", arg, login="hardclaws")
+                elif cmd in ("recap", "summary", "digest", "sod", "stateofthe day"):
+                    # Console summary of last N hours - default 9h as requested
+                    self._console_recap(arg)
                 elif cmd in EXTRAS_COMMANDS or cmd in SMK_ALIASES or cmd in FUNFACT_ALIASES:
                     # Run as Hardclaws in chat
                     if cmd in SMK_ALIASES:
@@ -2666,10 +2669,111 @@ class TwitchBot:
                         pass
                     break
                 else:
-                    self._log(f"console: unknown command {cmd!r} - try !fakeupgrade, !releasenotes, !joke, say <text>")
+                    # Try as ask/recap via chat path - e.g. console> ask summary of last 9 hours
+                    if cmd in ("ask",):
+                        self._jobs.put(("Hardclaws", "hardclaws", "broadcaster/1", "ask", arg.strip()[:500]))
+                    else:
+                        self._log(f"console: unknown command {cmd!r} - try !fakeupgrade, !releasenotes, !joke, recap 9h, summary, say <text>")
+
             except Exception as exc:
                 self._log(f"console keeper error: {exc!r}")
                 time.sleep(1)
+
+    def _console_recap(self, arg: str) -> None:
+        """Create a summary of last N hours from console - prints to console and posts to chat."""
+        import time
+        import chatai
+        # Parse window from arg, default 9 hours
+        text_arg = (arg or "").strip()
+        secs = 9 * 3600
+        label = "last 9 hours"
+        if text_arg:
+            # Try to parse via recap_window - e.g. "9h", "9 hours", "last 9 hours", "today", "last 24 hours"
+            probe = text_arg
+            if not any(w in probe.lower() for w in ("last", "today", "so far", "hour", "day", "week")):
+                # bare number like "9" or "9h" -> make it "last 9 hours"
+                import re
+                m = re.search(r"(\d+)", probe)
+                if m:
+                    num = m.group(1)
+                    if "d" in probe.lower():
+                        probe = f"last {num} days"
+                    elif "m" in probe.lower() and "h" not in probe.lower():
+                        # minutes? treat as hours anyway
+                        probe = f"last {num} hours"
+                    else:
+                        probe = f"last {num} hours"
+            window = chatai.recap_window(probe) or chatai.recap_window(f"last {probe}") or chatai.recap_window(f"summary of {probe} of chat")
+            if window:
+                secs, label = window
+            else:
+                # Fallback: try to extract number
+                import re
+                m = re.search(r"(\d+)\s*(h|hour|d|day)", text_arg.lower())
+                if m:
+                    num = int(m.group(1))
+                    unit = m.group(2)
+                    if unit.startswith("d"):
+                        secs = num * 86400
+                        label = f"last {num} days" if num != 1 else "last day"
+                    else:
+                        secs = num * 3600
+                        label = f"last {num} hours" if num != 1 else "last hour"
+        since = time.time() - secs
+        self._log(f"console recap requested: {label} ({secs/3600:.1f}h), since {time.strftime('%Y-%m-%d %H:%M', time.localtime(since))}")
+        if not self._memory.ok:
+            self._log("console recap: memory db unavailable")
+            self._say(f"Console recap {label}: memory db unavailable")
+            return
+        spine = self._memory.summaries(since, limit=96)
+        history = self._memory.digest(since, limit=80, skip=(self.nick,))
+        # Also get transcript count
+        try:
+            transcript_rows = self._memory.transcript(since, limit=5000)
+        except Exception:
+            transcript_rows = []
+        self._log(f"console recap {label}: {len(spine)} slices, {len(history)} digest lines, {len(transcript_rows)} transcript lines")
+        if not spine and not history and not transcript_rows:
+            msg = f"No chat logged in {label} - nothing to summarize yet"
+            self._log(msg)
+            print(msg)
+            self._say(msg)
+            return
+        # Print spine to console (the distilled slices)
+        print(f"\n=== Recap {label} ===")
+        print(f"Since: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(since))} | Slices: {len(spine)} | Lines: {len(transcript_rows)}")
+        if spine:
+            print("\n--- Distilled slices (memory) ---")
+            for a, b, body in spine:
+                print(f"[{time.strftime('%a %H:%M', time.localtime(a))}-{time.strftime('%H:%M', time.localtime(b))}] {body}")
+        if history:
+            print(f"\n--- Verbatim sample ({len(history)} lines) ---")
+            for ts, who, line in history[-30:]:
+                print(f"[{time.strftime('%a %H:%M', time.localtime(ts))}] {who}: {line}")
+        # Now generate LLM summary if configured
+        try:
+            import llm as llm_mod
+            if llm_mod.any_configured(self._opts):
+                snapshot = self._chat_ai_snapshot()
+                # Use the same prompt as !ask recap but allow longer output via direct call
+                q = f"Give us a detailed summary of {label} of chat - what happened, who said what, any stories, events, or interesting moments"
+                line = self._chat_ai_line(snapshot, "Hardclaws", q)
+                if line:
+                    print(f"\n--- LLM Summary ---")
+                    print(line)
+                    self._log(f"console recap LLM: {line[:200]!r}")
+                    # Post to chat in chunks if needed
+                    self._say(f"Recap {label} | {line}"[:450])
+                    # Also post spine count
+                    self._say(f"Recap {label}: {len(spine)} slices covering {len(transcript_rows)} lines since {time.strftime('%H:%M', time.localtime(since))}")
+                else:
+                    self._log("console recap: LLM returned nothing")
+            else:
+                self._log("console recap: no LLM configured, printed spine only")
+                self._say(f"Recap {label}: {len(spine)} slices, {len(transcript_rows)} lines - see console for details")
+        except Exception as exc:
+            self._log(f"console recap LLM error: {exc!r}")
+            self._say(f"Recap {label}: {len(spine)} slices, {len(transcript_rows)} lines - see console (LLM error)")
 
     # ---- the cargo board ---------------------------------------------------
     def _haul_mutation(self, nick: str, badges: str, argument: str) -> bool:
