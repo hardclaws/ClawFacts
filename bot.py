@@ -2558,6 +2558,8 @@ class TwitchBot:
         # six equal blurbs.
         budget = memory_mod.summary_budget(len(rows))
         want = 2 if len(rows) < 15 else (4 if len(rows) < 50 else 8)
+        is_local_sum = self._summary_is_local()
+        min_tokens = 600 if is_local_sum else 200
         try:
             raw = llm_mod.summarize_stream(
                 "You maintain the running log of a live stream. Factual, "
@@ -2565,7 +2567,7 @@ class TwitchBot:
                 chatai.stream_summary_prompt(
                     rows[-cap:], previous[0][2] if previous else "",
                     sentences=want),
-                self._opts, max_tokens=max(200, budget // 3),
+                self._opts, max_tokens=max(min_tokens, budget // 2 if is_local_sum else budget // 3),
                 timeout=max(30.0, float(
                     self.cfg.get("memory_summary_timeout", 240))))
         except Exception as exc:
@@ -3736,9 +3738,21 @@ class TwitchBot:
                     history.append("[%s] %s: %s" % (
                         time.strftime("%a %H:%M", time.localtime(ts)),
                         who, flat))
+            # Scale with window and model: a week of 47 slices is 25k chars and blew
+            # gpt-oss-20b's 8k TPM limit (10233 tokens requested). Truncate to fit.
+            try:
+                is_local = llm_mod._is_local((self._opts.get("llm_base_url") or "").strip())
+            except Exception:
+                is_local = False
+            max_spine = 12 if is_local else 20
+            max_hist = 12 if is_local else 20
+            if len(spine) > max_spine:
+                spine = [spine[0]] + spine[-(max_spine-1):] if max_spine > 1 else spine[-max_spine:]
+            if len(history) > max_hist:
+                history = history[-max_hist:]
             self._log(f"recap over {window_label}: {len(spine)} logged "
                       f"slices covering the whole period, plus "
-                      f"{len(history)} verbatim lines"
+                      f"{len(history)} verbatim lines (truncated from full period for { 'local' if is_local else 'hosted'} model)"
                       + (f" (who_topic={who_topic!r})" if who_topic else ""))
             if not spine and not history:
                 self._log(f"nothing logged in {window_label} - the recap "
@@ -3767,8 +3781,18 @@ class TwitchBot:
                     history.append("[%s] %s: %s" % (
                         time.strftime("%a %H:%M", time.localtime(ts)),
                         who, flat))
+            try:
+                is_local_who = llm_mod._is_local((self._opts.get("llm_base_url") or "").strip())
+            except Exception:
+                is_local_who = False
+            max_spine_who = 12 if is_local_who else 20
+            max_hist_who = 12 if is_local_who else 20
+            if len(spine) > max_spine_who:
+                spine = [spine[0]] + spine[-(max_spine_who-1):] if max_spine_who > 1 else spine[-max_spine_who:]
+            if len(history) > max_hist_who:
+                history = history[-max_hist_who:]
             self._log(f"who search for {who_topic!r} over {window_label}: "
-                      f"{len(spine)} slices, {len(history)} matching lines")
+                      f"{len(spine)} slices, {len(history)} matching lines (truncated)")
         # A local model on CPU reads the whole prompt before writing a
         # word - that read, not the generation, is what blew a 20s
         # timeout on a warm model. Send it a smaller room and fewer

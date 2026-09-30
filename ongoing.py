@@ -1177,8 +1177,14 @@ class Ongoing:
         if not a:
             tallies = self._recent_tallies(now)
             if tallies:
-                return "No game running. Counting: " + "; ".join(
-                    "%s: %d" % (v["label"], v["count"]) for _, v in tallies) + "."
+                parts = []
+                for _, v in tallies:
+                    lbl = v.get("label", "")
+                    if "dirty" in lbl.lower() and "lepage" in lbl.lower():
+                        parts.append("%s: %d (spotted hiding, not harmed)" % (lbl, v.get("count", 0)))
+                    else:
+                        parts.append("%s: %d" % (lbl, v.get("count", 0)))
+                return "No game running. Counting: " + "; ".join(parts) + "."
             return NOTHING_RUNNING_LINE
         if ctl.repeat and a.get("open") and a.get("question"):
             return "Round %d: %s" % (a["open"], a["question"])
@@ -1225,8 +1231,14 @@ class Ongoing:
                 recent = self._recent_tallies(now) or list(self.tallies.items())
                 if not recent:
                     return "I'm not keeping count of anything right now."
-                return "; ".join("%s: %d" % (t["label"], t["count"])
-                                 for _, t in recent) + " so far."
+                parts = []
+                for _, t in recent:
+                    lbl = t.get("label", "")
+                    if "dirty" in lbl.lower() and "lepage" in lbl.lower():
+                        parts.append("%s: %d (spotted hiding, not harmed)" % (lbl, t.get("count", 0)))
+                    else:
+                        parts.append("%s: %d" % (lbl, t.get("count", 0)))
+                return "; ".join(parts) + " so far."
             if not v:
                 return "I'm not keeping count of that."
             if ctl.kind == "tally_add":
@@ -1259,11 +1271,15 @@ class Ongoing:
     @staticmethod
     def _tally_report(v: dict, now: float) -> str:
         since = _ago(now - float(v.get("since") or now))
+        label = v.get("label", "")
+        extra = ""
+        if "dirty" in label.lower() and "lepage" in label.lower():
+            extra = " - that's police spotted hiding in bushes, not harmed, just doing the dirty"
         if v["count"] == 0:
-            return "%s: 0 so far (counting since %s, none yet)." % (v["label"], since)
+            return "%s: 0 so far (counting since %s, none yet)%s." % (label, since, extra)
         last = _ago(now - float(v.get("last") or v.get("updated") or now))
-        return "%s: %d so far (counting since %s, last one %s)." % (
-            v["label"], v["count"], since, last)
+        return "%s: %d so far (counting since %s, last one %s)%s." % (
+            label, v["count"], since, last, extra)
 
     # -- what the model sees
     def prompt_lines(self, now: float = None, local: bool = False) -> list:
@@ -1287,10 +1303,16 @@ class Ongoing:
                     out.append("  earlier - " + entry)
             tallies = self._recent_tallies(now)
             if tallies:
+                parts = []
+                for _, v in tallies[:6]:
+                    lbl = v.get("label", "")
+                    cnt = v.get("count", 0)
+                    if "dirty" in lbl.lower() and "lepage" in lbl.lower():
+                        parts.append("%s: %d (police spotted hiding in bushes, not harmed - if we hid there we'd be creeps, but cops it's cool)" % (lbl, cnt))
+                    else:
+                        parts.append("%s: %d" % (lbl, cnt))
                 out.append("- Counts you are keeping (exact - quote them, never "
-                           "adjust them): " + "; ".join(
-                               "%s: %d" % (v["label"], v["count"])
-                               for _, v in tallies[:6]))
+                           "adjust them): " + "; ".join(parts))
             return out
 
     def summary(self, now: float = None) -> dict:
