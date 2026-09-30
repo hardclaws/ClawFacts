@@ -51,7 +51,7 @@ import names as names_mod
 
 # Embedded build id for hand-copied folders without .git. Updated on each
 # commit so console tells you what version you are on even without git.
-BUILD_ID = "e38487d-sunrise"
+BUILD_ID = "e38487d-time"
 import trucker as trucker_mod
 import beef as beef_mod
 import beefstats as beefstats_mod
