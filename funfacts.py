@@ -3495,7 +3495,7 @@ _NOT_WEATHER = re.compile(
     r"fever|thermometer|chicken|turkey|roast|steak|bread|bake|baking|"
     r"meat|candy|fudge|yeast)\b", re.IGNORECASE)
 _IN_PLACE = re.compile(
-    r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
+    r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
 # Trailing time phrases that are not part of the place: "in California at the moment"
 # should be "California", not "California at the moment" or "the moment".
 _TIME_TAIL = re.compile(
@@ -3505,7 +3505,7 @@ _TIME_TAIL = re.compile(
     r"right\s+at\s+the\s+moment)\s*$", re.IGNORECASE)
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
 _SOLAR_PLACE = re.compile(
-    r"\b(?:in|for|at)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
+    r"\b(?:in|for|at|near)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
 
 
 def _clock_12h(value: str) -> str | None:
@@ -3604,7 +3604,7 @@ def _weather_header(question: str):
         low = cleaned.lower()
         w_idx = low.find("weather")
         search_area = cleaned[w_idx:] if w_idx != -1 else cleaned
-        m2 = _re.search(r"\b(?:in|for|at)\s+([A-Za-z][A-Za-z .,'-]{1,60})", search_area, flags=_re.I)
+        m2 = _re.search(r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z .,'-]{1,60})", search_area, flags=_re.I)
         if m2:
             cand = " ".join(m2.group(1).split()).strip()
             cand = _re.split(r"\s+and\s+", cand, flags=_re.I)[0].strip()
@@ -4542,10 +4542,28 @@ def _weather_answer(question: str, options: dict = None):
     measured current conditions or an honest temporary failure, and can never
     fall through to Wikipedia/search snippets or an LLM paraphrase.
     """
+    # "weather warnings" is alerts, not current conditions - let alerts handle it
+    # unless it's explicitly "weather currently in X and any warnings" which is combined in get_funfact
+    low_q = (question or "").lower()
+    if _ALERTS_Q.search(question) and any(w in low_q for w in ("warning", "alert", "watch", "advisory")):
+        # If query is primarily warnings (e.g. "any weather warnings near X"), return False so alerts path handles
+        # Combined queries like "weather currently in X and any warnings" are handled by combined path in get_funfact,
+        # but we need place to be parsed for weather part. If place parsing fails, still let alerts handle.
+        if "currently" not in low_q and "current" not in low_q:
+            # Pure warnings query - not weather conditions
+            return False
+        # For combined, check if place can be parsed - if not, let alerts handle to avoid "I need a city"
+        # e.g. "any weather warnings near Lexington, NE" has "near" not "in", weather header fails
+        place_tmp, _ = _weather_header(question)
+        if not place_tmp:
+            return False
     place, kind = _weather_header(question)
     if kind is None:
         return False
     if not place:
+        # If it's actually an alerts query with "near", don't say "need a city", let alerts handle
+        if _ALERTS_Q.search(question):
+            return False
         return {"place": "requested place", "kind": "Weather",
                 "facts": ["I need a city or town to check the weather."]}
 
