@@ -3716,17 +3716,36 @@ class TwitchBot:
             names = tuple(n.lower() for n in self._chat_ai_names if n)
             ask = " ".join((text or "").split()).lower()
             since = time.time() - secs
+            # Scale with window and model BEFORE fetching so digest gets enough lines
+            try:
+                is_local = llm_mod._is_local((self._opts.get("llm_base_url") or "").strip())
+            except Exception:
+                is_local = False
+            if secs <= 86400:
+                max_spine = 20 if is_local else 30
+                max_hist = 20 if is_local else 30
+            elif secs <= 3*86400:
+                max_spine = 25 if is_local else 40
+                max_hist = 25 if is_local else 40
+            elif secs <= 7*86400:
+                max_spine = 30 if is_local else 50
+                max_hist = 30 if is_local else 40
+            else:
+                max_spine = 30 if is_local else 60
+                max_hist = 30 if is_local else 50
+            # Fetch spine - full period, will even-sample later
             spine = [
                 "[%s-%s] %s" % (
                     time.strftime("%a %H:%M", time.localtime(a)),
                     time.strftime("%H:%M", time.localtime(b)), body)
                 for a, b, body in self._memory.summaries(since)]
             history = []
+            # Digest limit scales with window so week gets more than 40 lines
+            digest_limit = max(40, max_hist * 2)
             # If the question is "who spoke about X", search for X specifically
-            # instead of just a recency-weighted sample, so the model can attribute.
             if who_topic and hasattr(self._memory, "search"):
                 for ts, who, line in self._memory.search(
-                        who_topic, since, limit=20, skip=(self.nick,)):
+                        who_topic, since, limit=digest_limit, skip=(self.nick,)):
                     flat = " ".join(line.split())
                     if flat.lower() == ask or flat.lower().startswith(names):
                         continue
@@ -3735,10 +3754,9 @@ class TwitchBot:
                     history.append("[%s] %s: %s" % (
                         time.strftime("%a %H:%M", time.localtime(ts)),
                         who, flat))
-                # If search found nothing, fall back to digest so we don't go empty
                 if not history:
                     for ts, who, line in self._memory.digest(
-                            time.time() - secs, skip=(self.nick,)):
+                            time.time() - secs, limit=digest_limit, skip=(self.nick,)):
                         flat = " ".join(line.split())
                         if flat.lower() == ask or flat.lower().startswith(names):
                             continue
@@ -3749,13 +3767,8 @@ class TwitchBot:
                             who, flat))
             else:
                 for ts, who, line in self._memory.digest(
-                        time.time() - secs, skip=(self.nick,)):
+                        time.time() - secs, limit=digest_limit, skip=(self.nick,)):
                     flat = " ".join(line.split())
-                    # The recap request is not one of the week's events, and
-                    # neither is anyone else's ask of the bot. Left in, the
-                    # model was handed its own question as a thing that
-                    # happened - live-fire it appeared as the last entry.
-                    # Also filter any line that mentions the bot.
                     if flat.lower() == ask or flat.lower().startswith(names):
                         continue
                     if chatai.mention_kind(flat, self._chat_ai_names) is not None:
@@ -3763,14 +3776,6 @@ class TwitchBot:
                     history.append("[%s] %s: %s" % (
                         time.strftime("%a %H:%M", time.localtime(ts)),
                         who, flat))
-            # Scale with window and model: a week of 47 slices is 25k chars and blew
-            # gpt-oss-20b's 8k TPM limit (10233 tokens requested). Truncate to fit.
-            try:
-                is_local = llm_mod._is_local((self._opts.get("llm_base_url") or "").strip())
-            except Exception:
-                is_local = False
-            max_spine = 12 if is_local else 20
-            max_hist = 12 if is_local else 20
             # Even sampling across period so week recap doesn't just show last hour
             # Previously kept first + most recent 19, losing middle 27 slices of a 47-slice week.
             if len(spine) > max_spine:
@@ -3824,8 +3829,19 @@ class TwitchBot:
                 is_local_who = llm_mod._is_local((self._opts.get("llm_base_url") or "").strip())
             except Exception:
                 is_local_who = False
-            max_spine_who = 12 if is_local_who else 20
-            max_hist_who = 12 if is_local_who else 20
+            # Same scaling for who searches
+            if secs <= 86400:
+                max_spine_who = 20 if is_local_who else 30
+                max_hist_who = 20 if is_local_who else 30
+            elif secs <= 3*86400:
+                max_spine_who = 25 if is_local_who else 40
+                max_hist_who = 25 if is_local_who else 40
+            elif secs <= 7*86400:
+                max_spine_who = 30 if is_local_who else 50
+                max_hist_who = 30 if is_local_who else 40
+            else:
+                max_spine_who = 30 if is_local_who else 60
+                max_hist_who = 30 if is_local_who else 50
             if len(spine) > max_spine_who:
                 step = len(spine) / max_spine_who
                 sampled = []

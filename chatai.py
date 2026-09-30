@@ -458,11 +458,19 @@ def user_prompt(lines: list, nick: str, text: str,
         out.extend(f"- {h}" for h in history)
         out.append("Summarize what actually happened in these lines for "
                    f"{window_label or 'the period'} - who was there and what "
-                   "was said or done, with names. If you have at least some "
-                   "lines, give a recap of what you have, even if it is not "
-                   "a full period. Only say you have no recap if you have "
-                   "zero lines. Never invent an event, a count, a place or a name "
-                   "not in these lines.")
+                   "was said or done, with names, IN YOUR PERSONA VOICE from "
+                   "the system prompt. One line, max 450 chars, but grounded and "
+                   "accurate. If you have at least some lines, give a recap of what "
+                   "you have, even if it is not a full period. Only say you have no "
+                   "recap if you have zero lines. Use ONLY names, events, places that "
+                   "appear in the RUNNING LOG or WHAT ACTUALLY HAPPENED sections above. "
+                   "If it is not listed there, do not include it. Do not add "
+                   "ban drama, route queries, playlist, counts, or any event "
+                   "not in those lines. Quote real chat: e.g. 'chasegpt asked "
+                   "about truck ownership pay', 'BobbyG1G shared Big Springs depot', "
+                   "'Darkest_Night_Wolf coworker 10 vehicles', 'BikeBEAST GPU 4000$'. "
+                   "Never invent an event, a count, a place or a name not in these lines. "
+                   "Write it as the persona would say it, not as a dry list.")
 
     if not summaries and not history and window_label:
         # No spine and no verbatim lines for the requested window: say so
