@@ -4912,11 +4912,12 @@ class TwitchBot:
                 except Exception:
                     spine_cnt, trans_cnt = 20, 200
                 est = max(15, min(90, 10 + spine_cnt))  # ~1s per slice + base
-                # Persona-voiced ack: "going through memory, pulling best ofs, ETA"
-                ack_q = (f"Tell {nick} you are going through your memory - {spine_cnt} slices "
-                         f"covering {trans_cnt} lines from {label_h} - pulling the best highlights, "
-                         f"it will take about {est} seconds. In your persona voice, one line, "
-                         f"no recap yet, just the heads up with ETA.")
+                # Persona-voiced ack in natural language - no "slices" jargon
+                ack_q = (f"Tell {nick} you are going through your memory from {label_h} "
+                         f"to pull the best highlights, it will take about {est} seconds. "
+                         f"In your persona voice, one line, natural language people understand - "
+                         f"say chat, memories, logbook, not slices/lines/transcript/database. "
+                         f"No recap yet, just the heads up with ETA.")
                 try:
                     ack_line = self._chat_ai_line(snapshot, nick, ack_q)
                 except Exception:
@@ -4924,7 +4925,7 @@ class TwitchBot:
                 if ack_line and ack_line != chatai.DIRECT_FAILURE_LINE:
                     self._say(self._fit(f"@{nick} ", ack_line))
                 else:
-                    self._say(f"@{nick} Hang on - digging through {spine_cnt} slices from {label_h} to pull the best bits, give me about {est}s")
+                    self._say(f"@{nick} Hang on - digging through {label_h} of chat to pull the best bits, give me about {est}s")
                 # Heavy job in background thread so chat doesn't block
                 def _heavy_recap_job():
                     try:
