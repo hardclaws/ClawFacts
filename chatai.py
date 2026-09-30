@@ -1463,6 +1463,10 @@ def live_data_question(text: str, names=()) -> bool:
             # Single place alerts like "any wildfires near Danbury, CT?" or "fires in California"
             if funfacts._IN_PLACE.search(t) or __import__("re").search(r"\bnear\s+[A-Za-z]", t, __import__("re").I):
                 return True
+            # Alerts on "our route" / "the route" / "current route" - use current route from knowledge.json
+            low = t.lower()
+            if "route" in low:
+                return True
     except AttributeError:
         pass
     # Route map from knowledge.json - live data, no model

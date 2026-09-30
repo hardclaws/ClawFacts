@@ -3734,6 +3734,7 @@ def _alerts_answer(question: str, options: dict = None):
     """Active alerts for a route or place, or False when not an alerts question."""
     if not question or not _ALERTS_Q.search(question):
         return False
+    low = question.lower()
     # Must have route or place
     start, end = _extract_route_places(question)
     places = []
@@ -3751,13 +3752,68 @@ def _alerts_answer(question: str, options: dict = None):
             if len(p) >= 2:
                 places.append(p)
         if not places:
-            # "near Danbury, CT" or "in California"
-            m = re.search(r"\b(?:near|in|for|at)\s+([A-Za-z][A-Za-z ,.'-]{2,50})", cleaned, flags=re.I)
+            # "near Danbury, CT" or "in California" or "on our route" -> also try "on"
+            m = re.search(r"\b(?:near|in|for|at|on)\s+([A-Za-z][A-Za-z ,.'-]{2,50})", cleaned, flags=re.I)
             if m:
                 p = " ".join(m.group(1).split()).strip()
                 p = re.split(r"\s+over\s+the\s+next|\s+are\s+there|\s+is\s+there", p, flags=re.I)[0].strip().rstrip(",.?!")
-                if len(p) >= 2 and p.lower() not in ("the moment", "moment"):
+                if len(p) >= 2 and p.lower() not in ("the moment", "moment", "our route", "the route", "current route"):
                     places.append(p)
+    # If still no places but question is about "our route" / "the route" / "current route", use current route from knowledge.json
+    if not places and "route" in low:
+        # Try to load current route from knowledge.json
+        try:
+            kpath = None
+            if options:
+                kpath = options.get("knowledge_state_path") or options.get("knowledge_path")
+            if not kpath:
+                for cand in ["knowledge.json", "D:\\funfact-bot\\knowledge.json"]:
+                    try:
+                        import os
+                        if os.path.exists(cand):
+                            kpath = cand
+                            break
+                    except Exception:
+                        pass
+            if not kpath:
+                kpath = "knowledge.json"
+            import json as _json
+            with open(kpath, "r", encoding="utf-8") as fh:
+                data = _json.load(fh)
+            raw_facts = []
+            if isinstance(data, dict):
+                raw_facts = data.get("facts") or data.get("knowledge") or []
+            elif isinstance(data, list):
+                raw_facts = data
+            route_texts = []
+            for rf in raw_facts:
+                if isinstance(rf, dict):
+                    txt = rf.get("fact") or rf.get("text") or ""
+                else:
+                    txt = str(rf)
+                if "route" in txt.lower() and "http" in txt.lower():
+                    route_texts.append(txt)
+            # Use most recent route fact
+            if route_texts:
+                rt = route_texts[-1]
+                rs, re_ = _extract_route_places(rt)
+                if rs:
+                    places.append(rs)
+                if re_:
+                    places.append(re_)
+                # Fallback regex for "X to Y" in route text
+                if not places:
+                    import re as _re
+                    m = _re.search(r"([A-Za-z][A-Za-z ,.'-]{2,30})\s+to\s+([A-Za-z][A-Za-z ,.'-]{2,30})", rt, flags=re.I)
+                    if m:
+                        places.append(m.group(1).strip())
+                        places.append(m.group(2).split("http")[0].strip())
+        except Exception as exc:
+            print(f"[funfacts] alerts: could not load current route from knowledge: {exc!r}", flush=True)
+    # Final fallback: if still no places but it's an alerts+route question, use a default corridor (Davis to Danbury) so we don't return route link
+    if not places and "route" in low:
+        # Default to current known corridor if knowledge.json missing
+        places = ["Davis, CA", "Danbury, CT"]
     if not places:
         return False
     # Geocode each place and fetch NWS alerts
@@ -3810,6 +3866,9 @@ def _route_map_answer(question: str, options: dict = None):
     if not question:
         return False
     low = question.lower()
+    # If it's an alerts question (floods, fires, closures), let _alerts_answer handle it, not route link
+    if _ALERTS_Q.search(low):
+        return False
     # Trigger for any route question, not just map: "what is the route fresno to danbury"
     if "route" not in low and "map" not in low:
         return False
