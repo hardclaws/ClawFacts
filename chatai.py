@@ -165,12 +165,15 @@ _RECAP_SO_FAR = re.compile(
     r"today'?s?\s+stream|"
     r"recap|"
     r"summary\s+so\s+far|"
+    r"highlights?\s+(?:for\s+)?today|"
+    r"today'?s?\s+highlights?|"
+    r"highlights?\s+of\s+(?:today|the\s+stream|this\s+stream)|"
     r"so\s+far"
     r")\b",
     re.IGNORECASE)
 # More precise: chat/stream history questions, not just "today"
 _RECAP_CHAT = re.compile(
-    r"\b(?:chat|stream|recap|summary)\b",
+    r"\b(?:chat|stream|recap|summary|highlights?)\b",
     re.IGNORECASE)
 
 #: "who gave a story about a 5k run", "who spoke about X", "who mentioned X"

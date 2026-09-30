@@ -4245,7 +4245,7 @@ def news_question(question: str) -> bool:
     low = q.lower()
     if "chat" in low or "in chat" in low:
         return False
-    if re.search(r"\b(?:stream|recap|summary)\b.*\b(?:today|so\s+far)\b|\b(?:today|so\s+far)\b.*\b(?:stream|recap|summary)\b", low):
+    if re.search(r"\b(?:stream|recap|summary|highlights?)\b.*\b(?:today|so\s+far)\b|\b(?:today|so\s+far)\b.*\b(?:stream|recap|summary|highlights?)\b", low):
         return False
     if _TOP_NEWS_Q.search(q):
         # 'whats the news' / 'headlines?' / 'where the news' - the
