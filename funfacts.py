@@ -3506,6 +3506,75 @@ _TIME_TAIL = re.compile(
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
 _SOLAR_PLACE = re.compile(
     r"\b(?:in|for|at|near|outside of|outside|just outside of)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
+
+_TIME_Q = re.compile(r"\b(?:what(?:'s|s| is)?\s+the\s+time|current\s+time|time\s+in|time\s+is\s+it\s+in)\b", re.IGNORECASE)
+_TIME_PLACE = re.compile(r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Za-z ]{2,30})?)\s*[?!.]*$", re.IGNORECASE)
+
+def _time_answer(question: str):
+    """Current time in a place, via Open-Meteo timezone, or False when not a time query."""
+    if not question or not _TIME_Q.search(question):
+        return False
+    if _SOLAR_Q.search(question):
+        return False
+    cleaned = (question or "").strip()
+    place = None
+    m = _TIME_PLACE.search(cleaned)
+    if m:
+        place = m.group(1).strip(" ,.?!")
+    if not place:
+        m2 = _IN_PLACE.search(cleaned)
+        if m2:
+            place = m2.group(1).strip(" ,.?!")
+    if not place:
+        import re as _re
+        m3 = _re.search(r"\b(?:in|near|at)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Za-z ]{2,30})?)", cleaned, flags=_re.I)
+        if m3:
+            place = m3.group(1).strip(" ,.?!")
+    if not place or len(place) < 3:
+        return {"place": "requested place", "kind": "Time", "facts": ["I need a city or town to check the time."]}
+    geo = _osm_geocode(place) or _open_meteo_geocode(place)
+    label = place
+    if geo:
+        label = ", ".join(x for x in (geo.get("name"), geo.get("state") or geo.get("country")) if x) or place
+    if not geo:
+        return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
+    try:
+        data = _http_get_json(
+            OPEN_METEO_API,
+            {"latitude": geo["lat"], "longitude": geo["lon"], "current": "temperature_2m", "timezone": "auto"},
+            timeout=10)
+        current = data.get("current") if isinstance(data, dict) else None
+        tz = data.get("timezone") if isinstance(data, dict) else None
+        time_str = None
+        if isinstance(current, dict):
+            time_str = current.get("time")
+        if not time_str:
+            try:
+                if tz:
+                    td = _http_get_json(f"http://worldtimeapi.org/api/timezone/{tz}", {}, timeout=8)
+                    time_str = td.get("datetime") if isinstance(td, dict) else None
+            except Exception:
+                time_str = None
+        if not time_str:
+            import datetime as _dt
+            time_str = _dt.datetime.utcnow().isoformat()
+        clock = _clock_12h(time_str)
+        if not clock:
+            try:
+                import re as _re
+                m = _re.search(r"T(\d{2}):(\d{2})", time_str)
+                if m:
+                    h, mi = int(m.group(1)), int(m.group(2))
+                    clock = f"{(h % 12) or 12}:{mi:02d} {'AM' if h < 12 else 'PM'}"
+            except Exception:
+                clock = None
+        if not clock:
+            clock = time_str
+        return {"place": label, "kind": "Time", "_ttl": 60, "facts": [f"{clock} in {label}."]}
+    except Exception as exc:
+        print(f"[funfacts] time lookup failed for {place}: {exc!r}", flush=True)
+        return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
+
 _FOOD_Q = re.compile(
     r"\b(?:food|foods|eat|eats|eating|drink|drinks|drinking|beverage|beverages|"
     r"brew|brews|brewery|breweries|diner|restaurant|restaurants|cuisine|dish|dishes|"
@@ -5169,6 +5238,12 @@ def get_funfact(location: str, options=None):
         else:
             solar = _solar_answer(location.strip())
             result = None if solar is False else solar
+        if result is None:
+            try:
+                time_ans = _time_answer(location.strip())
+                result = None if time_ans is False else time_ans
+            except Exception:
+                result = None
         if result is None:
             alerts = _alerts_answer(location.strip(), opts)
             result = None if alerts is False else alerts

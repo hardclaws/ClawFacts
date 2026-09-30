@@ -1487,6 +1487,13 @@ def live_data_question(text: str, names=()) -> bool:
             return True
     except AttributeError:
         pass
+    # Current time in a place - live data, no model
+    try:
+        if funfacts._TIME_Q.search(t):
+            if funfacts._TIME_PLACE.search(t) or funfacts._IN_PLACE.search(t) or __import__("re").search(r"\b(?:near|in|for|at)\s+[A-Za-z]", t, __import__("re").I):
+                return True
+    except AttributeError:
+        pass
     if not funfacts._SOLAR_Q.search(t):
         return False
     # Try to find place - handle "just outside of Seward, NE" in middle of message
