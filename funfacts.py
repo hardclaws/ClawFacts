@@ -3505,7 +3505,7 @@ _TIME_TAIL = re.compile(
     r"right\s+at\s+the\s+moment)\s*$", re.IGNORECASE)
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
 _SOLAR_PLACE = re.compile(
-    r"\b(?:in|for|at|near)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
+    r"\b(?:in|for|at|near|outside of|outside|just outside of)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
 _FOOD_Q = re.compile(
     r"\b(?:food|foods|eat|eats|eating|drink|drinks|drinking|beverage|beverages|"
     r"brew|brews|brewery|breweries|diner|restaurant|restaurants|cuisine|dish|dishes|"
@@ -3586,13 +3586,38 @@ def _solar_answer(question: str):
     if not event_match:
         return False
     event = event_match.group(1).lower()
+    place = ""
+    # Try to extract place - handle "just outside of Seward, NE" in middle of message
+    # First try _SOLAR_PLACE at end, then _IN_PLACE anywhere, then outside of pattern
     place_match = _SOLAR_PLACE.search((question or "").strip())
+    if place_match:
+        place = place_match.group(1).strip(" ,.?!)") 
+    if not place:
+        # Try _IN_PLACE anywhere (not just $)
+        m = _IN_PLACE.search((question or "").strip())
+        if m:
+            place = m.group(1).strip(" ,.?!)") 
+    if not place:
+        # Try "outside of X, NE" or "just outside of X" anywhere
+        import re as _re2
+        m2 = _re2.search(r"\b(?:outside of|outside|just outside of)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", question or "", flags=_re2.I)
+        if m2:
+            place = m2.group(1).strip(" ,.?!)") 
+    if not place:
+        # Try generic "in|near|at X, NE" anywhere, not just end
+        import re as _re3
+        m3 = _re3.search(r"\b(?:in|near|at|for)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", question or "", flags=_re3.I)
+        if m3:
+            cand = m3.group(1).strip(" ,.?!)") 
+            # Trim at " what", " it is", etc
+            cand = _re3.split(r"\s+(?:what|it is|it\b|we are|we\b)\b", cand, flags=_re3.I)[0].strip()
+            if len(cand) >= 3:
+                place = cand
     # “Sunset, Louisiana” is a place lookup, not an astronomy question.
-    if not place_match and not re.search(
+    if not place and not re.search(
             r"\b(?:what time|when|today|tomorrow|expect(?:ing|ed)|rise|set)\b|\?",
             question or "", re.IGNORECASE):
         return False
-    place = place_match.group(1).strip(" ,.?!)") if place_match else ""
     # Accept both “sunrise tomorrow in X” and “sunrise in X tomorrow”.
     day = "tomorrow" if re.search(r"\btomorrow\b", question or "",
                                    re.IGNORECASE) else "today"

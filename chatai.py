@@ -1489,7 +1489,17 @@ def live_data_question(text: str, names=()) -> bool:
         pass
     if not funfacts._SOLAR_Q.search(t):
         return False
+    # Try to find place - handle "just outside of Seward, NE" in middle of message
     place = funfacts._SOLAR_PLACE.search(t)
+    if not place:
+        # Try _IN_PLACE anywhere or outside pattern
+        import re as _re
+        if funfacts._IN_PLACE.search(t):
+            place = True
+        elif _re.search(r"\b(?:outside of|outside|just outside of)\s+[A-Za-z]", t, _re.I):
+            place = True
+        elif _re.search(r"\b(?:near|in|for|at)\s+[A-Za-z][A-Za-z .,'-]{2,40}", t, _re.I):
+            place = True
     return bool(place) and not _OPINION_Q.match(t)
 
 
