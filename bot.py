@@ -3689,6 +3689,21 @@ class TwitchBot:
         _is_recap_for_prompt = bool(chatai.recap_window(text))
         if _is_recap_for_prompt:
             going_on = []
+        # Ongoing counts/game must not leak into factual place/food answers
+        # Live-fire: "passing through Willow Island, NE they must have some strange food" got "eight Dirty Lepages, still lurking in bushes"
+        # because ongoing was included for a factual query. Only keep ongoing when question is about counts/game/recap/who.
+        else:
+            low_ongoing = (text or "").lower()
+            is_about_ongoing = any(w in low_ongoing for w in ("dirty", "lepage", "count", "tally", "score", "beef", "game", "quiz", "riddle", "wyr", "would you rather"))
+            is_factual_place = any(w in low_ongoing for w in ("food", "beverage", "speciality", "specialty", "eat", "drink", "brew", "diner", "restaurant"))
+            # If it's a place/food question, clear ongoing
+            if is_factual_place or chatai.factual_question(text, self._chat_ai_names) or chatai.knowledge_question(text, self._chat_ai_names):
+                going_on = []
+            elif not (is_about_ongoing or chatai.who_spoke_about(text) or task):
+                # For general chat not about ongoing, don't include counts unless explicitly asked
+                # Keep game status if there's an active game though? No, only if asked
+                if not self._ongoing.activity:
+                    going_on = []
         speakers = [n for n, _ in prompt_lines[-6:]] + [nick]
         # ...and whoever the line itself is about: a recall question
         # names its subject ('when did @TruckingWithDoc last stop'),
@@ -4889,6 +4904,14 @@ class TwitchBot:
         if chatai.factual_question(q, self._chat_ai_names) \
                 and self._answer_factual(nick, q):
             return
+        # Place + food/beverage queries should go to fact engine first, not chat AI with counts
+        # e.g. "passing through Willow Island, NE they must have some strange food or beverages"
+        low_q = q.lower()
+        if any(w in low_q for w in ("food", "beverage", "brew", "speciality", "specialty", "eat", "diner", "drink", "cuisine", "restaurant", "dish")):
+            # Looks like a place query if it has ", NE" or state or town name
+            if "," in q or " ne" in low_q or " nebraska" in low_q or " willow island" in low_q or " brule" in low_q:
+                if self._answer_factual(nick, q):
+                    return
         # '!ask sing me a song' is the same request as saying it to the
         # bot: a piece over several lines, never a one-line reply about it.
         if chatai.performance_request(q, self._chat_ai_names) \
