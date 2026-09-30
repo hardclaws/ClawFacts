@@ -3648,7 +3648,7 @@ def _weather_header(question: str):
 NWS_ALERTS_API = "https://api.weather.gov/alerts/active"
 _ALERTS_Q = re.compile(
     r"\b(?:wild\s*fires?|wildfires?|fires?|floods?|flooding|road\s*closures?|closures?|"
-    r"alerts?|hazards?|red\s*flag|evacuation)\b", re.IGNORECASE)
+    r"alerts?|warnings?|watches?|advisories?|hazards?|red\s*flag|evacuation)\b", re.IGNORECASE)
 _ROUTE_RE = re.compile(
     r"\bfrom\s+([A-Za-z][A-Za-z0-9 ,.'-]{2,50}?)\s+to\s+([A-Za-z][A-Za-z0-9 ,.'-]{2,50})",
     re.IGNORECASE)
@@ -3810,9 +3810,10 @@ def _alerts_answer(question: str, options: dict = None):
                         places.append(m.group(2).split("http")[0].strip())
         except Exception as exc:
             print(f"[funfacts] alerts: could not load current route from knowledge: {exc!r}", flush=True)
-    # Final fallback: if still no places but it's an alerts+route question, use a default corridor (Davis to Danbury) so we don't return route link
-    if not places and "route" in low:
-        # Default to current known corridor if knowledge.json missing
+    # Final fallback: if still no places but it's an alerts question, use current route or default corridor
+    # so "any weather warnings?" gives current route alerts, not False -> chat AI "no real-time data"
+    if not places:
+        # Default to current known corridor if knowledge.json missing or no place given
         places = ["Davis, CA", "Danbury, CT"]
     if not places:
         return False
@@ -5058,6 +5059,17 @@ def get_funfact(location: str, options=None):
         weather = _weather_answer(location.strip(), opts)
         if weather is not False:
             result = weather
+            # If query also asks for warnings/alerts heading east, combine alerts
+            if _ALERTS_Q.search(location):
+                try:
+                    alerts_combined = _alerts_answer(location.strip(), opts)
+                    if alerts_combined is not False and alerts_combined:
+                        # Merge weather + alerts facts
+                        combined_facts = list(result.get("facts") or [])
+                        combined_facts += list(alerts_combined.get("facts") or [])
+                        result = dict(result, facts=combined_facts)
+                except Exception:
+                    pass
         else:
             solar = _solar_answer(location.strip())
             result = None if solar is False else solar
