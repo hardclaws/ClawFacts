@@ -26,6 +26,195 @@ def _fake_urlopen(req, timeout=60):
     return io.BytesIO(json.dumps(FAKE_BODY).encode("utf-8"))
 
 
+def test_the_running_log_prefers_the_local_model():
+    """The stream's running log is written by summarize_stream, not by
+    chat_reply, and the difference is the point.
+
+    chat_reply is capped at 30s on purpose: a chime that lands a minute
+    after the moment it was for is worse than silence. A running log has
+    no deadline - nobody is waiting - so it gets a budget an order of
+    magnitude longer, and it goes to the local model when there is one,
+    because that model is free, private, unrated and patient. Reading a
+    slice of chat on a mini PC's CPU is exactly the work a hosted API
+    should not be billed for."""
+    calls = []
+    saved_chain = llm._chat_call_chain
+    saved_unavail = llm._model_unavailable
+
+    def fake_chain(base, models, key, prompt, system, timeout, budget, cfg,
+                   extra, **kw):
+        calls.append((base, models[0], timeout))
+        return "two sentences about the slice"
+
+    llm._chat_call_chain = fake_chain
+    llm._model_unavailable = lambda b, m: False
+    try:
+        cases = [
+            ("local primary",
+             {"llm_base_url": "http://127.0.0.1:11434/v1",
+              "llm_model": "llama3.1:8b"}, "127.0.0.1"),
+            ("hosted primary with a local in the chain",
+             {"llm_api_key": "k", "llm_model": "gpt-oss-120b",
+              "llm_fallback_providers": [
+                  {"base_url": "http://localhost:11434/v1", "key": "",
+                   "model": "qwen3:8b"}]}, "localhost"),
+            ("hosted only",
+             {"llm_api_key": "k", "llm_model": "gpt-oss-120b"},
+             "api.groq.com"),
+        ]
+        for label, cfg, want_host in cases:
+            calls.clear()
+            assert llm.summarize_stream("s", "u", cfg) == \
+                "two sentences about the slice", (label, calls)
+            base, _model, timeout = calls[-1]
+            assert want_host in base, (label, base)
+            # The whole point: a budget chat is never allowed.
+            assert timeout > 30.0, (label, timeout)
+    finally:
+        llm._chat_call_chain = saved_chain
+        llm._model_unavailable = saved_unavail
+
+
+def test_appending_a_local_model_does_not_displace_the_hosted_one():
+    """Live-fire: the operator read the example config's single local entry
+    as a REPLACEMENT for the Google entry already in their
+    llm_fallback_providers - which would have silently taken Gemini out of
+    the chat fallback chain and left chat one provider short.
+
+    It is a list. Appending keeps both: chat still tries the hosted
+    providers in the same order with Ollama as the new last resort, while
+    the running log - which looks for the first LOCAL entry - goes to
+    Ollama wherever it sits."""
+    import json
+
+    hosted = {
+        "llm_api_key": "k",
+        "llm_base_url": "https://api.groq.com/openai/v1",
+        "llm_model": "openai/gpt-oss-120b",
+        "llm_fallback_key": "k2",
+        "llm_fallback_base_url": "https://openrouter.ai/api/v1",
+        "llm_fallback_model": "some/model:free",
+        "llm_fallback_providers": [
+            {"base_url":
+             "https://generativelanguage.googleapis.com/v1beta/openai",
+             "key": "k3", "model": "gemini-3.8-flash"}]}
+    appended = json.loads(json.dumps(hosted))
+    appended["llm_fallback_providers"].append(
+        {"base_url": "http://localhost:11434/v1", "key": "",
+         "model": "qwen3:8b"})
+
+    before = [b for b, _k, _m in llm.fallback_providers(hosted)]
+    after = [b for b, _k, _m in llm.fallback_providers(appended)]
+    # Nothing displaced: the old chain survives as a prefix of the new one.
+    assert after[:len(before)] == before, (before, after)
+    assert len(after) == len(before) + 1, (before, after)
+    assert after[-1] == "http://localhost:11434/v1", after
+
+    calls = []
+    saved_chain, saved_unavail = llm._chat_call_chain, llm._model_unavailable
+    llm._chat_call_chain = (
+        lambda base, models, key, prompt, system, timeout, budget, cfg,
+        extra, **kw: (calls.append(base), "x")[1])
+    llm._model_unavailable = lambda b, m: False
+    try:
+        llm.summarize_stream("s", "u", appended)
+    finally:
+        llm._chat_call_chain = saved_chain
+        llm._model_unavailable = saved_unavail
+    assert calls and "localhost:11434" in calls[-1], calls
+
+
+def appending_local_keeps_the_hosted_provider():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_appending_a_local_model_does_not_displace_the_hosted_one()
+        return True
+    except Exception:
+        return False
+
+
+def test_a_local_call_asks_the_model_to_stay_loaded():
+    """Ollama unloads a model a few minutes after its last request, and the
+    next call pays a full cold load from disk - measured elsewhere at 11.4s
+    to first token against 0.9s warm. The keeper wakes every twenty
+    minutes, which outlives the default 5m, so without asking for residency
+    every slice would be a cold start: 36 of them across a twelve-hour
+    stream.
+
+    It is sent BOTH ways because older Ollama builds ignore a top-level
+    keep_alive on the OpenAI-compatible endpoint (upstream issue #11458,
+    still open) while newer ones only honour it nested inside `options`.
+    Neither shape is an error, so sending both works on whichever build is
+    installed. And it is never sent to a hosted provider, which would
+    reject an unknown field."""
+    import json
+
+    import llm
+
+    body = json.loads(llm._build_body(
+        "qwen3:8b", "hi", base="http://localhost:11434/v1",
+        keep_alive="30m"))
+    assert body["keep_alive"] == "30m", body
+    assert body.get("options", {}).get("keep_alive") == "30m", body
+
+    hosted = json.loads(llm._build_body(
+        "qwen3:8b", "hi", base="https://api.groq.com/openai/v1",
+        keep_alive="30m"))
+    assert "keep_alive" not in hosted, hosted
+    assert "options" not in hosted, hosted
+
+    # The knob: overridable, and an empty string stops asking.
+    assert llm._local_keep_alive({}) == llm.LOCAL_KEEP_ALIVE
+    # The ask TRACKS the keeper's interval, so moving it cannot silently
+    # leave the model unloaded before the next slice is due. A fixed
+    # number is the bug this replaces: 5m against a 20-minute interval
+    # was a cold load every time, and identical to sending nothing.
+    assert llm._local_keep_alive({"memory_summary_minutes": 20}) == "25m"
+    assert llm._local_keep_alive({"memory_summary_minutes": 60}) == "65m"
+    assert int(llm._local_keep_alive({"memory_summary_minutes": 45})
+               .rstrip("m")) > 45
+
+    # think:false rides the same two ways, for the same reason: the
+    # operator's Ollama ignored the top-level form, qwen3:4b thought
+    # anyway, and every capped reply came back with an empty content.
+    nt = json.loads(llm._build_body(
+        "qwen3:4b", "hi", base="http://localhost:11434/v1",
+        hard_nothink=True))
+    assert nt["think"] is False, nt
+    assert nt.get("options", {}).get("think") is False, nt
+    # The gate that keeps the field away from hosted providers is real:
+    # _build_body trusts its caller, so this is what protects Groq.
+    assert llm._hard_nothink({"llm_no_think": True},
+                             "https://api.groq.com/openai/v1") is False
+    assert llm._hard_nothink({"llm_no_think": True},
+                             "http://localhost:11434/v1") is True
+    # Both switches share one options object rather than clobbering it.
+    both = json.loads(llm._build_body(
+        "qwen3:4b", "hi", base="http://localhost:11434/v1",
+        hard_nothink=True, keep_alive="25m"))
+    assert both["options"] == {"think": False, "keep_alive": "25m"}, both
+    assert llm._local_keep_alive({"llm_local_keep_alive": "2h"}) == "2h"
+    assert llm._local_keep_alive({"llm_local_keep_alive": ""}) == ""
+
+
+def local_call_asks_the_model_to_stay_loaded():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_a_local_call_asks_the_model_to_stay_loaded()
+        return True
+    except Exception:
+        return False
+
+
+def running_log_prefers_the_local_model():
+    """check_fixes entry point: a check reports False, it never raises."""
+    try:
+        test_the_running_log_prefers_the_local_model()
+        return True
+    except Exception:
+        return False
+
+
 def main():
     ok = True
     cfg = {"llm_api_key": "gsk-test", "llm_base_url": "https://api.groq.com/openai/v1",
@@ -57,7 +246,7 @@ def main():
         print("[PASS] Groq URL + bearer auth + reasoning-model payload (no temperature)")
 
         # Non-reasoning model should get temperature + max_tokens.
-        cfg2 = dict(cfg, llm_model="llama-3.3-70b-versatile")
+        cfg2 = dict(cfg, llm_model="qwen/qwen3.8-27b")
         captured.clear()
         llm.rewrite_fact("X", "X", ["f"], cfg2)
         b2 = json.loads(captured[0]["body"])
@@ -224,7 +413,7 @@ def main():
     orig_call = llm._call
     try:
         def _boom(base, model, key, user, system=None, timeout=60.0,
-                  max_tokens=None, hard_nothink=False):
+                  max_tokens=None, hard_nothink=False, **_kw):
             calls.append((user, timeout))
             raise TimeoutError("timed out")
 
@@ -234,7 +423,7 @@ def main():
                                          "http://127.0.0.1:11434/v1"}) is None
         assert llm.chat_timed_out() is True
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     timeout=60.0, max_tokens=None, hard_nothink=False, **_kw:
                      "fine and rolling again")
         assert llm.chat_reply("s", "u", {"llm_api_key": "k"}) == \
             "fine and rolling again"
@@ -243,7 +432,7 @@ def main():
         # hosted.
         seen = []
         llm._call = (lambda base, model, key, user, system=None,
-                     timeout=60.0, max_tokens=None, hard_nothink=False:
+                     timeout=60.0, max_tokens=None, hard_nothink=False, **_kw:
                      (seen.append((user, timeout)) or "a line."))
         llm.answer_question(
             "q?", ["source %d." % i for i in range(10)],
@@ -289,7 +478,7 @@ def main():
         caps = []
 
         def _two(base, model, key, user, system=None, timeout=60.0,
-                 max_tokens=None, hard_nothink=False):
+                 max_tokens=None, hard_nothink=False, **_kw):
             caps.append(max_tokens)
             return "OK" if len(caps) > 1 else ""
 
@@ -359,9 +548,10 @@ def main():
 
     # The fallback provider: Groq's free tier 429s mid-stream and the
     # chat voice used to go dark for the two-minute breaker window. A
-    # configured second provider (OpenRouter here) carries the line
-    # instead - and when the primary's breaker is open, it is not even
-    # asked again.
+    # 429 is per MODEL on Groq, so the same-provider spare (its own
+    # daily bucket) is tried first; only when that 429s too does a
+    # configured second provider (OpenRouter here) carry the line -
+    # and while every Groq model is resting, Groq is not even asked.
     def _groq_429_openrouter_ok(req, timeout=60):
         captured.append({"url": req.full_url, "headers": req.headers,
                          "body": req.data.decode("utf-8"),
@@ -413,12 +603,15 @@ def main():
         assert got == "Fallback line.", got
         assert [c["url"] for c in captured] == [
             "https://api.groq.com/openai/v1/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
-        auth = captured[1]["headers"]["Authorization"]
+        assert [json.loads(c["body"])["model"] for c in captured] == [
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+            "mistralai/mistral-nemo"], captured
+        auth = captured[2]["headers"]["Authorization"]
         assert auth == "Bearer or-test", auth
-        assert json.loads(captured[1]["body"])["model"] == \
-            "mistralai/mistral-nemo"
-        assert llm._unavailable(), "the 429 must open Groq's window"
+        assert llm._unavailable(), \
+            "every Groq model 429'd, so Groq's window must open"
         # Inside the window the primary is not asked again - the next
         # line goes straight to the fallback.
         captured.clear()
@@ -491,7 +684,11 @@ def main():
         assert got == "Fallback line.", got
         assert [c["url"] for c in captured] == [
             "https://api.groq.com/openai/v1/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             "https://openrouter.ai/api/v1/chat/completions"], captured
+        assert [json.loads(c["body"])["model"] for c in captured] == [
+            "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+            "mistralai/mistral-nemo"], captured
         # The primary breaker is now open; a fact rewrite goes straight to the
         # second provider instead of returning None before _complete can run.
         captured.clear()
@@ -701,6 +898,309 @@ def main():
 
     print("[PASS] an empty chat reply is retried once at a doubled "
           "budget, then the fallback takes it")
+
+    # A retired model is retired for the SESSION. Live-fire: Groq shut
+    # down llama-3.3-70b-versatile (16 Aug 2026), the bot's same-provider
+    # spare; after every gpt-oss-120b 429 the spare was tried again,
+    # 404'd again, fired the 'check your llm_model slug' hint (for a
+    # model the config never named) and only then went to the slow free
+    # fallback. Now: gpt-oss-20b is the spare; a 404 / Groq's 400
+    # model_decommissioned on any primary-chain model rests it for six
+    # hours with one line naming the replacement; the llm_model hint
+    # fires only for the configured model; a config naming a retired
+    # slug is told at startup.
+    assert llm.DEFAULT_GROQ_FALLBACK == "openai/gpt-oss-20b"
+    assert "llama-3.3-70b-versatile" in llm.GROQ_RETIRED
+    tpm = (b'{"error":{"message":"Rate limit reached for model '
+           b'`openai/gpt-oss-120b` in organization `o` on tokens per minute '
+           b'(TPM): Limit 8000. Please try again in 7m"}}')
+    dead = (b'{"error":{"message":"The model `openai/gpt-oss-20b` does not '
+            b'exist or you do not have access to it.","type":'
+            b'"invalid_request_error","code":"model_not_found"}}')
+    models = []
+
+    def _spare_dead(req, timeout=60):
+        m = json.loads(req.data.decode("utf-8"))["model"]
+        models.append(m)
+        if m == "openai/gpt-oss-120b":
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(tpm))
+        if m == "openai/gpt-oss-20b":
+            raise _ue.HTTPError(req.full_url, 404, "nf", {},
+                                io.BytesIO(dead))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "Line from " + m}}]}
+        ).encode("utf-8"))
+
+    llm.reset_disable_state()
+    llm._warned_404 = False
+    llm.urllib.request.urlopen = _spare_dead
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = llm.chat_reply("s", "u" * 20, fbcfg)
+            assert got == "Line from mistralai/mistral-nemo", got
+            assert models == ["openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                              "mistralai/mistral-nemo"], models
+            # the next line: the dead spare is NOT tried again
+            models.clear()
+            got = llm.chat_reply("s", "u" * 20, fbcfg)
+            assert got == "Line from mistralai/mistral-nemo", got
+            assert models == ["mistralai/mistral-nemo"], models
+            # ...nor by the fact/question path
+            models.clear()
+            llm._DISABLED_UNTIL = 0.0       # the provider breaker aside
+            llm._MODEL_DISABLED_UNTIL[
+                ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b")] = 0.0
+            got = llm._complete("https://api.groq.com/openai/v1",
+                                "openai/gpt-oss-120b", "gsk-test", "u",
+                                fbcfg, tag="t")
+            assert got == "Line from mistralai/mistral-nemo", got
+            assert "openai/gpt-oss-20b" not in models, models
+    finally:
+        llm.urllib.request.urlopen = orig
+    log = out.getvalue()
+    assert log.count("openai/gpt-oss-20b does not exist on this provider "
+                     "(HTTP 404)") == 1, log
+    assert "Skipping it for the rest of the session" in log, log
+    assert not llm._warned_404, \
+        "the llm_model hint fired for a spare the config never named"
+    assert "model not found (HTTP 404) - the llm_model slug" not in log, log
+    # Groq's other shape for a retired slug: 400 model_decommissioned
+    llm.reset_disable_state()
+    models.clear()
+    decom = (b'{"error":{"message":"The model `openai/gpt-oss-20b` has been '
+             b'decommissioned and is no longer supported.","type":'
+             b'"invalid_request_error","code":"model_decommissioned"}}')
+
+    def _spare_decom(req, timeout=60):
+        m = json.loads(req.data.decode("utf-8"))["model"]
+        models.append(m)
+        if m == "openai/gpt-oss-120b":
+            raise _ue.HTTPError(req.full_url, 429, "rate", {},
+                                io.BytesIO(tpm))
+        if m == "openai/gpt-oss-20b":
+            raise _ue.HTTPError(req.full_url, 400, "bad", {},
+                                io.BytesIO(decom))
+        return io.BytesIO(json.dumps(
+            {"choices": [{"message": {"content": "Line from " + m}}]}
+        ).encode("utf-8"))
+
+    llm.urllib.request.urlopen = _spare_decom
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            got = llm.chat_reply("s", "u" * 20, fbcfg)
+            assert got == "Line from mistralai/mistral-nemo", got
+            models.clear()
+            llm.chat_reply("s", "u" * 20, fbcfg)
+            assert models == ["mistralai/mistral-nemo"], models
+    finally:
+        llm.urllib.request.urlopen = orig
+    assert "does not exist on this provider (HTTP 400)" in out.getvalue(), \
+        out.getvalue()
+    # the configured model itself retired: the loud hint, with the fix
+    llm.reset_disable_state()
+    llm._warned_404 = False
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        llm.check_models({"llm_api_key": "k",
+                          "llm_model": "llama-3.3-70b-versatile"})
+        llm.check_models(fbcfg)
+    assert ("llm_model names llama-3.3-70b-versatile, which Groq retired - "
+            "use openai/gpt-oss-120b instead") in out.getvalue(), \
+        out.getvalue()
+    assert out.getvalue().count("which Groq retired") == 1, out.getvalue()
+    llm.reset_disable_state()
+    print("[PASS] a retired Groq slug is skipped for the session, named "
+          "once with its replacement; the spare is gpt-oss-20b")
+
+    # ------------------------------------------------------------------
+    # An ORDERED LIST of fallback providers: Groq -> NVIDIA NIM -> Gemini,
+    # each with its own key and its own rest window.
+    # ------------------------------------------------------------------
+    import os as _os
+
+    class _Resp:
+        """A urlopen result that can report a real status code."""
+
+        def __init__(self, raw, status=200):
+            self._raw, self.status, self.headers = raw, status, {}
+
+        def read(self):
+            return self._raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    NIM = "https://integrate.api.nvidia.com/v1"
+    GEM = "https://generativelanguage.googleapis.com/v1beta/openai"
+    GROQ = "https://api.groq.com/openai/v1"
+    multicfg = {
+        "llm_api_key": "gsk-test", "llm_base_url": GROQ,
+        "llm_model": "openai/gpt-oss-120b",
+        "llm_fallback_providers": [
+            {"base_url": NIM, "key": "nvapi-testkey",
+             "model": "openai/gpt-oss-120b"},
+            # key_env keeps the secret in bot.env: the config names the
+            # provider, the environment carries the key.
+            {"base_url": GEM, "key_env": "GEMINI_API_KEY",
+             "model": "gemini-3.8-flash, gemini-3.5-flash-lite"},
+        ],
+    }
+    _had_gem = _os.environ.get("GEMINI_API_KEY")
+    _had_nv = _os.environ.get("NVIDIA_API_KEY")
+    _os.environ["GEMINI_API_KEY"] = "gem-testkey"
+
+    def _router(fail, status=None):
+        """Answer everything; fail the named bases with `code`."""
+        def _fake(req, timeout=60):
+            model = json.loads(req.data.decode("utf-8"))["model"]
+            captured.append({"url": req.full_url, "headers": req.headers,
+                             "body": req.data.decode("utf-8"),
+                             "timeout": timeout})
+            for base, code in (fail or {}).items():
+                if req.full_url.startswith(base):
+                    raise urllib.error.HTTPError(
+                        req.full_url, code, "nope", {},
+                        io.BytesIO(b'{"error":{"message":"boom"}}'))
+            payload = {"choices": [{"message": {"role": "assistant",
+                                                "content": "Line from " + model}}]}
+            raw = json.dumps(payload).encode("utf-8")
+            if status and req.full_url.startswith(status[0]):
+                return _Resp(raw, status[1])
+            return _Resp(raw)
+        return _fake
+
+    orig = llm.urllib.request.urlopen
+    try:
+        # The chain, in order, with each provider's own key.
+        providers = llm.fallback_providers(multicfg)
+        assert [p[0] for p in providers] == [NIM, GEM], providers
+        assert providers[0][1] == "nvapi-testkey", providers
+        assert providers[1][1] == "gem-testkey", providers      # via key_env
+        assert providers[1][2] == ["gemini-3.8-flash",
+                                   "gemini-3.5-flash-lite"], providers
+        assert llm.fallback_endpoint(multicfg) == (
+            NIM, "nvapi-testkey", "openai/gpt-oss-120b"), \
+            llm.fallback_endpoint(multicfg)
+        assert llm.fallback_problem(multicfg) == "", \
+            llm.fallback_problem(multicfg)
+        # A key in the environment adds its provider on its own.
+        _os.environ["NVIDIA_API_KEY"] = "nvapi-env"
+        envonly = llm.fallback_providers({"llm_api_key": "gsk",
+                                          "llm_base_url": GROQ,
+                                          "llm_model": "openai/gpt-oss-120b"})
+        # Both keys are in the environment now, so both providers join -
+        # NIM ahead of Gemini, the order KNOWN_PROVIDERS gives them.
+        assert [(p[0], p[1]) for p in envonly] == [
+            (NIM, "nvapi-env"), (GEM, "gem-testkey")], envonly
+        del _os.environ["GEMINI_API_KEY"]
+        assert [p[0] for p in llm.fallback_providers(
+            {"llm_api_key": "gsk", "llm_base_url": GROQ,
+             "llm_model": "openai/gpt-oss-120b"})] == [NIM]
+        _os.environ["GEMINI_API_KEY"] = "gem-testkey"
+        assert llm.provider_name(NIM) == "NVIDIA NIM", llm.provider_name(NIM)
+        assert llm.provider_name(GEM) == "Gemini", llm.provider_name(GEM)
+        del _os.environ["NVIDIA_API_KEY"]
+
+        # Groq spent, NIM spent: Gemini answers, and each request body is
+        # that provider's own shape.
+        llm.reset_disable_state()
+        captured.clear()
+        llm.urllib.request.urlopen = _router({GROQ: 429, NIM: 429})
+        got = llm.chat_reply("s", "u" * 20, multicfg)
+        assert got == "Line from gemini-3.8-flash", got
+        assert [c["url"] for c in captured] == [
+            GROQ + "/chat/completions", GROQ + "/chat/completions",
+            NIM + "/chat/completions", GEM + "/chat/completions"], captured
+        assert captured[3]["headers"]["Authorization"] == \
+            "Bearer gem-testkey", captured[3]["headers"]
+        nim_body = json.loads(captured[2]["body"])
+        assert "max_tokens" in nim_body and \
+            "max_completion_tokens" not in nim_body, nim_body
+        assert nim_body["reasoning_effort"] == "low", nim_body
+        gem_body = json.loads(captured[3]["body"])
+        # A thinking model's cap covers thinking AND answer, so it keeps
+        # the reasoning budget (300), not the 120-token one-line cap.
+        assert gem_body["max_completion_tokens"] == 300, gem_body
+        assert gem_body["reasoning_effort"] == "low", gem_body
+        assert "temperature" not in gem_body, gem_body
+        assert "max_tokens" not in gem_body, gem_body
+        # Two separate rest windows: NIM's is open, Gemini's is not.
+        assert llm._fallback_unavailable(NIM), "NIM must rest after its 429"
+        assert not llm._fallback_unavailable(GEM), \
+            "a 429 on NIM must not rest Gemini too"
+        assert list(llm._FALLBACK_DISABLED_BY_BASE) == [NIM], \
+            llm._FALLBACK_DISABLED_BY_BASE
+
+        # A dead NIM key is skipped on the NEXT line, not retried: the
+        # walk goes straight from a resting Groq to Gemini.
+        llm.reset_disable_state()
+        llm.urllib.request.urlopen = _router({GROQ: 429, NIM: 401})
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, multicfg) == \
+            "Line from gemini-3.8-flash"
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, multicfg) == \
+            "Line from gemini-3.8-flash"
+        assert [c["url"] for c in captured] == [
+            GEM + "/chat/completions"], captured
+
+        # NVIDIA answers 202 ("accepted, still working") instead of a
+        # completion: that is a miss, and the next provider takes the line.
+        llm.reset_disable_state()
+        llm.urllib.request.urlopen = _router({GROQ: 429}, status=(NIM, 202))
+        captured.clear()
+        assert llm.chat_reply("s", "u" * 20, multicfg) == \
+            "Line from gemini-3.8-flash", captured
+        assert [c["url"].split("//")[1].split("/")[0] for c in captured] == \
+            ["api.groq.com", "api.groq.com", "integrate.api.nvidia.com",
+             "generativelanguage.googleapis.com"], captured
+
+        # Sourced answers walk the same chain.
+        llm.reset_disable_state()
+        llm.urllib.request.urlopen = _router({GROQ: 429, NIM: 429})
+        captured.clear()
+        ans = llm.answer_question("how long is the Nile?", ["6,650 km"],
+                                  multicfg)
+        assert ans and "gemini-3.8-flash" in \
+            [json.loads(c["body"])["model"] for c in captured], captured
+    finally:
+        llm.urllib.request.urlopen = orig
+        llm.reset_disable_state()
+        captured.clear()
+        if _had_gem is None:
+            _os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            _os.environ["GEMINI_API_KEY"] = _had_gem
+        if _had_nv is None:
+            _os.environ.pop("NVIDIA_API_KEY", None)
+        else:
+            _os.environ["NVIDIA_API_KEY"] = _had_nv
+    print("[PASS] an ordered provider list carries chat: Groq -> NIM -> "
+          "Gemini, each on its own key and its own rest window")
+
+    try:
+        test_appending_a_local_model_does_not_displace_the_hosted_one()
+        test_a_local_call_asks_the_model_to_stay_loaded()
+        print("[PASS] a local call asks the model to stay loaded")
+        print("[PASS] appending a local model keeps the hosted one in the "
+              "chat chain")
+    except AssertionError as exc:
+        ok = False
+        print(f"[FAIL] appending a local model keeps the hosted one: {exc}")
+
+    try:
+        test_the_running_log_prefers_the_local_model()
+        print("[PASS] the running log prefers the local model, on a budget "
+              "chat never gets")
+    except AssertionError as exc:
+        ok = False
+        print(f"[FAIL] the running log prefers the local model: {exc}")
 
     print("ALL PASSED ✔" if ok else "SOME FAILED ✘")
     return 0 if ok else 1

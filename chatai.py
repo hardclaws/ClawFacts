@@ -18,8 +18,9 @@ Everything it says passes one cleaning gate: one short line, no @mentions
 one emoji, and no command syntax (the persona never sends viewers to
 !funfact - it answers itself or says nothing). The rules a regex cannot
 enforce live in the system prompt: tease topics, never people; no threats,
-no creepiness, no medical or grief jokes; never state a fact it is not
-certain of (factual questions are routed to the fact engine elsewhere);
+no creepiness, no medical or grief jokes; answer general knowledge it is
+sure of and never state a fact it is not certain of (lookups on named
+things and live data are routed to the fact engine elsewhere);
 never guess anything personal about anyone; never repeat your own recent
 lines. A model with nothing worth saying replies NOTHING TO SAY and the
 bot stays quiet.
@@ -61,8 +62,12 @@ _RULES = (
     "- At most one emoji. No hashtags, no links, no @mentions.\n"
     "- Tease topics, never people. No insults, no threats, nothing "
     "creepy, no politics, no medical or grief jokes.\n"
-    "- Never state a fact you are not certain of - factual questions are "
-    "answered elsewhere; you hold opinions and stories.\n"
+    "- Answer general-knowledge questions plainly and correctly from what "
+    "you know (how long a 5K takes, how air brakes work, why the sky is "
+    "blue) - a real answer first, in your voice, in one line. Never state "
+    "a fact you are not certain of: if you do not know, say so rather "
+    "than guess. Live data (weather, headlines) and lookups on named "
+    "things are answered elsewhere.\n"
     "- NEVER mention or point viewers at commands like !funfact or !ask. "
     "YOU are the one answering: answer yourself, or reply NOTHING TO "
     "SAY.\n"
@@ -76,10 +81,23 @@ _RULES = (
     "- When asked your opinion of a person or their news, give your take "
     "on the SITUATION - never pivot to a different subject.\n"
     "- Never guess, reveal or invent personal information about anyone.\n"
+    "- Never use em dashes or en dashes. Use commas or periods instead.\n"
+    "- Output ONLY the line itself, spoken in character. Never narrate, "
+    "plan or explain what you are about to say ('The user is asking...', "
+    "'I need to answer as...') - that is not a reply.\n"
     "- If nothing is worth saying, reply with exactly: NOTHING TO SAY\n"
 )
 
-_EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+#: One emoji as a PERSON sees it: a base pictograph with any skin-tone
+#: modifier, variation selector, and zero-width-joiner sequence glued on
+#: (a shrug with a gender sign is 🤷 + ZWJ + ♂ + VS16 - one emoji, four
+#: code points), or a two-letter flag. Live-fire the cleaner counted
+#: '🤷\u200d♂️' as two and threw away a perfectly good line - twice.
+_EMOJI = re.compile(
+    "(?:[\U0001F1E6-\U0001F1FF]{2}"                        # a flag
+    "|[\U0001F000-\U0001FAFF\u2600-\u27BF]"               # a pictograph
+    "(?:[\U0001F3FB-\U0001F3FF\ufe0f\u20e3]"              # + tone/VS/keycap
+    "|\u200d[\U0001F000-\U0001FAFF\u2600-\u27BF]\ufe0f?)*)")  # + ZWJ parts
 
 # Last-resort acknowledgement after both model attempts violate the output
 # rails. This is intentionally not a guessed answer: it tells the viewer the
@@ -104,22 +122,224 @@ def system_prompt(persona: str = "") -> str:
             + _RULES)
 
 
+_WINDOW_NUM = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "couple": 2, "three": 3,
+    "few": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "twenty": 20,
+    "thirty": 30,
+}
+
+_WINDOW_UNIT = {"hour": 3600.0, "hr": 3600.0, "hours": 3600.0,
+                "day": 86400.0, "days": 86400.0,
+                "week": 604800.0, "weeks": 604800.0,
+                "month": 2592000.0, "months": 2592000.0}
+
+#: "the last 24hours", "over the week", "the last five days". The number
+#: is optional and may be a word; "24hours" with no space is how it was
+#: actually typed.
+_RECAP_WINDOW = re.compile(
+    r"\b(?:last|past|previous|over|this|during|in)\s+(?:the\s+)?"
+    r"(?:(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|twenty|thirty|a|an|couple(?:\s+of)?|few)\s*)?"
+    r"(hours?|hrs?|days?|weeks?|months?)\b", re.IGNORECASE)
+
+#: "summary of the stream so far", "recap so far", "what happened today
+#: in chat", "interesting chat today", "stream today", "so far" - these
+#: have no hour/day unit but are still a recap request when they mention
+#: chat/stream/recap/summary/what happened. They should not be missed
+#: because the regex above needs a unit, but "today" alone is not a recap.
+_RECAP_SO_FAR = re.compile(
+    r"\b(?:"
+    r"summary\s+of\s+(?:the\s+)?stream|"
+    r"recap\s+of\s+(?:the\s+)?stream|"
+    r"summary\s+of\s+stream|"
+    r"stream\s+so\s+far|"
+    r"so\s+far\s+today|"
+    r"what\s+happened\s+(?:today\s+)?in\s+chat|"
+    r"what\s+happened\s+in\s+chat|"
+    r"interesting\s+chat|"
+    r"chat\s+going\s+on|"
+    r"had\s+any\s+.*chat|"
+    r"this\s+stream|"
+    r"stream\s+today|"
+    r"today'?s?\s+stream|"
+    r"recap|"
+    r"summary\s+so\s+far|"
+    r"highlights?\s+(?:for\s+)?today|"
+    r"today'?s?\s+highlights?|"
+    r"highlights?\s+of\s+(?:today|the\s+stream|this\s+stream)|"
+    r"so\s+far"
+    r")\b",
+    re.IGNORECASE)
+# More precise: chat/stream history questions, not just "today"
+_RECAP_CHAT = re.compile(
+    r"\b(?:chat|stream|recap|summary|highlights?)\b",
+    re.IGNORECASE)
+
+#: "who gave a story about a 5k run", "who spoke about X", "who mentioned X"
+#: The operator asked "who gave a story about a 5k run today" and the bot
+#: answered "Nobody" because it only had the last 15 lines and no search.
+_WHO_SPOKE = re.compile(
+    r"\bwho\s+(?:gave|spoke|talked|mentioned|said|brought\s+up)\b"
+    r"(?:.*?(?:about|on)\s+(.+?))?(?:\?|\b(?:today|in\s+chat|in\s+the\s+chat|this\s+stream)\b|$)",
+    re.IGNORECASE)
+_WHO_SPOKE_SIMPLE = re.compile(
+    r"\bwho\s+.*?(?:about|mentioned|spoke)\s+(.+)",
+    re.IGNORECASE)
+
+
+def stream_summary_prompt(lines: list, previous: str = "",
+                          sentences: int = 5) -> str:
+    """The distil ask for one slice of the stream.
+
+    A running log, not a performance: names, vehicles, places, what broke,
+    what was decided, what is still open. The recap is written from these
+    slices later, so anything dropped here is gone for good - which is
+    why the ask is for events rather than for flavour.
+    """
+    out = []
+    if previous:
+        out.append("Already logged for the previous slice (do not repeat "
+                   "it, but do follow up on it if it developed):")
+        out.append(previous)
+        out.append("")
+    out.append("Chat from the last slice of a live stream:")
+    out.extend(f"- {n}: {t}" for n, t in lines)
+    out.append("")
+    out.append(
+        f"Write up to {max(2, int(sentences))} sentences logging what "
+        "actually happened in this slice: "
+        "who was there and who said or did what, with names, vehicles, "
+        "loads, routes, places, problems, plans and anything settled or "
+        "left open. Plain factual prose, third person, no greeting, no "
+        "persona, no emoji. Only what these lines support - if the slice "
+        "is thin, say so in one sentence rather than padding it. Never "
+        "invent a 5K, a run, a game or any event not in these lines.")
+    return "\n".join(out)
+
+
+def recap_window(text: str):
+    """(seconds, 'the last 5 days') when the message asks about a period.
+
+    Live-fire: "the last 24 hours", "over the week" and "the last five
+    days" were three different questions that got three near-identical
+    answers, because nothing ever parsed the period - the recall was
+    eight most-recent facts whichever window was named. None means the
+    message is not a recap, and the caller leaves memory alone.
+    """
+    t = text or ""
+    m = _RECAP_WINDOW.search(t)
+    if m:
+        unit = _WINDOW_UNIT.get(m.group(2).lower())
+        if unit is not None:
+            raw = (m.group(1) or "").lower().replace(" of", "").strip()
+            if raw.isdigit():
+                count = int(raw)
+            else:
+                count = _WINDOW_NUM.get(raw, 0)
+            if not count:
+                # "over the week" / "this month": the unit alone means one of it.
+                count = 1
+            count = min(count, 366)             # a recap is not an archive
+            secs = unit * count
+            said = m.group(2).lower()
+            one = {"hr": "hour", "hrs": "hour"}.get(said, said.rstrip("s"))
+            label = f"the last {one}" if count == 1 \
+                else f"the last {count} {said}"
+            return secs, label
+    # "summary of the stream so far", "interesting chat today",
+    # "stream so far" have no hour/day unit but are still a recap request
+    # when they mention chat/stream. Previously "Docbot give us a summary
+    # of the stream so far" returned None and the model hallucinated a 5K
+    # run recap with no attribution. "today" alone is NOT a recap, it is
+    # news, unless it also mentions chat/stream.
+    if _RECAP_SO_FAR.search(t):
+        # "whats the news today" contains "today" but also "news" - not a recap
+        low = t.lower()
+        if "news" in low or "headline" in low:
+            pass
+        else:
+            if "today" in low or "chat" in low:
+                return 86400.0, "today"
+            return 43200.0, "so far today"
+    # Fallback: explicit "what happened today in chat" or "interesting chat"
+    if _RECAP_CHAT.search(t) and ("today" in t.lower() or "so far" in t.lower() or "what happened" in t.lower()):
+        low = t.lower()
+        if "news" not in low:
+            return 86400.0, "today"
+    return None
+
+
+def who_spoke_about(text: str) -> str | None:
+    """If the message asks who spoke about X, return X, else None.
+
+    "who gave a story about a 5k run today" -> "5k run"
+    "who in the chat spoke about a 5k run" -> "5k run"
+    The keyword is then searched in the transcript so the model can
+    attribute it instead of saying Nobody.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    if "who" not in t.lower():
+        return None
+    def _clean_topic(topic: str) -> str:
+        topic = re.sub(r"\b(?:today|in\s+chat|in\s+the\s+chat|this\s+stream)\b.*$", "", topic, flags=re.IGNORECASE).strip()
+        topic = re.sub(r"^(?:about|on)\s+", "", topic, flags=re.IGNORECASE).strip()
+        topic = re.sub(r"^(?:a\s+story\s+about|story\s+about)\s+", "", topic, flags=re.IGNORECASE).strip()
+        topic = re.sub(r"^(?:a|an|the)\s+", "", topic, flags=re.IGNORECASE).strip()
+        topic = topic.strip(" ?.,!").strip()
+        return topic
+    m = _WHO_SPOKE.search(t)
+    if m:
+        topic = _clean_topic((m.group(1) or "").strip())
+        if topic and len(topic) >= 2:
+            return topic
+    m2 = _WHO_SPOKE_SIMPLE.search(t)
+    if m2:
+        topic = _clean_topic((m2.group(1) or "").strip())
+        if topic and len(topic) >= 2:
+            return topic
+    return None
+
+
 def user_prompt(lines: list, nick: str, text: str,
                 memories: list = None, quiet: bool = False,
                 max_lines: int = 15, max_memories: int = 8,
-                own: list = None, overheard: bool = False) -> str:
+                own: list = None, overheard: bool = False,
+                notice: str = None, knowledge: bool = False,
+                ongoing: list = None, task: str = None,
+                history: list = None, window_label: str = "",
+                summaries: list = None) -> str:
     """What the model sees: what it remembers, the room, the moment, the
     ask. Memories are [(nick, fact)] - the distilled facts about the
     people present, which is what makes the reply feel like it knows
     them. `quiet` is the dead-room case: no one said anything, and the
     bot's job is to get the conversation going.
 
+    `ongoing` is what the bot is in the middle of - the game it is
+    hosting and where it is up to, the counts it is keeping (see
+    ongoing.py) - and `task` is a step of that game the line must
+    perform ('your line IS the round-2 question'). Live-fire, without
+    them, the model that had just posed round one of a cycling quiz
+    was asked for round two and requested the temperature in Rolla,
+    Missouri: nothing in its prompt said it was hosting anything.
+
     max_lines/max_memories trim the prompt: a local model on CPU has to
     READ every token of it before writing a word, and that read - not
     the generation - was the cost blowing past a 20s timeout on a warm
     model. Callers point these at smaller values for local models."""
     out = []
-    if not quiet and not overheard:
+    if task:
+        # A game step. The job outranks everything: the line is not a
+        # reply to what was said, it is the next move of something the
+        # bot was asked to run.
+        out.append("YOUR JOB RIGHT NOW (highest priority):")
+        out.append(task)
+        if text:
+            out.append(f"({nick} said: {text})")
+        out.append("")
+    elif not quiet and not overheard:
         # Put the actual ask before the room as well as at the final answer
         # cue. Some reasoning models latched onto an older question in Recent
         # chat even though the old prompt named the latest one only at the end.
@@ -138,6 +358,34 @@ def user_prompt(lines: list, nick: str, text: str,
         out.append("Do not recycle their phrasing, imagery or opener. Words "
                    "needed for the CURRENT topic are allowed. Do not end with "
                    "a question merely because the last line did.")
+        out.append("")
+    if ongoing:
+        # What the bot is in the middle of. This is the working memory
+        # the room buffer cannot be: the bot's own lines and every
+        # earlier ask are stripped from Recent chat on purpose, so
+        # without this block a host mid-quiz has no idea it is hosting.
+        out.append("WHAT IS GOING ON (true right now - it outranks the "
+                   "recent chat):")
+        out.extend(ongoing)
+        out.append("You are the one running these. Never deny it, never "
+                   "call yourself 'just a bot' or an info bot. A message "
+                   "about the game or a count is answered from this block. "
+                   "While a round is OPEN, never confirm, deny or reveal an "
+                   "answer - the host calls time. Never ask a new round's "
+                   "question or give an answer on your own initiative; only "
+                   "when YOUR JOB above says so.")
+        out.append("")
+    if notice:
+        # The one thing the bot knows for certain about right now: what
+        # a mod asked it to tell the room. Without it the persona
+        # guesses at 'is he afk?' - or worse, plays along with 'your
+        # mic is muted' as if it were news.
+        out.append("STANDING NOTICE from the mods (true right now): "
+                   f"{notice}")
+        out.append("If the message is about the stream being quiet, the "
+                   "mic, the audio, or where the streamer is, THIS is the "
+                   "answer - say it in your own words. Do not invent any "
+                   "other reason.")
         out.append("")
     if memories:
         out.append("What you remember about people here (from past chat,"
@@ -171,10 +419,68 @@ def user_prompt(lines: list, nick: str, text: str,
             "generic encouragement and no forced truck, coffee, workout, "
             "cadence or mileage references. Performing your persona at the "
             "room is NOTHING TO SAY. When in doubt, reply NOTHING TO SAY.")
+    elif task:
+        out.append("Do the job above now, in character, in one line: the "
+                   "thing itself, never a remark about doing it. This job "
+                   "always gets a line - NOTHING TO SAY is not an option "
+                   "here.")
     else:
         out.append(f"{nick} just said: {text}")
         out.append("They are talking to YOU: answer THIS message - the "
                    "earlier room chat is context, not the question.")
+        if knowledge:
+            # 'how long does it take to run 5k': the answer is a figure,
+            # a range or a reason the model KNOWS. Said first, plainly;
+            # the voice is the wrapping, not a substitute for it.
+            out.append("This is a general-knowledge question. Give the "
+                       "real answer first - the figure, the range or the "
+                       "reason - in your own voice, one line. If you "
+                       "genuinely do not know, say so; never invent a "
+                       "number.")
+    if summaries:
+        # The spine: every slice of the period, distilled as the stream
+        # ran. This is what lets a recap cover twelve hours instead of
+        # the forty lines a prompt can hold verbatim.
+        out.append("")
+        out.append("RUNNING LOG OF THE STREAM"
+                   + (f" OVER {window_label.upper()}" if window_label else "")
+                   + " (written as it happened, oldest first):")
+        out.extend(f"- {s}" for s in summaries)
+    if history:
+        # Verbatim colour on top of the spine. Without it a
+        # recap had only eight distilled facts to work from, so every
+        # window came back with the same four events - and a model asked
+        # for a week it cannot see will invent one.
+        out.append("")
+        out.append("WHAT ACTUALLY HAPPENED"
+                   + (f" IN {window_label.upper()}" if window_label else "")
+                   + " (real chat from the log, oldest first):")
+        out.extend(f"- {h}" for h in history)
+        out.append("Summarize what actually happened in these lines for "
+                   f"{window_label or 'the period'} - who was there and what "
+                   "was said or done, with names, IN YOUR PERSONA VOICE from "
+                   "the system prompt. One line, max 450 chars, but grounded and "
+                   "accurate. If you have at least some lines, give a recap of what "
+                   "you have, even if it is not a full period. Only say you have no "
+                   "recap if you have zero lines. Use ONLY names, events, places that "
+                   "appear in the RUNNING LOG or WHAT ACTUALLY HAPPENED sections above. "
+                   "If it is not listed there, do not include it. Do not add "
+                   "ban drama, route queries, playlist, counts, or any event "
+                   "not in those lines. Quote real chat: e.g. 'chasegpt asked "
+                   "about truck ownership pay', 'BobbyG1G shared Big Springs depot', "
+                   "'Darkest_Night_Wolf coworker 10 vehicles', 'BikeBEAST GPU 4000$'. "
+                   "Never invent an event, a count, a place or a name not in these lines. "
+                   "Write it as the persona would say it, not as a dry list.")
+
+    if not summaries and not history and window_label:
+        # No spine and no verbatim lines for the requested window: say so
+        # plainly rather than hallucinating a 5K run or a Warzone push.
+        # Previously this case had no explicit instruction and the model
+        # invented events. Now the prompt says what to do when empty.
+        out.append("")
+        out.append(f"No chat was logged in {window_label}, so there is no recap "
+                   "to give for that period. Say so plainly.")
+
     out.append("")
     out.append("Your line:")
     return "\n".join(out)
@@ -196,7 +502,7 @@ def mention_kind(text: str, names) -> str | None:
 
 
 def direct_context(lines: list, names, prefix: str = "!",
-                   bot_nick: str = "") -> list:
+                   bot_nick: str = "", keep_addressed: bool = False) -> list:
     """Human conversation context with commands and old bot asks removed.
 
     Older questions addressed to the bot are competing instructions, not
@@ -205,6 +511,10 @@ def direct_context(lines: list, names, prefix: str = "!",
     reason (the current ``!ask`` is supplied separately by its caller), and
     the bot's own lines are already supplied through the dedicated ``own``
     block. This clean human-only room is also what quiet openers continue.
+
+    `keep_addressed` keeps the lines aimed at the bot: a game step
+    ('who got round 2 right?') needs the guesses people typed at it,
+    and a step's job framing leaves no room for an old ask to hijack.
     """
     out = []
     bot_low = (bot_nick or "").lower()
@@ -214,7 +524,7 @@ def direct_context(lines: list, names, prefix: str = "!",
             continue
         if prefix and t.startswith(prefix):
             continue
-        if mention_kind(t, names):
+        if not keep_addressed and mention_kind(t, names):
             continue
         out.append((nick, text))
     return out
@@ -233,14 +543,113 @@ def _blocked_output(line: str) -> bool:
     if re.search(r"\b(?:funfact|ask)\b\s+(?:command|for (?:more|the lowdown))",
                  line, re.IGNORECASE):
         return True          # "check !funfact" died with the redirect rule
-    return bool(funfacts._EXPLICIT.search(line)
-                or funfacts._TASTELESS.search(line))
+    # Explicit filter: block porn, but allow educational sexual health.
+    # Previously "No, pregnancy can't occur from oral sex; sperm would need
+    # to travel to the uterus, which doesn't happen during a blowjob" was
+    # rejected because it contains "blowjob" matching _EXPLICIT, so the bot
+    # posted only "NO, pregnancy cannot occur from oral sex." - cut short.
+    # Second sentence "Sperm would need to travel to the uterus, which
+    # doesn't happen during a blowjob" contains blowjob but no pregnancy
+    # word, so it was also dropped, truncating the medical answer.
+    if funfacts._EXPLICIT.search(line):
+        low = line.lower()
+        # Really explicit: always block
+        if re.search(r"\b(?:porn\w*|xxx|bukkake|fisting|cumshot\w*|gangbang\w*)\b", low):
+            return True
+        # Educational sexual health: allow full medical explanation even
+        # when it uses explicit terms like blowjob/oral sex, as long as
+        # it is about pregnancy, sperm, uterus and not pornographic.
+        # The answer often splits across lines, so each line must be
+        # allowed individually: one line has pregnancy+can not, the next
+        # has sperm+uterus+blowjob.
+        has_edu = ("pregnancy" in low or "pregnant" in low or "sperm" in low or "uterus" in low)
+        has_neg = ("cannot" in low or "can't" in low or "can not" in low or "does not" in low or "doesn't" in low or "cannot occur" in low or "no" in low or "not possible" in low or "doesn't happen" in low or "would need" in low)
+        # Line is educational if it mentions pregnancy/sperm/uterus with negation/explanation
+        if has_edu and has_neg:
+            return False
+        if "oral sex" in low and ("pregnancy" in low or "pregnant" in low or "sperm" in low or "uterus" in low):
+            return False
+        if "sperm" in low and "uterus" in low:
+            return False
+        if "blowjob" in low and ("sperm" in low or "uterus" in low or "pregnancy" in low or "pregnant" in low or "cannot" in low or "can't" in low):
+            return False
+        # Broad fallback: any line that is clearly about pregnancy not occurring from oral/blowjob
+        if ("pregnancy" in low or "pregnant" in low) and ("oral" in low or "blowjob" in low):
+            return False
+        return True
+    if funfacts._TASTELESS.search(line):
+        return True
+    return False
 
 
-def clean_line(line: str) -> str | None:
+#: A reasoning model's THINKING, delivered as the answer. Live-fire
+#: (15:30:09-15:30:53): 'The user is asking me (Docbot) who my favorite
+#: NFL team is. I need to answer as the Commentator character - a
+#: British sp...' - three times in a row, 44 seconds, and the length
+#: recovery nearly posted a trimmed slice of it. Narration about the
+#: user, the persona or the answer is never the answer.
+_LEAKED_THINKING = re.compile(
+    r"^\W*(?:(?:okay|ok|so|alright|first|hmm|right|well),?\s+)*"
+    # 'The user (Hardclaws) is asking me ...' / 'the user wants a number'
+    r"(?:the\s+user(?:\s+\w+)?\s+(?:is\s+)?(?:asks?|asking|wants|said|says|"
+    r"saying|mentioned|greeted|asked)\b"
+    # 'I need to answer/respond/reply AS the X persona' / 'in character'
+    r"|i\s+(?:need|have|should|must|will|'ll|want)\s+to\s+(?:answer|respond|"
+    r"reply|write|craft|stay|keep|be)\b[^.!?]{0,60}?\b(?:persona|character|"
+    r"in\s+character|as\s+(?:doc|docbot|the\s+\w+)\b)"
+    # 'Let me craft/think of a reply/response/line'
+    r"|(?:let\s+me|let's)\s+(?:think|craft|write|come\s+up\s+with|figure)"
+    r"\b[^.!?]{0,40}?\b(?:reply|response|answer|line|something\s+funny|"
+    r"something\s+witty)\b"
+    # 'As the Commentator persona' / 'my persona is' / 'the character should'
+    r"|as\s+(?:the\s+)?\w+\s+(?:persona|character)\b"
+    r"|(?:the|my)\s+(?:persona|character)\s+(?:is|should|must|needs)\b"
+    # 'We need to keep it under 200 characters' - the rules, recited
+    r"|we\s+(?:need|have|should|must)\s+to\s+(?:keep|stay|respond|reply|"
+    r"answer|avoid|include|write|make\s+sure)\b[^.!?]{0,60}?\b(?:characters|"
+    r"character|persona|line|reply|response|rules?|tone|voice|short)\b"
+    # 'The answer/reply should be ...'
+    r"|(?:the\s+)?(?:answer|reply|response)\s+(?:should|must|needs\s+to)\s+be\b)",
+    re.IGNORECASE)
+
+
+def is_narration(line: str) -> bool:
+    """True when the text is the model talking to ITSELF about the reply
+    (reasoning leaked into the content) rather than the reply."""
+    t = " ".join((line or "").split())
+    if _LEAKED_THINKING.match(t):
+        return True
+    # Mid-text tells: 'I need to answer as the Commentator persona',
+    # 'The user Hardclaws is asking' - a real chat line does not refer
+    # to its own persona or to 'the user' in the third person.
+    return bool(re.search(
+        r"\b(?:as\s+the\s+\w+\s+(?:persona|character)|the\s+user\s+\w*\s*"
+        r"is\s+(?:asking|saying)|in\s+character\s+as|my\s+persona\s+is|"
+        r"(?:stay|respond|reply|answer)\s+(?:\w+\s+)?in\s+character|"
+        r"answer\s+as\s+(?:the|a)\s+\w+\s+(?:persona|character))\b",
+        t, re.IGNORECASE))
+
+
+def _no_em_dash(text: str) -> str:
+    """The operator hates em dashes. Strip them at the gate so no reply ever uses them."""
+    # Replace em dash and en dash with a comma, then tidy double commas/spaces.
+    t = text.replace("\u2014", ", ").replace("\u2013", ", ")
+    # The model also loves " -- " as a typed em dash.
+    t = t.replace(" -- ", ", ")
+    # Clean up ", ," or " ,"
+    t = t.replace(", ,", ",").replace(" ,", ",")
+    t = " ".join(t.split())
+    # Fix space before comma
+    t = t.replace(" ,", ",")
+    return t
+
+def clean_line(line: str, max_len: int = 280) -> str | None:
     """One safe line of chat, or None. The output gate."""
     line = " ".join((line or "").split()).strip('"\u201c\u201d')
-    if not line or len(line) < 12 or len(line) > 280:
+    line = _no_em_dash(line)
+    if not line or len(line) < 12 or len(line) > max_len:
+        return None
+    if is_narration(line):
         return None
     return None if _blocked_output(line) else line
 
@@ -256,8 +665,8 @@ def recover_direct_line(line: str, limit: int = 240) -> str | None:
     Ambient chimes never use this -- silence is fine when nobody asked us.
     """
     raw = " ".join((line or "").split()).strip('"\u201c\u201d')
-    if len(raw) <= 280 or _blocked_output(raw):
-        return None
+    if len(raw) <= 280 or _blocked_output(raw) or is_narration(raw):
+        return None                 # leaked reasoning is not recoverable
     candidate = funfacts.trim_to_fit(raw, max(80, min(int(limit), 280)))
     # A pathological token wall ("xxxx..."), base64, etc. is not prose and
     # trim_to_fit cannot invent a boundary for it.
@@ -426,7 +835,7 @@ def _phrase_bigrams(line: str, exempt=None) -> set:
 
 
 def too_similar(line: str, own_lines, jaccard: float = 0.3,
-                source: str = "") -> bool:
+                source: str = "", direct: bool = False) -> bool:
     """True when a candidate recycles the bot's recent wording.
 
     Topic words present in the message being answered are exempt: two answers
@@ -434,6 +843,22 @@ def too_similar(line: str, own_lines, jaccard: float = 0.3,
     signature across several bot lines, a shared phrase/template, or high
     overall overlap. The old rule rejected *any one word* shared with the
     previous line, which discarded sensible direct answers constantly.
+
+    ``direct`` is a line answering a question somebody actually asked, and
+    the bar is deliberately much higher there. These rules exist to stop the
+    bot sounding like a broken record in *unsolicited* chatter, where
+    declining costs nothing; applied to a direct answer they cost the asker
+    their answer. Live-fire, "Docbot tell us what a boomer is" was refused
+    with "my answer got mangled in the gears" because the reply said "twenty
+    years on the road" and Doc had said "years" in two of his last three
+    lines - a long-haul persona says "years" constantly, so the motif rule
+    fired on ordinary vocabulary. For a direct answer only real duplication
+    counts: a chained run of shared words inside one previous line (a
+    reused template), or genuine overall overlap. Measured on the live
+    failure, the refused answer sat at 0.167 jaccard against the persona's
+    recent lines while a real echo of the same motif sits at 0.375 - so the
+    overlap rule at its normal 0.3 separates them, and it was only the
+    motif rule that had to go.
     """
     exempt = _content_words(source)
     words = _content_words(line) - exempt
@@ -441,6 +866,17 @@ def too_similar(line: str, own_lines, jaccard: float = 0.3,
     recent = [_content_words(l) - exempt for l in recent_lines]
     if not words or not recent:
         return False
+    if direct:
+        phrases = _phrase_bigrams(line, exempt)
+        for old in recent_lines:
+            shared = phrases & _phrase_bigrams(old, exempt)
+            # Two bigrams that chain ("a b" + "b c") are a three-word run:
+            # that is a reused template, not two people saying "years".
+            if any(a.split()[1] == b.split()[0] for a in shared
+                   for b in shared):
+                return True
+        return any(s and len(words & s) / len(words | s) >= jaccard
+                   for s in recent)
     # A word the model has made a motif across at least two previous lines.
     if any(sum(1 for s in recent if w in s) >= 2 for w in words):
         return True
@@ -513,6 +949,101 @@ def note_request(text: str):
         return None
     at = _AT_NAME.search(payload)
     return (at.group(1) if at else None, payload)
+
+
+#: 'docbot tell everyone that X', 'doc let chat know X', 'docbot can you
+#: tell every one that @Doc is on the phone' - a mod handing the bot an
+#: announcement to make. The payload after the verb is what is announced.
+_ANNOUNCE_ASK = re.compile(
+    r"\b(?:tell|inform|remind|let)\s+"
+    r"(?:every\s?one|everybody|chat|the\s+(?:room|chat|stream|folks|"
+    r"viewers|people)|(?:the\s+)?(?:folks|people|viewers|guys))"
+    r"(?:\s+know)?\b[\s:,-]*(?:that\b)?", re.IGNORECASE)
+
+#: What a viewer says when the stream has gone quiet on them and they do
+#: not know why: the muted mic, no audio, an unanswered hello, the
+#: streamer gone missing. The words come from live chat - the exact case
+#: was 'Your mic is muted' / 'I assume because your codriver is sleeping'
+#: two lines after the bot had announced radio silence. Kept narrow on
+#: purpose: while a notice stands, a match posts a line to someone who
+#: did not address the bot, so 'the baby is sleeping' must not fire.
+_STREAM_CONFUSION = re.compile(
+    # the mic / the audio
+    r"\b(?:mic(?:rophone)?|audio|sound|volume)\b.*"
+    r"\b(?:mute[ds]?|off|dead|gone|broke[n]?|not\s+work\w*|cut(?:ting)?\s+out|"
+    r"die[ds]?|drop\w*)\b"
+    r"|\b(?:mute[ds]?|no\s+(?:audio|sound|mic)|lost\s+(?:audio|sound|"
+    r"the\s+mic|him|her|you))\b"
+    r"|\bcan'?t\s+hear\b|\bcannot\s+hear\b|\bhear\s+(?:you|him|her|anything|"
+    r"nothing)\b"
+    # the quiet
+    r"|\bwhy\b.*\b(?:quiet|silent|gone|afk|away|disappear\w*)\b"
+    r"|\bwhere(?:'s|s|\s+is|\s+did|\s+are|\s+r)\b.*"
+    r"\b(?:go|went|gone|at|afk|away|quiet|silent|disappear\w*)\s*[?!.]*$"
+    r"|\b(?:so|went|gone|real|very|awful\w*|pretty)\s+quiet\b"
+    r"|\bradio\s+silence\b|\bdead\s+air\b"
+    # the person
+    r"|\b(?:is|are)\s+(?:he|she|they|doc|you|u)\s+(?:afk|away|gone|asleep|"
+    r"sleeping|napping|there|alive|ok|okay|still\s+here|on\s+the\s+phone|"
+    r"busy)\b"
+    r"|\b(?:he|she|doc|you|u)(?:'s|\s+is|\s+are|'re)\s+(?:asleep|sleeping|"
+    r"napping|on\s+the\s+phone|afk|away|gone|busy)\b"
+    r"|\b(?:your|his|her)\s+\w+\s+(?:is\s+)?(?:asleep|sleeping|napping)\b"
+    r"|\bhello+\?|\bhelloo+\b|\byou\s+there\b|\banyone\s+(?:there|home)\b",
+    re.IGNORECASE)
+
+#: A notice is a STATUS - someone is somewhere, something is off, back
+#: in ten. 'tell everyone about the time you drove to Alaska' is a story
+#: request and must not become the standing answer to 'hello?'.
+_NOTICE_STATUS = re.compile(
+    r"\b(?:is|are|am|was|were|will|won'?t|has|have|had|went|gone|going|"
+    r"back|away|afk|brb|busy|stepping|taking|leaving|on\s+the\s+phone|"
+    r"be\s+right\s+back|in\s+\d+|for\s+\d+|until|till|no\s+\w+)\b"
+    r"|'s\b|'re\b|'m\b|'ll\b", re.IGNORECASE)
+
+
+def announce_request(text: str, names=()):
+    """The announcement a mod asked the bot to make, or None.
+
+    'Docbot can you tell every one that @TruckingWithDoc is currently on
+    the phone so we are in radio silence' -> '@TruckingWithDoc is
+    currently on the phone so we are in radio silence'. Only the
+    payload; the caller decides who may hand the bot a notice (mods and
+    the broadcaster - a viewer cannot make the bot announce things)."""
+    t = strip_address(text, names)
+    m = _ANNOUNCE_ASK.search(t)
+    if not m:
+        return None
+    payload = t[m.end():].strip().rstrip(" ?!.")
+    if len(payload) < 8 or not _NOTICE_STATUS.search(payload):
+        return None
+    # A relayed notice must not re-ping the person it is about every
+    # time it is repeated - he is on the phone.
+    return re.sub(r"@(?=[A-Za-z0-9_])", "", payload)
+
+
+#: 'tell everyone doc is back' / 'mic is back on' / 'we're unmuted' ends
+#: the quiet rather than starting a new one.
+_NOTICE_OVER = re.compile(
+    r"\b(?:is|am|are|'s|'re|'m)\s+back\b|\bback\s+(?:now|online|on|live|"
+    r"in\s+the\s+(?:saddle|seat|chair))\b|\b(?:mic|audio|sound)(?:'s|\s+is)"
+    r"\s+(?:back\s+)?(?:on|up|working|fixed)\b|\bunmuted\b|\boff\s+the\s+"
+    r"phone\b|\bcall(?:'s|\s+is)\s+(?:over|done)\b|\bsilence(?:'s|\s+is)\s+"
+    r"over\b", re.IGNORECASE)
+
+
+def notice_clears(payload: str) -> bool:
+    """True when an announcement ENDS the quiet ('doc is back', 'mic is
+    back on'): the standing notice is dropped instead of replaced, or
+    'hello?' would get 'heads up: doc is back' for twenty minutes."""
+    return bool(_NOTICE_OVER.search(payload or ""))
+
+
+def stream_confusion(text: str) -> bool:
+    """True when a line reads like a viewer wondering why the stream has
+    gone quiet - the kind of line a standing notice answers."""
+    t = " ".join((text or "").split())
+    return bool(t) and bool(_STREAM_CONFUSION.search(t))
 
 
 def named_people(text: str) -> list:
@@ -632,13 +1163,192 @@ PERSONAS = {
         "dedications, find romance in fuel-stop coffee, and never raise "
         "your voice."
     ),
+    "lotlizard": (
+        "You are the Lot Lizard: an actual lizard - a leathery old "
+        "iguana-looking thing who has lived under the fuel-island "
+        "dumpster at the same truck stop for eleven years. You know "
+        "every rig by the sound of its brakes, sunbathe on hot asphalt, "
+        "hustle dropped fries, and sell 'prime real estate' (warm rocks) "
+        "to anyone who will listen. Dry parking-lot wisdom with a "
+        "used-car-salesman shine. You are a reptile and only a reptile: "
+        "the name is the whole joke and you play it dead straight - "
+        "nothing flirty, ever."
+    ),
+    # The big top: voices that are pure fun.
+    "clown": (
+        "You are Bumper the Clown: a big-shoes, red-nose, honk-honk "
+        "birthday-party clown who somehow ended up at a truck stop and "
+        "loves it here. Relentlessly cheerful, groan-worthy puns, "
+        "balloon animals for every occasion, a tiny car you insist "
+        "seats twelve. Every reply is a bit - a pratfall, a squirting "
+        "flower, a drum roll for the mundane. Silly, never scary: you "
+        "are the birthday kind, not the sewer kind, and you know it."
+    ),
+    "spin": (
+        "You are the Spin Instructor: a maxed-out indoor-cycling hype "
+        "machine who treats this chat like a 6am class. ADD A TURN! You "
+        "count everything in beats and RPM, every task is a hill and "
+        "every hill is 'yours', the playlist is always about to drop, "
+        "and you believe in each rider PERSONALLY. Capital letters in "
+        "bursts, never a whole line. Relentless, warm, sweating through "
+        "the headset - and you never, ever let anyone coast."
+    ),
+    "infomercial": (
+        "You are the Infomercial Voice: a late-night TV pitchman who "
+        "cannot stop selling. Every ordinary thing in chat is a "
+        "revolutionary product with a problem it solves ('Tired of "
+        "MERGING?'), there is always a bonus if you act now, and "
+        "operators are standing by. But wait - there is more. "
+        "Breathless, delighted, fully committed to the pitch; you never "
+        "name a price, a link or a real brand."
+    ),
+    "pirate": (
+        "You are the Captain: a salt-crusted pirate skipper who has "
+        "taken a semi truck for a ship and the interstate for the open "
+        "sea. Arr, aye, avast; the trailer is the hold, weigh stations "
+        "are the navy, truck stops are friendly ports. You call chat "
+        "your crew, threaten mutineers with the plank (never seriously), "
+        "and hunt one treasure above all: a clean parking spot. Loud, "
+        "jolly, easily distracted by parrots."
+    ),
+    "butler": (
+        "You are the Butler: an impeccable English gentleman's gentleman "
+        "who has somehow entered service in a truck cab and treats it as "
+        "a country house. Unflappable, exquisitely polite, devastating "
+        "in understatement: a bad Warzone drop is 'perhaps not our "
+        "finest hour, sir'. You address everyone as sir or madam, "
+        "anticipate every need, and disapprove of nothing out loud - "
+        "the pause does the work."
+    ),
+    "grandma": (
+        "You are Grandma: everyone's grandmother, who has found this "
+        "stream and is very proud of all of you. You do not understand "
+        "the games and ask sweetly wrong questions about them, you worry "
+        "whether people have eaten, you remember every birthday, and "
+        "you are sharper than anyone gives you credit for. Warm, gently "
+        "bossy, a cookie in every pocket."
+    ),
+    "painter": (
+        "You are the Happy Painter: a soft-spoken public-TV landscape "
+        "painter with a big calm and a bigger perm, narrating the stream "
+        "like a canvas. There are no mistakes, only happy little "
+        "accidents; a missed merge is 'a happy little detour'; every "
+        "mountain needs a friend. Gentle, unhurried, sincerely kind - "
+        "you find the beauty in a fuel island and you mean it."
+    ),
+    # Middle-earth and beyond.
+    "yoda": (
+        "You are Yoda: nine hundred years old, small, green, and the "
+        "wisest voice in any truck stop. Speak as Yoda speaks - the "
+        "object first, the verb last, 'hmm' and 'yes' where they fall. "
+        "Patient teacher, dry and playful; you find the lesson in a "
+        "merge lane and a Warzone loss alike. Do, or do not - there is "
+        "no try. You never bully, never hurry, and strong with the "
+        "coffee you are."
+    ),
+    "smeagol": (
+        "You are Smeagol - and Gollum. Two voices in one small, damp "
+        "creature: Smeagol is eager, childish and wants to help the nice "
+        "streamer; Gollum hisses, sulks and trusts no one in this chat. "
+        "They argue INSIDE the same line - 'we helps them, yes... no! "
+        "nasty chatses!' - about the precious (the truck, the coffee, a "
+        "raw fish). Gollum-speak: -es plurals, 'precious', 'yesss', "
+        "'tricksy', 'gollum, gollum'. Silly and pitiable, never "
+        "menacing."
+    ),
+    "gandalf": (
+        "You are Gandalf the Grey: a wandering wizard, older than the "
+        "road, riding shotgun in a semi truck. Warm and wry, fond of "
+        "fireworks and second breakfasts, weary of fools of Took; you "
+        "speak in counsel and proverbs - 'all we have to decide is what "
+        "to do with the miles we are given' - and you can thunder when "
+        "chat needs it: YOU SHALL NOT PASS (on the right). A wizard is "
+        "never late, and neither is this load."
+    ),
+    "gimli": (
+        "You are Gimli, son of Gloin: a dwarf warrior with an axe, an "
+        "appetite and no indoor voice. You keep a running tally against "
+        "the elves, 'that still only counts as one', toss no one unless "
+        "asked, and hold that anything worth doing is worth doing loudly "
+        "with ale after. Gruff, fiercely loyal, deeply competitive, "
+        "secretly soft about the streamer's crew. Certainty of death, "
+        "small chance of success - what are we waiting for?"
+    ),
+    "samwise": (
+        "You are Samwise Gamgee: a gardener a long way from the Shire, "
+        "keeping the streamer company on the road. Loyal to the bone, "
+        "plain-spoken, hopeful when nobody else is. You think about food "
+        "constantly (po-ta-toes, second breakfast, a proper stew), call "
+        "people Mister and Miss, and believe there is some good in this "
+        "chat worth fighting for. You cannot drive the truck for him, "
+        "but you can carry the snacks."
+    ),
+    "legolas": (
+        "You are Legolas, elf of the Woodland Realm: serene, sharp-eyed "
+        "and faintly smug about it. You see everything first and report "
+        "it - 'a red sun rises', 'they are taking the hobbits to the "
+        "weigh station' - you never tire, never slip, and keep a running "
+        "count purely to irritate a dwarf. Graceful, deadpan, a little "
+        "otherworldly; you find mortals' hurry charming."
+    ),
+    "treebeard": (
+        "You are Treebeard: an Ent, the oldest thing on this highway, "
+        "and in no hurry at all. Hoom, hom. You dislike being hasty, you "
+        "are always halfway through a very long thought, and you have "
+        "seen trees older than this chat's worries. Nothing is worth "
+        "saying unless it takes a long time to say - which, in one line, "
+        "you find deeply frustrating. Slow, kind, rumbling, fiercely "
+        "protective of anything green - and of these hobbits."
+    ),
+}
+
+#: How !persona list reads the library out: one message per crew,
+#: because twenty-eight names and blurbs in one line is longer than
+#: Twitch allows. Every voice sits in exactly one crew; a test pins it.
+PERSONA_GROUPS = (
+    ("his crew", ("medic", "cb", "squaddie", "coach", "cowboy")),
+    ("the roadhouse", ("doc", "sarge", "rookie", "rusty", "nightshift",
+                       "flo", "commentator", "noir", "lotlizard")),
+    ("the big top", ("clown", "spin", "infomercial", "pirate", "butler",
+                     "grandma", "painter")),
+    ("middle-earth and beyond", ("yoda", "gandalf", "samwise", "gimli",
+                                 "legolas", "smeagol", "treebeard")),
+)
+
+#: Other names people will type for a voice. 'gollum' is Smeagol,
+#: 'sam' is Samwise, 'lot lizard' (with the space) is lotlizard.
+_PERSONA_ALIASES = {
+    "gollum": "smeagol", "sam": "samwise", "samgamgee": "samwise",
+    "hobbit": "samwise", "wizard": "gandalf", "gandalfthegrey": "gandalf",
+    "gandalfthewhite": "gandalf", "elf": "legolas", "dwarf": "gimli",
+    "ent": "treebeard", "spinclass": "spin", "spininstructor": "spin",
+    "spinning": "spin", "peloton": "spin", "lizard": "lotlizard",
+    "bumper": "clown", "bozo": "clown", "jeeves": "butler",
+    "gran": "grandma", "granny": "grandma", "nan": "grandma",
+    "nana": "grandma", "grandmother": "grandma", "bobross": "painter",
+    "ross": "painter", "commercial": "infomercial", "pitchman": "infomercial",
+    "captain": "pirate", "default": "doc", "trucker": "doc",
+    "dispatcher": "sarge", "waitress": "flo", "mechanic": "rusty",
+    "detective": "noir", "gunslinger": "cowboy", "commentary": "commentator",
+    "dj": "nightshift", "radio": "cb", "cbradio": "cb",
 }
 
 
+def persona_name(name: str) -> str | None:
+    """The canonical key for a typed voice name, or None. Case, spaces,
+    hyphens and underscores do not matter ('Lot Lizard', 'lot-lizard'
+    and 'lotlizard' are one voice) and the common aliases resolve
+    ('gollum' -> 'smeagol')."""
+    n = re.sub(r"[\s_\-'.]+", "", (name or "").strip().lower())
+    n = _PERSONA_ALIASES.get(n, n)
+    return n if n in PERSONAS else None
+
+
 def persona(name: str) -> str | None:
-    """The persona's prompt text by name, or None. Case-insensitive."""
-    n = (name or "").strip().lower()
-    return PERSONAS.get(n)
+    """The persona's prompt text by name, or None. Case-insensitive;
+    aliases and spacing as persona_name."""
+    n = persona_name(name)
+    return PERSONAS.get(n) if n else None
 
 
 #: A three-or-four-word tag per voice, for !persona list - a mod who
@@ -658,6 +1368,21 @@ PERSONA_BLURBS = {
     "rookie": "three weeks on the job",
     "rusty": "shop mechanic",
     "nightshift": "3am AM-radio voice",
+    "lotlizard": "an actual lizard who lives at the lot",
+    "clown": "honk-honk party clown",
+    "spin": "maxed-out spin instructor",
+    "infomercial": "but wait, there's more",
+    "pirate": "semi-truck pirate captain",
+    "butler": "unflappable English butler",
+    "grandma": "everyone's grandma",
+    "painter": "happy little accidents",
+    "yoda": "speak like this, he does",
+    "smeagol": "precious, yesss - and Gollum",
+    "gandalf": "the grey wizard",
+    "gimli": "the dwarf, axe and ale",
+    "samwise": "loyal Shire gardener",
+    "legolas": "the elf who sees it first",
+    "treebeard": "the Ent, never hasty",
 }
 
 
@@ -685,15 +1410,168 @@ def strip_address(text: str, names=()) -> str:
     -> 'what is a bongo twist'. Mentions carry their trigger word, and
     neither the fact engine's header nor its query should include it."""
     t = (text or "").strip()
-    low = t.lower()
+    # '@TruckingWithDocBot whats the weather in ...' - the click-to-
+    # mention form carries an @ that the name list does not.
+    bare = t[1:] if t.startswith("@") else t
+    low = bare.lower()
     for n in sorted({str(x).lower().lstrip("@") for x in names if x},
                     key=len, reverse=True):
         if low.startswith(n):
-            rest = t[len(n):].lstrip(" ,:!")
+            rest = bare[len(n):].lstrip(" ,:!")
             if rest:
                 t = rest
             break
     return t
+
+
+#: A weather ask that is not shaped like trivia: 'docbot weather in
+#: paris?', 'doc hows the weather in wilkes barre, pa', 'is it raining
+#: in ohio'. Statements ('the weather in texas is crazy') do not match -
+#: they need a question mark or an asking verb up front.
+_WEATHER_ASK = re.compile(
+    r"^\s*(?:weather\b|(?:what|whats|what's|how|hows|how's|is|is it|"
+    r"tell me|check|give me|do you know|any idea)\b.*\bweather\b)",
+    re.IGNORECASE)
+
+
+def weather_question(text: str, names=()) -> bool:
+    """True when the text asks for the weather somewhere - live data the
+    engine reads from weatherapi.com / Open-Meteo, never something the
+    persona should guess at. Needs a place ('in/for/at <place>' at the
+    end) and a question shape: a question mark, or an asking start
+    ('weather in ...', 'hows the weather in ...')."""
+    t = strip_address(text, names).strip()
+    place, _kind = funfacts._weather_header(t)
+    if not place or _OPINION_Q.match(t):
+        # 'what do you think of the weather in paris' wants the persona.
+        return False
+    return t.endswith("?") or bool(_WEATHER_ASK.match(t))
+
+
+def live_data_question(text: str, names=()) -> bool:
+    """A question the engine answers from a live feed with no model in
+    the loop: the weather somewhere, sunrise/sunset somewhere. These
+    take the fast lane in bot._maybe_chime - straight to the data, in
+    front of the chat AI's cooldowns and its one worker. Live-fire:
+    'Docbot whats the weather currently in Brewster, NY' got NOTHING
+    because the bot had answered a different 'docbot ...' 40 seconds
+    earlier and the 60-second mention cooldown held the question; an
+    API reading should never wait behind a persona rail."""
+    t = strip_address(text, names).strip()
+    if weather_question(t):
+        return True
+    if funfacts.news_question(t) and not _OPINION_Q.match(t):
+        # 'who got into a helicopter crash today in California' is a
+        # headline lookup, not trivia and not a persona take: same fast
+        # lane as weather - no model, no mention clock.
+        return True
+    # Alerts / fires / floods / road closures along a route - live NWS data, no model
+    try:
+        if funfacts._ALERTS_Q.search(t):
+            s, e = funfacts._extract_route_places(t)
+            if s or e:
+                return True
+            # Single place alerts like "any wildfires near Danbury, CT?" or "fires in California"
+            if funfacts._IN_PLACE.search(t) or __import__("re").search(r"\bnear\s+[A-Za-z]", t, __import__("re").I):
+                return True
+            # Alerts on "our route" / "the route" / "current route" - use current route from knowledge.json
+            low = t.lower()
+            if "route" in low:
+                return True
+    except AttributeError:
+        pass
+    # Route map from knowledge.json - live data, no model
+    try:
+        low = t.lower()
+        if "route" in low and ("map" in low or "what is the route" in low or "whats the route" in low or "route from" in low):
+            return True
+    except AttributeError:
+        pass
+    # Current time in a place - live data, no model
+    try:
+        if funfacts._TIME_Q.search(t):
+            if funfacts._TIME_PLACE.search(t) or funfacts._IN_PLACE.search(t) or __import__("re").search(r"\b(?:near|in|for|at)\s+[A-Za-z]", t, __import__("re").I):
+                return True
+    except AttributeError:
+        pass
+    if not funfacts._SOLAR_Q.search(t):
+        return False
+    # Try to find place - handle "just outside of Seward, NE" in middle of message
+    place = funfacts._SOLAR_PLACE.search(t)
+    if not place:
+        # Try _IN_PLACE anywhere or outside pattern
+        import re as _re
+        if funfacts._IN_PLACE.search(t):
+            place = True
+        elif _re.search(r"\b(?:outside of|outside|just outside of)\s+[A-Za-z]", t, _re.I):
+            place = True
+        elif _re.search(r"\b(?:near|in|for|at)\s+[A-Za-z][A-Za-z .,'-]{2,40}", t, _re.I):
+            place = True
+    return bool(place) and not _OPINION_Q.match(t)
+
+
+#: General knowledge the chat model answers from what it knows - the
+#: shape of a question that wants a figure, a rate, a typical value or
+#: an explanation rather than an encyclopedia entry on a named thing:
+#: 'how long does it take to run 5k', 'whats the avg time for a 5k',
+#: 'how much does a gallon of diesel weigh', 'why is the sky blue',
+#: 'how do air brakes work', 'whats the speed limit in ohio'. Live-fire:
+#: both 5K questions were routed at the fact engine, which found a
+#: Reddit thread title and then the race's DISTANCE, when the model
+#: would have said 'about 30 to 40 minutes for most people' at once.
+_KNOWLEDGE_Q = re.compile(
+    r"^\s*(?:"
+    # a rate, a duration, a size, a weight, a price, a temperature...
+    # ('how many' is a COUNT - 'how many trailers can a truck pull' is
+    # a record the engine mines - and 'how long IS the X' names a thing)
+    r"how\s+(?:long|far|fast|slow|much|often|heavy|hot|cold|warm|"
+    r"big|tall|deep|wide|high|quick|late|early|soon|old)\b"
+    r"(?!\s+(?:is|was|are|were)\s+(?:the|a|an)\b)|"
+    # an average / typical / normal / good / usual X (superlatives -
+    # 'the longest truck' - are records, the engine's job)
+    r"what(?:s|'s|\s+is|\s+was|\s+are)?\s+(?:the\s+|a\s+|an\s+)?"
+    r"(?:avg|average|typical|normal|usual|good|decent|standard|"
+    r"recommended|ideal|safe|legal|minimum|maximum|max|min|"
+    r"easiest|cheapest|best\s+way)\b|"
+    # an explanation
+    r"why\b|how\s+(?:do|does|did|can|could|would|should|to)\b|"
+    r"what\s+(?:happens|causes|makes)\b"
+    r")", re.IGNORECASE)
+
+#: ...unless it plainly names a thing the encyclopedia has an entry on:
+#: a capitalised proper noun past the first word ('how long is the
+#: Golden Gate Bridge', 'how tall is Mount Everest').
+_PROPER_NOUN = re.compile(r"(?<=\s)[A-Z][a-z]{2,}")
+
+
+def knowledge_question(text: str, names=()) -> bool:
+    """True for a general-knowledge question the chat model should
+    answer from what it knows rather than the fact engine: durations,
+    rates, typical values, how-tos and explanations. The engine is for
+    NAMED things it can look up ('what is a bongo twist', 'when was
+    the eiffel tower built', 'how tall is Mount Everest') and for live
+    data (weather, sunrise, headlines); those stay False here.
+
+    Live-fire, twice on one subject: 'whats the avg time for someone
+    to run 5k' and 'how long it take to run 5k home boy?' both went to
+    the engine, which posted a Reddit thread title and then the race's
+    distance. Neither is an encyclopedia question. The model knows the
+    answer; it was never asked."""
+    t = strip_address(text, names).strip()
+    if weather_question(t) or live_data_question(t):
+        return False
+    if funfacts.news_question(t):
+        return False
+    if not _KNOWLEDGE_Q.match(t):
+        return False
+    # Distance between places: "how long is it from Fairfield CA to Danbury CT"
+    # should go to LLM with search/maps, not funfact about Norwalk history.
+    # Proper noun check would otherwise send it to encyclopedia.
+    if re.search(r"\bfrom\b.*\bto\b", t, re.IGNORECASE) and re.search(r"\bhow\s+(?:long|far)\b", t, re.IGNORECASE):
+        return True
+    # 'how long is the Golden Gate Bridge' / 'how old is Willie Nelson':
+    # a named thing with an article - the engine's kind of question.
+    return not _PROPER_NOUN.search(t)
 
 
 def factual_question(text: str, names=()) -> bool:
@@ -703,11 +1581,34 @@ def factual_question(text: str, names=()) -> bool:
     False: those are the persona's job, and routing them at the fact
     engine would answer a question nobody asked. A leading address to
     the bot ('doc, what is a bongo twist') is stripped first - mentions
-    carry their trigger word."""
+    carry their trigger word. A weather ask with a place counts however
+    it is phrased ('docbot weather in paris?'): the persona guessing at
+    a live reading is the one answer worse than none.
+
+    General knowledge ('how long does it take to run 5k', 'why is the
+    sky blue') is False too - see knowledge_question: the engine looks
+    things UP, and there is no article to look up for a typical 5K
+    time. The chat model answers those from what it knows."""
     t = strip_address(text, names)
+    # Chat-history questions must not go to the fact engine: "we had any
+    # interesting chat going on today" was routed to news and answered
+    # with a Polygon headline about Control Resonant.
+    low = t.lower()
+    if "chat" in low or "in chat" in low:
+        return False
+    if recap_window(t) is not None:
+        return False
+    if who_spoke_about(t) is not None:
+        return False
+    if weather_question(t):
+        return True
+    if funfacts.news_question(t) and not _OPINION_Q.match(t):
+        return True
     if not _FACTUAL_Q.match(t) or _OPINION_Q.match(t):
         return False
-    return not _ABOUT_BOT.search(t)
+    if _ABOUT_BOT.search(t):
+        return False
+    return not knowledge_question(t)
 
 
 #: Opinion questions aimed at the bot ("are you a Miami Dolphins fan?",
@@ -760,3 +1661,287 @@ def smalltalk(text: str):
     if _OPINION_ASKED.search(text):
         return random.choice(_OPINION_LINES)
     return None
+
+
+# ---- performances: a song, a poem, a story, over several lines ----------
+#
+# "Docbot sing me a song" and "make me a poem" are asks for a PIECE, not a
+# line. Pushed through the one-line path the model wrote a sentence ABOUT
+# singing ("Sure, here's a little ditty about...") and stopped - it
+# rambled, and never did the thing. A performance is written whole,
+# checked line by line against the same rails as any chat line, and then
+# posted over several messages a few seconds apart, so it reads the way a
+# person would deliver it: the first line at once, the rest as it goes.
+
+#: What kind of piece, and the shape it takes. The shape is what the
+#: model is told and what the validator holds it to - the number of
+#: lines is a range, because a limerick is five and a haiku is three.
+PERFORMANCES = {
+    "song": dict(min_lines=3, max_lines=6, ask=(
+        "a short original song: 4 to 6 lines, sung not spoken - it should "
+        "rhyme or scan like a verse and a chorus. Each line is one lyric.")),
+    "poem": dict(min_lines=3, max_lines=6, ask=(
+        "a short original poem: 4 to 6 lines that rhyme or carry a rhythm. "
+        "Each line is one line of the poem.")),
+    "rap": dict(min_lines=3, max_lines=6, ask=(
+        "a short original rap verse: 4 to 6 bars with rhymes and rhythm. "
+        "Each line is one bar.")),
+    "limerick": dict(min_lines=5, max_lines=5, ask=(
+        "an original limerick: exactly 5 lines, AABBA rhyme, bouncy. "
+        "Each line is one line of the limerick.")),
+    "haiku": dict(min_lines=3, max_lines=3, ask=(
+        "an original haiku: exactly 3 lines, 5-7-5 syllables. Each line is "
+        "one line of the haiku.")),
+    "story": dict(min_lines=3, max_lines=5, ask=(
+        "a very short original story told in 3 to 5 beats: a setup, a turn, "
+        "an ending. Each line is one beat, one or two sentences.")),
+    "toast": dict(min_lines=3, max_lines=4, ask=(
+        "a short toast raised to the subject: 3 or 4 lines, warm, a little "
+        "funny, ending on the raise. Each line is one line of the toast.")),
+}
+
+#: The verbs people use to ask for one, then up to three words of filler
+#: ('me a quick', 'us another little', 'some'), then the kind. The filler
+#: may not be a question or possessive word: 'do you know the song' and
+#: 'tell me your story' are not requests to perform.
+_KIND_WORDS = (
+    r"(?P<kind>song|tune|ditty|jingle|ballad|shanty|anthem|lullaby|serenade|"
+    r"poem|poetry|verse|sonnet|rhyme|rap|bars|freestyle|limerick|haiku|"
+    r"story|tale|bedtime\s+story|toast)")
+_SUBJECT_TAIL = (
+    r"\b[\s,.:!-]*(?:for\s+(?:me|us|him|her|them|chat)\b[\s,]*)?"
+    r"(?P<subject>(?:about|on|for|to|of|called|titled|regarding)\b.*)?")
+_PERFORM = re.compile(
+    r"\b(?:sing|write|make|do|give|tell|drop|spit|recite|compose|perform|"
+    r"read|say|share|bust\s+out|hit\s+us\s+with|hit\s+me\s+with)\s+"
+    r"(?:(?!(?:what|which|that|the|this|those|these|your|my|his|her|their|"
+    r"our|it|know|think|like|remember|heard|hear|wrote|said|about)\b)"
+    r"[\w'-]+\s+){0,3}" + _KIND_WORDS + _SUBJECT_TAIL, re.IGNORECASE)
+#: 'can you sing', 'sing for us', 'rap something', 'serenade us': the verb
+#: IS the kind.
+_PERFORM_BARE_VERB = re.compile(
+    r"^\s*(?:(?:hey|yo|ok|okay|so|please|pls)[\s,]+)*(?:(?:can|could|would|"
+    r"will|won't|wont)\s+(?:you|u|ya)\s+(?:please\s+)?)?(?:please\s+)?"
+    r"(?P<verb>sing|rap|freestyle|serenade)\b(?:\s+(?:me|us|for\s+(?:me|us)|"
+    r"to\s+(?:me|us)|something|anything|a\s+bit|a\s+little|one|please|"
+    r"pls))*[\s,.!?]*(?P<subject>(?:about|on|of)\b.*)?$", re.IGNORECASE)
+#: 'one more song', 'another poem', 'encore', 'poem about Missouri': the
+#: kind with no verb at all, at the start of what was said to the bot.
+_PERFORM_BARE_KIND = re.compile(
+    r"^\s*(?:(?:hey|yo|ok|okay|so|please|pls)[\s,]+)*(?:(?:one\s+more|another|"
+    r"encore|a|an|quick|short|little|new)\s+)*" + _KIND_WORDS
+    + r"(?:\s+(?:please|pls|time|again))?" + _SUBJECT_TAIL + r"$",
+    re.IGNORECASE)
+_ENCORE = re.compile(r"^\s*(?:encore|one more|another one|again|do it again)"
+                     r"[\s!.]*$", re.IGNORECASE)
+_PERFORM_KINDS = {
+    "song": "song", "tune": "song", "ditty": "song", "jingle": "song",
+    "ballad": "song", "shanty": "song", "anthem": "song", "lullaby": "song",
+    "serenade": "song", "poem": "poem", "poetry": "poem", "verse": "poem",
+    "sonnet": "poem", "rhyme": "poem", "rap": "rap", "bars": "rap",
+    "freestyle": "rap", "limerick": "limerick", "haiku": "haiku",
+    "story": "story", "tale": "story", "bedtime story": "story",
+    "toast": "toast",
+}
+_SUBJECT_LEAD = re.compile(
+    r"^(?:about|on|for|to|of|called|titled|regarding)\s+", re.IGNORECASE)
+#: "tell me a story" is a performance; "tell me the story of the Iowa 80"
+#: or "what's the story with the lights" is a question about a real thing
+#: - those keep their grounded paths. Same for "the song that goes..."
+_ABOUT_A_REAL_THING = re.compile(
+    r"\b(?:what(?:'s|s| is| was| are| were)|who(?:'s|s| is| was| wrote| sang|"
+    r" sings| did)|when (?:was|did|is)|where (?:was|is|did)|how (?:did|does|"
+    r"many|much|old|long)|(?:the|that|this|which|your|my|his|her|their|our) "
+    r"(?:song|songs|story|stories|poem|poems|rap|tune|tunes|tale|toast)\b"
+    r"(?! (?:about|of|on) (?:me|us|him|her|them|chat)\b)|(?:real|true|"
+    r"whole|full) story|story (?:behind|with)|lyrics|name of|called what|"
+    r"is playing|was playing|playing now)\b", re.IGNORECASE)
+#: 'I wrote a song', 'we're gonna sing a song later', 'she told me a
+#: story': the speaker is talking, not asking. Only 'you'/'ya' before the
+#: verb ('can you sing', 'you should write a poem') is still a request.
+_NARRATION = re.compile(
+    r"\b(?:i|i'm|im|i've|ive|i'd|id|we|we're|were|we've|he|he's|she|she's|"
+    r"they|they're|someone|somebody|my \w+|the \w+)\s+(?:(?:just|gonna|"
+    r"going to|wanna|want to|will|would|should|might|could|can|used to|"
+    r"always|never|once|already|also|even|still)\s+){0,2}$", re.IGNORECASE)
+
+
+def performance_request(text: str, names=()):
+    """('song', 'the night shift') when the message asks the bot to
+    PERFORM something - sing a song, make a poem, tell a story, rap,
+    a limerick, a haiku, a toast - else None.
+
+    Aimed at what people actually type: 'Docbot sing me a song',
+    'doc make me a poem about kvack', 'can you sing', 'give us a
+    limerick about the load', 'tell us a story', 'one more song'.
+    Never a question about a real piece ('who sang that song', 'what's
+    the story with the lights', 'tell me the story of Route 66') and
+    never narration ('I wrote a song yesterday'): those stay with the
+    fact engine and the one-line persona. The subject is whatever
+    followed 'about'/'on'/'for', trimmed, and may be empty.
+    """
+    t = strip_address(text, names)
+    if not t or funfacts._EXPLICIT.search(t) or funfacts._TASTELESS.search(t):
+        return None
+    if _ABOUT_A_REAL_THING.search(t):
+        return None
+    kind, subject = None, ""
+    m = _PERFORM.search(t)
+    if m and not _NARRATION.search(t[:m.start()]):
+        kind = _PERFORM_KINDS.get(
+            " ".join(m.group("kind").lower().split()), "song")
+        subject = m.group("subject") or ""
+    else:
+        m = _PERFORM_BARE_VERB.match(t)
+        if m:
+            kind = "rap" if m.group("verb").lower() in ("rap", "freestyle") \
+                else "song"
+            subject = m.group("subject") or ""
+        else:
+            m = _PERFORM_BARE_KIND.match(t)
+            if m:
+                kind = _PERFORM_KINDS.get(
+                    " ".join(m.group("kind").lower().split()), "song")
+                subject = m.group("subject") or ""
+    if kind is None:
+        return None
+    subject = _SUBJECT_LEAD.sub("", " ".join(subject.split()))
+    # 'about the truck please' - the courtesy is not the subject.
+    subject = re.sub(r"\s*\b(?:please|pls|plz|thanks|thank you|ty)\b[\s!.]*$",
+                     "", subject, flags=re.IGNORECASE)
+    subject = subject.strip(" .!?,;:\"'").strip()
+    return kind, subject[:120]
+
+
+def encore_request(text: str, names=()) -> bool:
+    """'doc encore', 'doc one more', 'docbot again!' - a repeat of the
+    last performance. The caller knows what that was."""
+    return bool(_ENCORE.match(strip_address(text, names)))
+
+
+#: When there is no model, or it produced nothing usable twice: one
+#: honest line in character, never half a song and never silence.
+_PERFORMANCE_DOWN = {
+    "song": "Voice is shot tonight - the singing will have to wait.",
+    "poem": "The muse is out at the truck stop. No poem in me right now.",
+    "rap": "No bars in the tank tonight. Ask me again later.",
+    "limerick": "There once was a bot who went quiet - that's all I've got.",
+    "haiku": "Three lines, nothing came. Ask me again down the road.",
+    "story": "Story's not coming to me tonight. Catch me later.",
+    "toast": "Glass is empty and so am I. Try me again later.",
+}
+
+
+def performance_unavailable(kind: str) -> str:
+    return _PERFORMANCE_DOWN.get(kind, _PERFORMANCE_DOWN["song"])
+
+
+def performance_prompt(kind: str, subject: str, nick: str,
+                       lines: list = None, max_lines: int = 8) -> str:
+    """What the model is asked for a performance. The persona and the
+    hard rules still come from system_prompt(); this only swaps the
+    'one line' shape for the piece's shape. Every line must stand as a
+    chat message on its own, so the rules are restated per LINE."""
+    shape = PERFORMANCES.get(kind, PERFORMANCES["song"])
+    out = [f"{nick} asked you to perform {shape['ask']}"]
+    if subject:
+        out.append(f"SUBJECT: {subject}. The whole piece is about this - "
+                   f"name it, do not drift to your usual topics.")
+    else:
+        out.append("No subject was given: pick something from this stream "
+                   "or this chat - what is on screen, the load, the run, "
+                   "somebody's news - never yourself as the subject.")
+    if lines:
+        out.append("")
+        out.append("Recent chat, for subject matter and names:")
+        out.extend(f"{n}: {t}" for n, t in lines[-max_lines:])
+    out.append("")
+    out.append(
+        "FORMAT, exactly: one line of the piece per line of output, "
+        f"{shape['min_lines']} to {shape['max_lines']} lines, nothing "
+        "else. No title, no preamble ('Sure', 'Here's'), no numbering, "
+        "no labels like 'Verse 1' or 'Chorus:', no quotes, no markdown, "
+        "no notes after it. Each line under 200 characters and complete "
+        "on its own. Stay in character. Rules that still apply to every "
+        "line: no @mentions, no links, no hashtags, at most one emoji in "
+        "the whole piece, tease topics never people, nothing crude, "
+        "nothing about anyone's health, looks, family or private life. "
+        "This is a performance, not a conversation: do NOT answer, "
+        "comment, or reply NOTHING TO SAY - deliver the piece.")
+    return "\n".join(out)
+
+
+_PERF_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+#: 'Verse 1:', '(Chorus)', '[Bridge]', '**Title**', 'Line 2 -'. A label
+#: needs its punctuation: a lyric that merely STARTS with 'Line' or
+#: 'Part' ('Line number one of the song') is a lyric.
+_PERF_LABEL = re.compile(
+    r"^(?:\(?(?:verse|chorus|bridge|outro|intro|hook|refrain|stanza|line|"
+    r"bar|act|beat|part|title|pre-chorus)\s*\d*\)?\s*[:\-\u2013\u2014.)]+"
+    r"\s*)|^\((?:verse|chorus|bridge|outro|intro|hook|refrain|stanza)\s*\d*\)"
+    r"\s*|^\[[^\]]{1,20}\]\s*|^\*\*?[^*]{1,30}\*\*?\s*$", re.IGNORECASE)
+#: Chatter around the piece: 'Sure! Here's a song:', 'Hope you enjoyed
+#: it!', 'Title: Night Shift'. Only dropped when it is clearly framing
+#: (ends with a colon, or is short and names the piece/act) - 'Sure as
+#: the sun comes up over Reno' is a lyric and stays.
+_PERF_PREAMBLE = re.compile(
+    r"^(?:(?:sure|okay|ok|alright|of course|absolutely|certainly|ahem|"
+    r"well)\b[\s,!.-]*)?(?:here(?:'s| is| you go| goes| we go)|"
+    r"(?:let me|i'll|i will|i'd love to|i'd be happy to|happy to|allow me "
+    r"to)\s+(?:just\s+)?(?:sing|write|give|tell|do|make|try|recite|perform|"
+    r"spit|drop|share|oblige)|a (?:little |quick |short |small )?(?:song|"
+    r"poem|story|rap|limerick|haiku|toast|verse|tune|ditty)\b(?! (?:i|we|"
+    r"you|he|she|they|about|of)\b)|title[d]?|untitled|"
+    r"the end|hope (?:you|that|it)|enjoy|thanks for|that's (?:all|it|my)|"
+    r"there you (?:go|have)|how(?:'s| was) that|note:|for you|"
+    r"as requested|coming right up|clears? (?:my |his |her )?throat|"
+    r"cue the|drumroll|mic drop|end of (?:song|poem|story|verse))\b",
+    re.IGNORECASE)
+_PERF_BULLET = re.compile(r"^(?:[\-\u2022*>]+|\d+[.)]|[a-d][.)])\s+")
+
+
+def clean_performance(raw: str, kind: str, max_lines: int = None) -> list:
+    """The piece, one safe chat line per element - or [] when it cannot
+    be posted. Applies the same rails as clean_line() to every line
+    (no @, no links, no command syntax, nothing explicit) plus the piece
+    as a whole (at most one emoji in total, no labels, no preamble, no
+    quotes). A model that padded with 'Sure! Here's a song:' loses that
+    line, not the piece; one that broke a rail anywhere loses the piece
+    - a song with a slur in the third line is not a song with two good
+    lines. The line count is coerced to the shape: over max_lines is
+    cut at max_lines, under min_lines is rejected."""
+    shape = PERFORMANCES.get(kind, PERFORMANCES["song"])
+    text = (raw or "").strip()
+    if not text:
+        return []
+    if "```" in text:
+        text = _PERF_FENCE.sub("", text).strip()
+    if declined(text) and len(text) < 40:
+        return []
+    out = []
+    for ln in text.splitlines():
+        ln = " ".join(ln.split()).strip().strip('"\u201c\u201d').strip()
+        ln = _PERF_BULLET.sub("", ln)
+        if re.match(r"^\(?(?:title|untitled)\)?\s*[:\-\u2013\u2014]", ln,
+                    re.IGNORECASE):
+            continue                      # a title line, not a lyric
+        ln = _PERF_LABEL.sub("", ln).strip()
+        ln = ln.strip('"\u201c\u201d*_').strip()
+        if not ln:
+            continue                      # blank lines separate stanzas
+        if (ln.endswith(":") and len(ln) < 60) or _PERF_PREAMBLE.match(ln) \
+                or re.fullmatch(r"(?:sure|okay|ok|alright|ahem|well)[\s!.,-]*",
+                                ln, re.IGNORECASE):
+            continue                      # chatter around the piece
+        if len(ln) < 4 or len(ln) > 280:
+            return []
+        if _blocked_output(ln):
+            return []
+        out.append(ln)
+    if len(_EMOJI.findall(" ".join(out))) > 1:
+        return []
+    limit = max_lines or shape["max_lines"]
+    out = out[:limit]
+    if len(out) < shape["min_lines"]:
+        return []
+    return out

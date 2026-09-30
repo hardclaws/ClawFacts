@@ -7,6 +7,7 @@ Covers: device login, token reuse, auto-refresh, and --login (force re-login).
 import http.server
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -98,6 +99,10 @@ KNOWN_GOOD_SCOPES = {
     "channel:moderate", "channel:manage:moderators",
     "user:read:moderated_channels", "user:read:email",
     "whispers:read", "whispers:edit",
+    # Send Whisper (dev.twitch.tv/docs/api/reference#send-whisper) wants
+    # user:manage:whispers; receiving them over EventSub wants
+    # user:read:whispers. whispers:read/edit above are the retired pair.
+    "user:manage:whispers", "user:read:whispers",
 }
 
 
@@ -190,6 +195,67 @@ def test_the_two_silent_renewal_failures_now_say_why():
           "themselves")
 
 
+def test_doctor_names_the_missing_scopes_and_the_command_that_exists():
+    """Live-fire, from the operator's own startup log:
+
+        [access] token account='truckingwithdocbot'
+                 scopes=chat:edit,chat:read,moderator:read:followers
+
+    Three of the five scopes auth.SCOPES asks for. The two missing are
+    moderator:manage:banned_users and user:manage:whispers, so !ban /
+    !timeout / !unban are refused by Twitch with 401 and mod PM replies
+    cannot send. --doctor is how the operator finds that out, and it also
+    tells them what to run - which on a stock Windows install is `python`,
+    not `python3`. Both halves are asserted here, on both OSes.
+
+    Uses importlib.reload rather than a fresh import: reload mutates the
+    module object in place, so the module-level `auth` name this suite uses
+    everywhere else keeps resolving. A plain `import auth` inside the
+    function would rebind it to a local for the whole body and break every
+    earlier reference.
+    """
+    import importlib
+    orig = (auth.load_tokens, auth.validate_token, auth.TOKENS_PATH)
+    real = os.name
+    have = ["chat:edit", "chat:read", "moderator:read:followers"]
+    try:
+        for osname, want in (("posix", "python3"), ("nt", "python")):
+            os.name = osname
+            importlib.reload(auth)      # recomputes PY from os.name
+            auth.TOKENS_PATH = "tokens.json"
+            auth.load_tokens = lambda: {
+                "access_token": "a", "refresh_token": "r",
+                "expires_at": 9e12, "client_id": "cid", "scopes": have}
+            # Stub the network: --doctor validates against id.twitch.tv,
+            # and without this it returns early before the scope branch.
+            auth.validate_token = lambda t: {
+                "login": "truckingwithdocbot", "user_id": "556082372",
+                "scope": list(have)}
+
+            assert auth.PY == want, (osname, auth.PY)
+            text = "\n".join(auth.describe_login(
+                {"client_id": "cid", "client_secret": "s"}))
+            # it names BOTH missing scopes, not just the first
+            assert "moderator:manage:banned_users" in text, text
+            assert "user:manage:whispers" in text, text
+            # and the remedy is the command that exists on this OS
+            assert "Run: %s bot.py --login" % want in text, text
+            if want != "python3":
+                assert "python3" not in text, text
+            # the consequence is spelled out, so a failing !ban is not a
+            # mystery
+            assert "!ban / !timeout / !unban will be refused" in text, text
+            # and the scopes it does have are listed
+            assert "validate     : OK as 'truckingwithdocbot'" in text, text
+    finally:
+        os.name = real
+        importlib.reload(auth)          # restore the real PY
+        (auth.load_tokens, auth.validate_token,
+         auth.TOKENS_PATH) = orig
+    print("[PASS] --doctor names the missing scopes and a command that "
+          "exists on the operator's OS")
+
+
 def test_a_warning_is_printed_once_not_every_wake_up():
     """refresh_if_possible runs every 30 minutes for as long as the bot is up,
     so an ungated print would scroll the same line past all night."""
@@ -272,6 +338,7 @@ def main():
     test_the_refresh_margin_outlives_the_keeper_interval()
     test_the_two_silent_renewal_failures_now_say_why()
     test_a_warning_is_printed_once_not_every_wake_up()
+    test_doctor_names_the_missing_scopes_and_the_command_that_exists()
     tmp = tempfile.mkdtemp()
     tokens_path = os.path.join(tmp, "tokens.json")
 

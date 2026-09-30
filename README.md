@@ -21,6 +21,7 @@ FunFact | Milford, Pennsylvania: Milford was founded in 1796 by Judge John Biddi
    - **DuckDuckGo Instant Answers** — fallback if Wikipedia fails or rate-limits.
    - **Geocoder + coordinate search** — if text search finds nothing (very remote spots), the bot geocodes the name with OpenStreetMap's Nominatim (free, no key, covers even tiny villages), retries with the canonical "Name, State", then uses Wikipedia's coordinate search for the nearest notable place.
    - **Open-Meteo live clock data** — sunrise and sunset questions use the requested place's coordinates and timezone, not search-result snippets or an LLM.
+   - **weatherapi.com (optional key) / Open-Meteo** — weather questions are live readings, never snippets; see [Weather](#weather).
    - **`spicy_facts.json`** — a built-in database of verified adult-rated facts (used only when spice="spicy").
    - **Google (optional)** — with your own API key + search-engine ID, searches
      the web with `safe=off` for adult-rated local stories.
@@ -100,6 +101,15 @@ Edit `config.json`:
 > `"llm_api_key": "gsk_..."`, `"llm_base_url": "https://api.groq.com/openai/v1"`,
 > `"llm_model": "openai/gpt-oss-120b"`
 >
+> **NVIDIA NIM** — free developer key, 100+ models, ~40 req/min:
+> `"llm_api_key": "nvapi-..."`, `"llm_base_url": "https://integrate.api.nvidia.com/v1"`,
+> `"llm_model": "openai/gpt-oss-120b"`
+>
+> **Google AI Studio (Gemini)** — free per-project quota, strongest free
+> models: `"llm_api_key": "..."`,
+> `"llm_base_url": "https://generativelanguage.googleapis.com/v1beta/openai"`,
+> `"llm_model": "gemini-3.8-flash"`
+>
 > **Local Ollama** — unfiltered, no key needed:
 > `"llm_api_key": ""`, `"llm_base_url": "http://localhost:11434/v1"`,
 > `"llm_model": "llama3.1:8b"`
@@ -122,6 +132,7 @@ Edit `config.json`:
 | `llm_base_url`     | LLM API base URL (default `https://api.groq.com/openai/v1`; Ollama = `http://localhost:11434/v1`). |
 | `llm_model`        | LLM model (default `openai/gpt-oss-120b`; Ollama e.g. `llama3.1:8b`). |
 | `serper_api_key` | **Recommended.** Serper web-search key (free tier 2,500 queries). |
+| `weatherapi_key`   | Optional [weatherapi.com](https://www.weatherapi.com/) key (free tier 1M calls/month). Set it and weather questions are answered as one sentence to the asker — see [Weather](#weather). Empty = the keyless Open-Meteo reply. |
 | `google_api_key`   | Legacy Google Custom Search key (closed to new customers).     |
 | `google_cx`        | Optional Google search-engine ID (from programmablesearchengine.google.com). |
 | `max_message_chars`| Hard cap for a chat message (Twitch caps ~500; default 450).   |
@@ -141,6 +152,12 @@ TWITCH_NICK=bot_name TWITCH_CLIENT_ID=your_id TWITCH_CHANNEL=#channel python3 bo
 python3 bot.py          # macOS / Linux
 python bot.py           # Windows (or just double-click start-bot.bat)
 ```
+
+> **Throughout this document, `python3` means `python` on Windows.**
+> Wherever you see `python3 bot.py …`, run `python bot.py …` instead — or
+> double-click `start-bot.bat`, which finds Python for you. A stock Windows
+> install has no `python3`. The bot knows this: every command it prints in
+> chat or the log names the one that exists on your machine.
 
 **On Windows** you can double-click **`start-bot.bat`** — it finds Python, runs
 from the bot's own folder, and restarts the bot automatically if it ever
@@ -197,7 +214,43 @@ always-on (so it answers chat even when your PC is off) is a small free cloud VM
 running it under `systemd`. A complete step-by-step guide (host options,
 GitHub setup, device login over SSH, systemd unit, logs) is in
 **[`deploy/DEPLOY.md`](deploy/DEPLOY.md)**, with ready-made
-`deploy/funfact-bot.service` and `deploy/bot.env.example` files.
+`deploy/funfact-bot.service` and `deploy/bot.env.example` files. Short
+version: Oracle Cloud's Always Free VM is the free host that fits (the bot
+needs a disk that survives restarts and a process that never sleeps, which
+rules out the "free web app" platforms); Google Cloud's `e2-micro` is the
+runner-up; the guide's Step 0 table has the 2026 fine print.
+
+### The admin panel
+
+Once the bot lives on a server there is no console window, so the bot can
+serve one: a small password-protected web page (`adminpanel.py`, standard
+library only, running inside the bot process) with a dashboard (connected or
+not, uptime and build, whether the bot is a mod, the AI provider and which
+models are resting, Twitch token health), the live log with a filter, the
+`!bot` / `!so` / `!cb` / `!beef` switches, speak-as-the-bot, the standing
+notice, reminders, custom commands, haul, sub goal and voice, viewer memory
+(view and `!forget`), a `config.json` editor with masked secrets that applies
+live where it can and says "restart" where it cannot, panel users, a Twitch
+re-login (the same device code flow, shown in the page) and a Restart button.
+
+```bash
+python3 bot.py --admin-user yourname               # set a password (10+ characters)
+python3 bot.py --admin-user modname --role mod     # optional moderator login
+# config.json: "admin_panel_enabled": true   ->  restart  ->  http://localhost:8477
+```
+
+Two roles: **admin** does everything; **mod** gets the switches, chat,
+reminders, commands and the stream tab but never config, secrets, memory,
+users or restart. Logins are salted PBKDF2 hashes in `admin_users.json`
+(gitignored), sessions are `HttpOnly; SameSite=Strict` cookies that expire
+after 12 idle hours, five wrong passwords lock a name for 15 minutes with a
+one-second cost per miss, every state change is a POST with a per-session
+CSRF token, and every action lands in the bot's log as `[admin] user: …`.
+
+The panel listens on `127.0.0.1` by default and **refuses** `0.0.0.0` or a
+public address unless `admin_panel_public` is set as well. On a server, reach
+it over Tailscale (bind it to the VM's `100.x` address) or an SSH tunnel -
+`deploy/DEPLOY.md` Step 7 walks through both.
 
 Quick-and-dirty local alternatives:
 
@@ -230,10 +283,97 @@ Quick-and-dirty local alternatives:
 | `!bot off` / `!bot on`| Moderator kill switch for every command.                      |
 | `!ask anything`       | The bot answers in its own voice (see the chat AI below).     |
 | `!subgoal`            | The sub goal and how many subs to go (mods maintain it).      |
+| `!ban <name> [reason]`| Bans somebody. **Moderators and lead mods only.**             |
+| `!timeout <name> [10m] [reason]` | Times somebody out (default 10 min). **Mods only.** |
+| `!unban <name>`       | Lifts a ban, or ends a timeout early. **Mods only.**          |
 
 Places can be given as `City, ST`, `City, Country`, a landmark, etc. —
 whatever you'd type into a search box. The extra commands come from free,
 keyless APIs and can be disabled with `"fun_commands": false`.
+
+### "on it — give me about 45 seconds"
+
+A direct question is never dropped: held by a rail (the asker's own
+minute, the channel pace, the hourly cap) it is answered to the right
+person the moment the rail clears. But until then the room sees nothing
+at all — and from chat, *a rail and a crash look exactly the same*. That
+is why the same question gets asked three times.
+
+So a held question is now acknowledged at once, with the wait quoted:
+
+```
+marblehead9: docbot how long is the tow rope?
+Docbot:      @marblehead9 on it - give me about 45 seconds to look that up.
+```
+
+The number is the rail's own remaining time (`chat_ai_mention_cooldown`
+for that viewer, or the channel pace — whichever is longer), rounded up.
+One promise per person: asking again inside the window gets no second
+"on it", which is the whole point. Nothing is said when the wait is under
+`chat_ai_ack_min_seconds` (5 s by default — the answer is on its way and a
+message about it would be noise), and the acknowledgement goes out on its
+own thread rather than through the worker queue, because a stuck worker is
+exactly when an "on it" matters most. If a held question is *lost* — the
+eight-deep queue filled, or it went stale — the asker is told
+(`I've lost the thread of your question - ask me again in a minute?`)
+instead of being left with a promise nothing kept. `chat_ai_ack_held:
+false` brings back the old silence.
+
+## Moderation on request — !ban, !timeout, !unban
+
+The bot is a moderator of the channel, so a moderator can simply tell it
+what to do. It works typed in chat, and a private message to the bot works
+too when Twitch delivers one:
+
+```
+Leadmod: !ban spambot123 posting links
+Docbot:  @Leadmod spambot123 banned (posting links)
+Leadmod: !timeout chatty 10m caps
+Leadmod: !unban spambot123
+```
+
+**Who may ask.** In the channel the badges decide, and Twitch's *lead
+moderator* role counts — that role replaces the `moderator/1` badge with
+`lead_moderator/1`, so a bot that only looks for `moderator` silently
+ignores it. A private message carries no channel badges at all
+(moderator is a channel role), and a bot account cannot read another
+channel's moderator list — Helix requires `broadcaster_id` to be the
+token's own user id — so for a private ask the channel's own list is the
+authority: the broadcaster, the bot, and whoever is named in
+`"mod_logins"`. Anyone else is refused, and refused privately.
+
+**What Twitch needs from you.** Chat moderation commands went away from
+IRC on 18 February 2023 — `PRIVMSG #chan :/ban somebody` is accepted and
+does nothing — so this is Helix: `POST /helix/moderation/bans`, with
+`moderator_id` set to the bot's own user id, which is why the bot has to
+be a moderator. That needs the `moderator:manage:banned_users` scope, and
+`user:manage:whispers` to answer a private ask privately. **Both are new
+scopes, so run `python3 bot.py --login` once after upgrading** — on Windows
+that is `python bot.py --login`. A token issued before them will get a 401,
+and the bot says exactly that instead of failing quietly.
+`python3 bot.py --doctor` (`python bot.py --doctor` on Windows) lists the
+scopes the stored token actually has.
+
+**A private message is best-effort, and here is the honest reason.**
+Twitch delivers whispers to bots through EventSub (a webhook endpoint),
+not through the IRC connection this bot uses, and it stopped letting bots
+*send* whispers over IRC on the same day the chat commands went. So the
+bot accepts a `WHISPER` line and a `PRIVMSG` addressed to itself if one
+ever arrives, answers through the Helix whisper API, and never posts the
+answer in the room — but if nothing arrives, nothing happens. The
+in-channel command is the reliable path; the whisper is a convenience.
+Sending whispers also needs a **verified phone number** on the bot's
+account, and Twitch allows 40 unique recipients a day.
+
+**Guard rails.** The bot will not ban the broadcaster, itself, or anyone
+on `mod_logins` (Twitch refuses those anyway, and says so in words rather
+than a bare `400`). A name has to look like a Twitch login
+(`[a-z0-9_]`) before anything is sent, so a stray sentence never reaches
+the API as a name. Lengths are `30s`, `10m`, `2h`, `1d` or a bare number
+of seconds, capped at Twitch's 14 days. Every action — and every refusal
+— is logged with who asked, and moderation still works while `!bot off`
+has the rest of the commands paused. Turn the whole thing off with
+`"mod_commands_enabled": false`.
 
 ## The chat AI: !ask, replies and chime-ins
 
@@ -273,6 +413,111 @@ cut off mid-sentence ("If they try to slash wages, I'll") — is retried
 once at a doubled thinking budget before the second provider takes the
 line.
 
+**Rate limits are per model, and the chain walks.** Groq's free tier
+meters each model separately (`openai/gpt-oss-120b` and
+`openai/gpt-oss-20b` each get their own 8k tokens a minute and 200k a
+day), and a `tokens per day (TPD)` 429 means *hours*, not two minutes.
+Live-fire the day's gpt-oss budget was gone before the stream started,
+the whole provider was parked for two minutes at a time, and every line
+went to a slow free model on OpenRouter while a fresh Groq bucket sat
+unused. Now a 429 rests **that model** for as long as the error says (a
+TPD message until the quoted reset, capped at six hours; a per-minute
+limit for two minutes) and the line moves on at once: first to the same
+provider's spare (`openai/gpt-oss-20b` on Groq — same key, faster,
+separate budget), then down the fallback chain.
+
+**Retired slugs are retired for the session.** Groq shut down
+`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` for free/developer
+keys on 16 Aug 2026 (`qwen/qwen3-32b` and Llama 4 Scout a month earlier).
+Live-fire the bot's spare was still the 70B: after every gpt-oss 429 it was
+tried again, 404'd again, fired the *"check your llm_model slug"* hint for
+a model the config never named, and only then went to the 30-second free
+fallback. Now a 404 — or Groq's `400 model_decommissioned` — on any
+primary-chain model rests it for six hours with one line naming the
+replacement (`… does not exist on this provider (HTTP 404) - Groq retired
+it; its replacement is openai/gpt-oss-120b. Skipping it for the rest of
+the session`), the `llm_model` hint fires only when the *configured* model
+is the dead one, and a `config.json` still naming a retired slug is told
+so at startup, with the replacement. `llm_fallback_model` accepts a
+**comma-separated list**, tried in order; each model rests on its own
+clock and a resting model is skipped, not waited for. Only when every
+model of a provider is resting does that provider's breaker open. The
+log says which model rested and why (`gpt-oss-120b rate-limited (HTTP
+429): … tokens per day … - resting it for 127 min; other models carry
+on`) and which one took over (`trying nex-agi/nex-n2.5-pro:free instead`).
+
+A recommended free chain, as of September 2026:
+
+```json
+"llm_fallback_key": "sk-or-...",
+"llm_fallback_model": "nvidia/nemotron-3-super-120b-a12b:free, nex-agi/nex-n2.5-pro:free, cohere/north-mini-code:free"
+```
+
+**A whole chain of providers, not just one.** One second provider is
+still one more key that can be dead, out of credits or rate-limited at
+the exact wrong moment, so `llm_fallback_providers` takes an *ordered
+list* — each entry its own base, its own key, its own model chain and
+its own rest window. A line is offered to them in order until one
+answers; a provider whose key is rejected is skipped for the session
+and the next one is asked instead, so no single dead key can mute the
+room.
+
+```json
+"llm_fallback_providers": [
+  {"base_url": "https://integrate.api.nvidia.com/v1",
+   "key_env": "NVIDIA_API_KEY",
+   "model": "openai/gpt-oss-120b, nvidia/nemotron-3-super-120b-a12b"},
+  {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+   "key_env": "GEMINI_API_KEY",
+   "model": "gemini-3.8-flash, gemini-3.5-flash-lite"},
+  {"base_url": "https://openrouter.ai/api/v1",
+   "key_env": "OPENROUTER_API_KEY",
+   "model": "nvidia/nemotron-3-super-120b-a12b:free, cohere/north-mini-code:free"}
+]
+```
+
+`key_env` names the environment variable that carries the key, so the
+secret stays in `bot.env` and is never written into `config.json` (an
+inline `"key"` works too, and the admin panel shows it masked either
+way). The old `llm_fallback_key` / `_base_url` / `_model` trio still
+works unchanged and is always tried first, so nothing about an existing
+setup has to move.
+
+| Provider | Base URL | Key | Free tier (Sept 2026) |
+| --- | --- | --- | --- |
+| Groq | `https://api.groq.com/openai/v1` | `gsk_...` | 30 RPM, 1K req/day, 8K tokens/min **per model** — fast, but the minute budget is the weak spot |
+| NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | `nvapi-...` (phone, no card) | ~40 RPM shared across every model, no daily token cap; hosts the same `openai/gpt-oss-*` models |
+| Google AI Studio | `https://generativelanguage.googleapis.com/v1beta/openai` | from `aistudio.google.com/apikey` | free per-project quota; Gemini 3.x Flash ≈ 10 RPM, Flash-Lite ≈ 15 RPM, resets midnight Pacific |
+| OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-v1-...` | `:free` slugs at 20 RPM; 50 req/day, or 1,000/day after a one-time $10 purchase |
+
+Two of these providers need their own request shape, which the bot now
+handles per endpoint: NVIDIA NIM validates a body against each model's
+schema, so it gets `max_tokens` (the newer `max_completion_tokens` is a
+422 there) and its 202 "still working" answer counts as a miss rather
+than a reply. Gemini 3.x always thinks before it answers —
+`reasoning_effort: "none"` only switches thinking off on the 2.5
+family — so the bot sends it the reasoning budget and low effort, the
+same way it does for `gpt-oss` and Nemotron, or the thinking eats the
+answer. A key in the environment is enough on its own: `NVIDIA_API_KEY`
+or `GEMINI_API_KEY` in `bot.env` adds that provider with these
+defaults, no config edit.
+
+`nemotron-3-super` answers in under a second where the 550b `ultra`
+takes 20–30 s a line; `nex-n2.5-pro` and `north-mini-code` are
+non-reasoning and fast. Nemotron is a hybrid reasoning family, so the
+bot now sends it the same low-effort thinking budget as gpt-oss instead
+of letting it narrate its reasoning at the room. Two caveats worth
+knowing: OpenRouter allows only **50 free requests a day** on an account
+that has never bought credits (a one-time $10 purchase lifts that to
+1,000 a day, permanently, and the credit also covers cheap paid models
+like `nousresearch/hermes-4-70b` as a non-free last resort), and the
+`:free` roster rotates monthly — recheck openrouter.ai/models when
+warm-up says `fallback NOT READY`. Groq's other free buckets
+(`qwen/qwen3-32b`, `meta-llama/llama-4-scout-17b-16e-instruct`,
+`moonshotai/kimi-k2-instruct`) are also separate daily budgets on the
+same key: put them in `llm_model` as a list (`"openai/gpt-oss-120b,
+qwen/qwen3-32b"`) and the primary walks them the same way.
+
 - **`!ask anything`** — factual questions ("what is a bongo twist",
   "how many trailers can a truck pull") are answered by the fact engine
   FIRST — the persona will guess on trivia it doesn't know, and a
@@ -281,12 +526,13 @@ line.
   answered directly from Open-Meteo — for example,
   `Sunrise | Vandalia, Illinois: Sunrise is expected around 6:38 AM local time today.`
   — instead of accepting a search snippet that merely says times are
-  local. Weather questions now take the same direct-data route, including
-  temperature, apparent temperature, humidity and wind from Open-Meteo; for
-  example, `Weather | Marshall, Illinois: Currently 68°F with partly cloudy
-  skies; feels like 66°F; humidity 59%; wind WSW at 12 mph.` An archive-page
-  snippet such as “weather reports from the last weeks” can never become a
-  current-weather answer. When the records miner backs a
+  local. Weather questions take the same direct-data route — one sentence
+  from weatherapi.com when `weatherapi_key` is set, otherwise Open-Meteo's
+  `Weather | Marshall, Illinois: Currently 68°F with partly cloudy skies;
+  feels like 66°F; humidity 59%; wind WSW at 12 mph.` (see
+  [Weather](#weather)). An archive-page snippet such as “weather reports
+  from the last weeks” can never become a current-weather answer. When the
+  records miner backs a
   superlative question, the article it digs through must actually be
   about the subject (a US freight-lane question once came back with
   Ivory Coast's GDP — the search loved "coat"~"Côte" and "west
@@ -311,16 +557,28 @@ line.
   unexpected HTTP code — so `bot.log` always shows which one it was.
 - **Mention replies** — someone says "doc, ..." (see `chat_ai_names`) and
   the bot answers (a factual question in a mention gets the fact
-  engine's grounded answer, same as `!ask`), at most once per
-  `chat_ai_mention_cooldown` seconds. Viewer wording is not run through
+  engine's grounded answer, same as `!ask`), at most once **per viewer**
+  per `chat_ai_mention_cooldown` seconds (60), with a short channel-wide
+  floor of `chat_ai_mention_pace` seconds (8) between any two persona
+  replies. Viewer wording is not run through
   the bot's *output* profanity filter: a directly addressed question with
   rough language is still answered, while the generated reply still has to
   pass every output rail. Unsafe viewer lines are never retained as ambient
   model context, so they cannot be parroted into a later reply. The cooldown
-  keeps the bot from being wound up like a toy. A mention that arrives inside
-  the cooldown is *held*, not dropped — the bot answers it to the right
-  person the moment the cooldown clears (within two minutes; after that
-  the moment has passed and answering would be the non-sequitur). And a
+  keeps the bot from being wound up like a toy — but it is *each person's
+  own* minute. Live-fire, one shared 60-second clock meant four people
+  asking in the same minute got one answer and three holds, and six of ten
+  direct questions in seven minutes were lost; with per-viewer clocks the
+  same seven minutes answer nine of the ten (the tenth was the same person
+  asking again 13 seconds after her reply). A mention that arrives inside
+  the asker's own cooldown is *held*, not dropped — the bot answers it to
+  the right person the moment their clock clears (within two minutes; after
+  that the moment has passed and answering would be the non-sequitur). The
+  held queue keeps one question per person (a repeat replaces the earlier
+  one, so nobody gets two answers) for up to eight people, and whichever
+  asker is clear first is answered first. Nothing leaves the queue quietly:
+  a hold, a full-queue drop and a worker-side drop each write a log line
+  naming the person (`held-question queue full - dropped kvack's …`). And a
   reply that comes back unusable — cut off mid-sentence, too long — is
   re-asked once; a safe overlong answer is then fitted at a complete boundary,
   or the bot posts an honest retry acknowledgement. A direct question is
@@ -374,13 +632,19 @@ line.
 
 What it will never do, by prompt *and* by output filter: tease people
 (only topics), post insults, threats or anything creepy, joke about
-illness or grief, state facts it is not sure of (factual questions are
-routed to the fact engine first), guess anything personal about a viewer, or post links,
+illness or grief, state facts it is not sure of (it answers general
+knowledge it knows — *how long does a 5K take* — and lookups on named things
+and live data are routed to the fact engine first), guess anything personal
+about a viewer, or post links,
 @mentions or more than one emoji, no command syntax (the persona never
 tells viewers to go use `!funfact` — it answers itself or says nothing).
 It also cannot repeat itself: its own recent lines are named in the
 prompt, and an answer that recycles a phrase, distinctive signature or
-most of a recent line is declined. Ordinary topic words are exempt when
+most of a recent line is declined. "One emoji" is counted the way a
+person sees it: a shrug with a skin tone and a gender sign
+(`🤷🏻‍♂️`, four code points) or a flag is *one* — live-fire the cleaner
+counted the code points, called a good line a two-emoji violation and
+threw it away. Ordinary topic words are exempt when
 the viewer just used them — mentioning `cadence` again while answering a
 cadence question is not repetition. A directly addressed answer gets one
 "say something completely different" retry before a deterministic
@@ -395,6 +659,377 @@ The voice is `bot_personality` in `config.json` — your words, your
 rules — and the built-in default is Doc: a dry-witted old trucker who
 has been everywhere twice.
 
+### "Docbot sing me a song" — performances over several messages
+
+Some asks are for a *piece*, not a line. `Docbot sing me a song`,
+`doc make me a poem about kvack`, `docbot tell us a story`, `doc rap for
+us`, `give us a limerick about the load`, `do a haiku on coffee`, `make a
+toast to hollie` — pushed through the one-line reply path, the model wrote
+a sentence *about* singing ("Sure, here's a little ditty about…") and
+stopped. It rambled and never did the thing.
+
+Now a performance is recognised as one, written whole (the model gets a
+bigger completion budget for it), checked **line by line** against the same
+rails as every other chat line, and posted the way a person would deliver
+it: the first line at once, `@`-tagged to whoever asked, the rest a few
+seconds apart, so chat can react between lines and it reads like a genuine
+exchange rather than a wall. `!ask sing me a song` is the same request.
+
+```
+kvack: docbot sing me a song about the night shift
+Bot:   @kvack Rolling down the I-80 line,
+Bot:   Coffee's cold but the load's on time,           (4 s later)
+Bot:   Oh the night shift hums, the night shift glows, (4 s later)
+Bot:   Where the diesel goes, nobody knows.            (4 s later)
+```
+
+- **What counts.** A song (tune, ditty, ballad, shanty, lullaby…), poem
+  (verse, sonnet, rhyme), rap (bars, freestyle), limerick, haiku, story,
+  or toast — asked for with `sing / write / make / do / give / tell / drop /
+  spit / recite …`, a bare `can you sing` / `rap for us`, or just `one more
+  song` / `another poem`. A subject after `about / on / for / to` is used
+  (`SUBJECT: the night shift` in the prompt); with none, the model is told to
+  draw on what is on screen or in chat — never on itself. `doc encore!`
+  repeats the last piece for whoever asked.
+- **What does not.** Questions about real pieces (`who sang that song`,
+  `what's the story with the lights`, `tell me the story of Route 66`) keep
+  their grounded paths; someone narrating their own day (`I wrote a song
+  yesterday`, `we're gonna sing later`) is not a request. And the bot performs
+  **only when addressed** — two viewers discussing karaoke never make it
+  break into song.
+- **The rails hold per line.** No `@`, no links, no hashtags, no command
+  syntax, nothing explicit, at most one emoji in the whole piece. Padding
+  (`Sure! Here's a song:`, `Verse 1:`, `[Chorus]`, `Hope you liked it!`,
+  numbering, quotes, code fences) is stripped; a broken rail anywhere is a
+  refused piece, retried once with the miss named, and then an honest line in
+  character (`Voice is shot tonight - the singing will have to wait.`) — never
+  half a song. No model configured gets the same honest line, not a Wikipedia
+  fact about the word "song".
+- **Pacing.** `chat_ai_perform_delay` in `config.json` is the gap in seconds
+  between lines. Empty (the default) means the same gap as `beef_act_delay`;
+  `0` posts the whole piece at once. A performance counts as the mention reply,
+  so the usual `chat_ai_mention_cooldown` applies afterwards.
+
+### Weather
+
+"Docbot whats the weather in wilkes barre, pa" is a live reading, never a
+search snippet and never a persona guess. Any phrasing with a place reaches
+the data — `docbot weather in scranton?`, `doc hows the weather in paris`,
+`!ask weather in miami` — while a remark like "the weather in texas is
+crazy" stays ordinary conversation.
+
+- **With `weatherapi_key`** (free at [weatherapi.com](https://www.weatherapi.com/)),
+  the answer is one sentence addressed to whoever asked, in the shape the
+  channel asked for:
+
+  ```
+  Hardclaws, it is currently Clear in Wilkes-Barre, Pennsylvania. 63°F (17°C). Feels like 61°F (16°C). Wind is blowing from the SW at 4 mph (7 km/h). 61% humidity. Visibility: 6 miles (10 km). Precipitation: 0.0 in (0.0 mm).
+  ```
+
+  Condition, place as weatherapi.com resolved it (the country is added outside
+  the US), temperature, feels-like, wind direction and speed, humidity,
+  visibility and precipitation — imperial first, metric in brackets. The
+  sentence is never trimmed by `max_fact_chars` (it is data, not prose) and is
+  cached for five minutes per place. `WEATHERAPI_KEY` in the environment works
+  too.
+- **Without a key** — or when the key is rejected, the place is unknown to
+  weatherapi.com, or the service is down — the keyless Open-Meteo path answers
+  exactly as before: `Weather | Wilkes-Barre, Pennsylvania: Currently 63°F with
+  clear skies; feels like 61°F; humidity 61%; wind SW at 4 mph.` Every fallback
+  is logged with the reason (`weatherapi.com HTTP 401: API key is invalid -
+  falling back to Open-Meteo`). Weather never goes quiet over a key problem.
+- **It is instant, and it skips the chat AI's rails.** Live-fire, "Docbot
+  whats the weather currently in Brewster, NY" got *nothing*: the bot had
+  answered a different "docbot …" 40 seconds earlier, so the 60-second
+  `chat_ai_mention_cooldown` held the question — and a held question that
+  waits behind someone else's slow model call in the single worker queue
+  could be dropped without a log line when its turn came. Those rails exist
+  for persona chatter; an API reading has no model in the loop and no reason
+  to wait behind one. A weather or sunrise/sunset question addressed to the
+  bot (`docbot …`, or the click-to-mention `@TruckingWithDocBot …`) now takes
+  a **fast lane**: answered immediately on its own thread, never touching the
+  mention clock (so the next persona question is still answered on time),
+  paced at one reading per viewer per 15 seconds (mods and the broadcaster
+  exempt). Every outcome is a line in the log — `live data answered for …`,
+  `live data ask from … paced`, or the engine's own failure reason.
+
+### "Sunrise in Hintok, ok" — the town he meant, not a trail in Thailand
+
+Live-fire: *"Docbot what time is sunrise in Hintok, ok?"* → `Sunrise |
+ไทรโยค: Sunrise is expected around 6:13 AM local time today.` Three faults
+in one line. The geocoder (Nominatim) has no town called Hintok, so its best
+string match was **"Hintok Cut" — a footpath at Hellfire Pass, Thailand** —
+and the `, ok` was ignored; it named the place **in Thai** (Sai Yok
+district); and nothing asked whether the hit was a *place* at all. The
+viewer meant **Hinton, Oklahoma**.
+
+Geocoding now works the way a person reads the question:
+
+- **The region typed with the place is a hard constraint.** `Hintok, ok`,
+  `Hintok ok`, `Cuba Missouri`, `Banff, AB`, `Yorkshire united kingdom` — a
+  US state or Canadian province also pins the *country*, so a hit on another
+  continent is not a near miss, it is a different place and is discarded
+  (logged: *matches for 'Hintok, ok' were all outside oklahoma*).
+- **A road, shop or trail is not a settlement.** Only a city/town/village/
+  hamlet (or an admin area, park or landmark *in the right region*) can
+  answer for a place name.
+- **Labels come back in English** (`accept-language=en`), and a province
+  counts as a region, so the header is `Hinton, Oklahoma` — or `Sai Yok,
+  Kanchanaburi Province` if someone really asks for Thailand.
+- **A spelling that finds nothing gets a fuzzy match on places** in that
+  region, from Photon (komoot's keyless OSM geocoder): `Hintok` in Oklahoma
+  → Hinton, `Terra Haute` → Terre Haute, `Scrantin` → Scranton. Only a
+  plausible misspelling is accepted (`Red Rock` is *not* "Red Rock Canyon
+  State Park", `Hilton` is not `Hintok`), and every correction is logged:
+  *geocoder read 'Hintok, ok' as 'Hinton, Oklahoma, United States' (closest
+  place by that name)*.
+- An exact, real place still costs **one** geocoder call; the fuzzy step
+  only runs when the exact spelling finds no place in the region. Photon
+  down and nothing found is an honest "couldn't fetch", never the trail.
+
+The same geocoder serves weather (keyless Open-Meteo path), sunrise/sunset,
+and the fact engine's tiny-town fallback, so all three inherit this.
+
+### News — "who got into a helicopter crash today in California"
+
+Live-fire, that exact question got `FunFact | who got into a helicopter
+crash today 15th September 2026…: The Interstate Aviation Committee (MAK)
+investigation found out that the Certificate of Airworthiness of the
+aircraft had expired in 2012.` — a Wikipedia sentence about a different
+crash on a different continent, fourteen years earlier. The fact engine's
+sources are an encyclopedia and a search engine's instant-answer box;
+neither knows what happened this morning, and the grounded-answer path did
+exactly what it is built to do with the only "helicopter crash" text it
+could find.
+
+What *happened* is news, and it now has its own path. A question with a
+recency marker (today, tonight, yesterday, this week, latest, breaking, or a
+date like "15th September 2026") **and** an event word (crash, died,
+arrested, won, earthquake, happened, "going on"…) is a **news question**:
+
+- It is answered from a **headline feed**, not the encyclopedia and not a
+  model: Google News' keyless RSS search (seconds fresh, no key, no quota to
+  speak of), or Tavily's `topic: news` first when `tavily_api_key` is set.
+- The answer is the **headline itself**, verbatim, with its outlet and age:
+  `News | helicopter crash California: NBC4 helicopter crashes in Chatsworth,
+  killing 3, after deadly Metro bus crash (Los Angeles Times, 3h ago)`. A
+  repeat of the question rotates to the next headline (BBC, CBS…), like any
+  fact pool; headlines are cached ten minutes, not an hour.
+- It takes the **weather fast lane**: answered at once on its own thread,
+  no model, no mention clock. `!ask` uses the same path.
+- The window follows the question: "today"/"latest" is one day, a named date
+  or "yesterday" two days, "this week" seven.
+- An empty feed is an honest **`Nothing in the headlines about that in the
+  last 2 days.`** — never a 2012 fact dressed as an answer — and a feed
+  outage says so and retries in a minute.
+
+Weather and sunrise keep their own paths ("whats the weather today" is
+weather, not news), opinions aimed at the bot ("who's the best QB today")
+stay with the persona, and plain trivia ("who won the 1998 World Cup") stays
+with the encyclopedia.
+
+**"Whats the leading headlines for today"** — live-fire, that got `News |
+leading headlines: top news of the day september 16 2026 (thehindu.com,
+17h ago)`. Two things went wrong. The words *leading headlines* were
+treated as the **subject** and searched, and the best match for a search
+about headlines is a roundup page — a headline *about* headlines. Then the
+follow-up, *"that is not a headline where the news"*, had no "today" in
+it, so it was not a news question at all and went to the persona, which
+made a joke about not being a headline.
+
+Now a headline ask with **no subject** — *whats the news, headlines?, top
+stories, whats the leading headlines for today, whats going on in the
+world, what happened in the news today, where the news* — is answered
+from Google News' **top-stories feed** (the front page as RSS, no query,
+no key), or Tavily's news topic when the feed is down:
+
+- **Three real stories per message**, each with outlet and age, packed to
+  the message budget: `News | top headlines: Fed holds rates steady as
+  inflation cools (Reuters, 2h ago) | Hurricane Otis makes landfall near
+  Acapulco as Category 4 storm (AP News, 3h ago) | Senate passes stopgap
+  funding bill, averting shutdown (CNN, 4h ago)`. Asking again rotates to
+  the next three; every phrasing shares one ten-minute cache.
+- **Roundup page titles are never quoted** — *Top news of the day…*,
+  *Today's top stories*, *Morning briefing: what to know today*, *5 things
+  to know today*, *Live updates* — whatever feed they came from. A feed of
+  nothing but roundups is an honest "the top-stories feed came back empty
+  just now", not a page title.
+- The ask needs **no recency word**: "the headlines" are today's by
+  definition. Sharing news ("I got news, my truck is fixed"), the bot's
+  news ("whats your news source") and "the news said it would rain" are
+  not asks.
+- Asks **with** a subject — *news on the LA bus crash*, *whats the news in
+  Australia today*, *any news on the Big Bend fire* — still search for
+  that subject as before. A capitalised *Big*, *Top* or *World* mid-question
+  is a name and stays in the search; lowercase ask-words are dropped.
+- `news_country` (default `US`) picks whose front page it reads — `GB`,
+  `AU`, `CA`…
+
+### "How long does it take to run 5k" — the model's question, not the encyclopedia's
+
+Live-fire, two rounds:
+
+- *"Docbot whats the avg time for someone to run 5k"* → `FunFact | …: Whats
+  a good average time to do 5K? : r/C25K.` — a Reddit thread title. The same
+  question, asked back.
+- *"Docbot how long it take to run 5k home boy?"* → `FunFact | …: The 5K
+  run is a long-distance road running competition over a distance of five
+  kilometres (3.107 mi).` — a how-long question answered with a distance.
+
+The root cause was the **routing**: both were sent to the fact engine, and
+the engine *looks things up* — there is no article to look up for a typical
+5K time. The chat model knows the answer and was never asked.
+
+**Routing now.** A general-knowledge question — a duration, rate, typical
+value, size, weight, price, temperature, a how-to or a why (*how long does
+it take to run 5k, whats the avg time for a 5k, how much does a gallon of
+diesel weigh, how often should you change oil, why is the sky blue, how do
+air brakes work*) — goes to the **chat model**, whose prompt says what kind
+of ask it is: *give the real answer first — the figure, the range or the
+reason — in your own voice; if you genuinely do not know, say so; never
+invent a number.* The persona rule that used to say "factual questions are
+answered elsewhere" now says to answer general knowledge it is sure of. The
+fact engine keeps what it is good at: **named things** with an article
+(*what is a bongo twist, when was the eiffel tower built, how tall is Mount
+Everest* — a capitalised name past the first word is the tell), **records**
+(*how many trailers can a truck pull, whats the longest truck*), and **live
+data** (weather, sunrise, headlines). Questions about the bot still go to
+the persona as before. If the model declines a knowledge question, the
+engine still gets its try, under the rules below.
+
+**The engine's own rails**, for when it does answer:
+
+1. **A question is never a source and never an answer**, wherever its `?`
+   sits. Forum furniture (`r/C25K`, `| Reddit`, `Posted by u/…`, Quora) is
+   dropped before the engine's model ever sees it.
+2. **The answer must be the kind of figure the question asked for.** A
+   how-long question wants a **duration** ("30 to 40 minutes", "13:10");
+   *how far* a **distance**; *how much does it cost* a **price**; *how hot /
+   how cold* a **temperature**; *how heavy* a **weight**. A line of the
+   wrong kind is rejected on every path — the engine's model answer, the
+   Wikipedia records miner and the article-facts path — judged on the
+   trimmed line that would actually post. With no such figure in any source
+   the engine returns **nothing** (never a shrug that would stand in front
+   of the chat model, never the wrong-kind fact). "How long *is* the bridge"
+   and "how long *ago*" are not duration questions; "what temperature does
+   condensation stop" keeps its standing exemption ("the dew point").
+
+### A thinking model narrating instead of answering
+
+Live-fire 15:30:09–15:30:53: "docbot who is your favorite NFL team" got,
+three times in a row, *"The user is asking me (Docbot) who my favorite NFL
+team is. I need to answer as the Commentator persona — a British sp…"* —
+the model's reasoning delivered as its reply. The cleaner threw it out, but
+for **length**; the length recovery nearly posted a trimmed slice of it as
+the answer; the retry was told "too long", which was not what was wrong;
+and after 44 seconds the viewer got nothing.
+
+Narration is now recognised as narration (`chatai.is_narration`): "The user
+X is asking…", "I need to answer as the … persona", "Let me craft a reply…",
+"We need to keep it under 200 characters…". Such a reply is named in the log
+(`model narrated its reasoning instead of answering - one retry`), the
+retry is told *not to narrate* rather than to be shorter, the length recovery
+refuses it outright, and a second leak posts the honest failure line instead
+of a fragment of reasoning. The persona rules now say it in advance ("Output
+ONLY the line itself, spoken in character. Never narrate, plan or explain").
+Three leaks from one model in an hour earn a single console line naming the
+model — because the durable fix is a config change: put a non-reasoning
+model ahead of it in `llm_model` / `llm_fallback_model` (the nemotron
+family is the usual culprit; `nex-agi/nex-n2.5-pro:free` on OpenRouter
+does not think out loud, and `qwen/qwen3.8-27b` on Groq can be told not to).
+
+### "Your mic is muted" — a mod's announcement stands as a notice
+
+Live-fire: a mod asked "Docbot can you tell every one that @TruckingWithDoc
+is currently on the phone so we are in radio silence", the bot answered in
+character — and two lines later a viewer said "Your mic is muted" / "I
+assume because your codriver is sleeping" and the bot said nothing. Those
+lines were not addressed to it, so they were ambient chime-ins: a 10% roll,
+five lines of recent chat, and the ten-minute `chat_ai_cooldown` the bot's
+own announcement had just started. The one thing it knew for certain, it
+kept to itself.
+
+Now an announcement a **mod or the broadcaster** hands the bot — "docbot tell
+everyone that ...", "doc let chat know ...", "docbot remind the folks ..." —
+is still answered in character, and is also kept as a **standing notice** for
+`chat_ai_notice_minutes` (default 20). While it stands:
+
+- anyone who sounds lost about the quiet stream — "your mic is muted",
+  "hello?", "can't hear you", "no audio", "is he afk?", "why so quiet" —
+  gets `@name heads up: TruckingWithDoc is currently on the phone so we are
+  in radio silence`, whether or not they addressed the bot, with **no chime
+  roll and no cooldown**. Each viewer is told once per notice, and the
+  relayed text drops the `@` so the man on the phone is not pinged every
+  time;
+- the persona sees the notice in every prompt, so "docbot hows your night"
+  is answered by someone who knows the stream is quiet and why;
+- "docbot tell everyone doc is back" (or "mic is back on", "unmuted") clears
+  it early, so "hello?" is ordinary chatter again.
+
+A plain viewer cannot plant a notice, a story request ("tell everyone about
+the time you drove to Alaska") is not one, and `chat_ai_notice_minutes: 0`
+turns the feature off. Every notice kept, repeated, or cleared is a line in
+the log.
+
+### "Lets do a 3 round cycling quiz" — it hosts, and remembers it is hosting
+
+Live-fire: "Docbot lets do a test run. Topic would be Cycling and lets make
+it 3 rounds" → the bot posed round one (the crankset), and then for "lets
+get Round 2 going" it asked chat *what the current temperature in Rolla,
+Missouri was*, explained that it was "just the on-stream info bot", and
+went "mangled in the gears" twice. Separately, "keep count of Dirty Lepages
+and we will tell the bot when we spot one" got the count to 1 — and an hour
+later the bot had no idea what a Dirty Lepage was.
+
+Both were the same missing thing. Every prompt was built from the last few
+*human* lines with the bot's own lines and every earlier ask stripped out
+(on purpose — old questions were hijacking new answers), the long-term
+memory keeps only what a viewer says about *themselves*, and a mod note
+needs the words "take a mental note". Nothing anywhere held **what we are
+doing right now**. That is `ongoing.py`, the chat AI's working memory:
+
+- **A game.** A mod or the broadcaster sets one up in plain chat — "docbot
+  lets do a test run, topic cycling, 3 rounds", "quiz us on world capitals",
+  "trivia time! topic: 80s music, 5 questions". The bot acknowledges it
+  (no model) and waits for "start the first round" / "round 1" / "go". A
+  round is a **job**, not a chat line: the model is told *your line IS the
+  round-2 question*, and what comes back must actually be a question and
+  not one it already asked, or it is asked again with the miss named — and
+  if it still cannot, the bot says so ("my round 2 question got stuck in the
+  gears — say 'round 2' again") instead of posting a stand-in. The question
+  is posted as `Round 2 of 3: …`. While a round is open, "docbot what part
+  of a bike holds the pedals?" is told to wait for the host rather than
+  looked up, and the persona's replies to everything else carry the game
+  state and the open question, so "is it the crankset?" gets "the host
+  calls time" and never a denial that it is hosting. The host (or a mod)
+  calls "whats the answer" / "times up" / "who got it right" — by name or,
+  from the host, without — and the model gives the answer as
+  `Round 1 answer: …`, naming only people who actually appear in chat. A
+  timing ask — "give 30 secs to answer then start round 3 30 secs after
+  that" — becomes a cadence the bot runs by itself, one scheduled step at a
+  time; "game over" / "cancel the game" ends it; "what round are we on?" /
+  "repeat the question" is answered from state by anyone; "another round"
+  after the last one extends it. A viewer cannot start a game or call its
+  rounds — they are told so, once, in plain words.
+- **Counts.** "keep count of dirty lepages" (mods / broadcaster) opens a
+  named counter; "dirty lepage!", "spotted one", "+1", "another one", "+2"
+  bump it; "scratch that", "false alarm", "-1" take one back; "set the count
+  to 5" corrects it; "how many dirty lepages so far?", "whats the count?"
+  read it back with when it started and when the last one was; "stop
+  counting dirty lepages" closes it with the final number. No model is
+  anywhere near a count — it is arithmetic, and the model is the one part
+  of the bot that cannot be trusted with it — so it costs nothing and is
+  exact an hour later. Bumping is for the mods, the broadcaster and whoever
+  opened it unless `chat_ai_count_anyone` is true; asking is for anyone.
+  Every open count sits in the persona's prompt, quoted exactly.
+
+Both live in `ongoing.json` (`ongoing_state_path`), so a restart mid-game
+is not amnesia. A game nobody has touched for `chat_ai_activity_minutes`
+(45) is dropped; counts stay until they are stopped. The admin panel shows
+the game and the counts on the dashboard and lets a mod end the game or
+drop a count from the Chat tab. Every step, refusal and count change is a
+line in the log.
+
 ### Changing the voice
 
 Mods can switch the persona at runtime — it reaches the model
@@ -402,13 +1037,16 @@ immediately and survives restarts (`!persona` is mod-only):
 
 ```
 !persona            - which voice is active
-!persona list       - the voices
+!persona list       - the voices, one message per crew
 !persona set sarge  - switch
+!persona set gollum - names are forgiving: "Lot Lizard", "gollum", "Sam", "spin class" all land
 !persona custom <12-300 characters describing the voice>
 !persona reset      - back to Doc
 ```
 
-The built-in voices come in two crews. From the streamer's own world:
+There are twenty-eight built-in voices in four crews (`!persona list`
+reads them out one crew per message — the whole library no longer fits
+in one Twitch line). From the streamer's own world:
 **medic** (airborne combat medic from his army days — calm, clipped,
 counting everyone's water bottles like ammo), **cb** (1970s Citizens
 Band radio, breaker one-nine, hands out handles and calls the streamer
@@ -425,8 +1063,48 @@ coffee refills, calls everybody "hon"), **commentator** (a posh British
 play-by-play voice treating a treadmill mile and a Warzone drop with
 equal gravity — disasters are "regrettable"), and **noir** (a
 hardboiled private eye narrating the stream like a case file — short,
-hard sentences). Every persona sits under the same hard rules — a
-voice changes the flavour, never the rails.
+hard sentences), and **lotlizard** — an *actual lizard*, a leathery old
+iguana who has lived under the fuel-island dumpster for eleven years,
+knows every rig by its brakes and sells warm rocks as prime real estate.
+The name is the whole joke and it is played dead straight; the prompt
+says "you are a reptile and only a reptile — nothing flirty, ever", and
+like every voice it sits under the output rails, so it cannot be turned
+into the other thing.
+
+The big top — voices that are pure fun: **clown** (Bumper, a honk-honk
+birthday-party clown, groan-worthy puns and balloon animals — the
+birthday kind, never the sewer kind), **spin** (a maxed-out indoor-cycling
+instructor who treats chat like a 6am class — ADD A TURN, every task is
+a hill and every hill is yours, capitals in bursts but never a whole
+line), **infomercial** (a late-night pitchman who cannot stop selling —
+"Tired of MERGING?", but wait, there's more; never a price, a link or a
+real brand), **pirate** (a skipper who has taken the semi for a ship and
+the interstate for the sea), **butler** (an unflappable English
+gentleman's gentleman — a bad drop is "perhaps not our finest hour,
+sir"), **grandma** (everyone's grandmother, proud of all of you, worried
+whether you have eaten, sharper than she lets on) and **painter** (the
+soft-spoken public-TV landscape painter — no mistakes, only happy little
+accidents).
+
+Middle-earth and beyond: **yoda** (object first, verb last, nine hundred
+years of truck-stop wisdom — do, or do not), **smeagol** (Smeagol *and*
+Gollum, arguing inside the same line about the precious — "we helps
+them, yes… no! nasty chatses!" — silly and pitiable, never menacing;
+`!persona set gollum` works too), **gandalf** (the grey wizard riding
+shotgun — counsel, proverbs, and YOU SHALL NOT PASS on the right),
+**gimli** (axe, ale, no indoor voice, a running tally against the
+elves — "that still only counts as one"), **samwise** (the loyal
+gardener, po-ta-toes, "Mister" and "Miss", carrying the snacks),
+**legolas** (sees everything first and says so — "they are taking the
+hobbits to the weigh station") and **treebeard** (the Ent, hoom hom,
+never hasty, halfway through a very long thought and deeply frustrated
+by a one-line limit).
+
+Every persona sits under the same hard rules — a voice changes the
+flavour, never the rails — and the same 240-character, one-line, one-emoji
+output gate; a voice that shouts (spin, gimli) still cannot post a wall
+of capitals. The admin panel's Voice drop-down lists all twenty-eight
+with the same short tags.
 
 Whichever voice is active — including a custom one — it also always
 receives the streamer's story: army veteran, airborne combat medic,
@@ -468,7 +1146,14 @@ after 90 days — raw material, never fed to the model wholesale) and
 distilled per-viewer facts. After the bot talks with someone, the model
 quietly extracts the durable stuff — work, vehicles, pets, hobbies,
 plans, strong preferences — and those facts are injected into its
-prompts from then on. That is what "remembers conversations from any
+prompts from then on. That extraction is **paced**: a viewer is
+distilled on first contact, and after that only when both
+`chat_ai_distill_minutes` (10) have passed *and* they have said
+`chat_ai_distill_lines` (4) new lines since. It used to run after every
+single reply — a second model call re-reading the same twenty lines,
+roughly 40% of the day's token budget spent to learn that someone said
+"lol" — which is a large part of how Groq's daily allowance ran out before
+the stream began. Same memory, a fraction of the calls. That is what "remembers conversations from any
 point in time" actually looks like at channel scale: not recall of every
 line, but the handful of facts that make a reply feel personal. Facts
 stay attached to their person: the prompt lists them by name with the
@@ -1487,7 +2172,9 @@ don't mind the tamer tone:
 
 - Get a Groq key at <https://console.groq.com/keys> (free).
 - The default model `openai/gpt-oss-120b` is free on Groq; the bot
-  automatically falls back to `llama-3.3-70b-versatile` if it's unavailable.
+  automatically falls back to `openai/gpt-oss-20b` (same key, its own
+  rate-limit bucket) when it's rate-limited. Groq retired the Llama 3.x
+  slugs in Aug 2026 — a config still naming one is told at startup.
   The bot also handles the model's reasoning-mode quirks for you
   (`max_completion_tokens`, no `temperature`).
 - **Already run another AI app with these vars?** Just start the bot in that
@@ -1995,6 +2682,7 @@ appends fake joke comments.
 | -------------------- | ---------------------------------------------- |
 | `bot.py`             | Twitch IRC bot (connection, chat, commands).    |
 | `auth.py`            | Twitch login (device-code flow) + auto-refresh. |
+| `adminpanel.py`      | The password-protected web admin panel.         |
 | `funfacts.py`        | Fact lookup + ranking, spice, rotation, caching.|
 | `extras.py`          | Extra commands (joke/randomfact/riddle/wyr).    |
 | `reminders.py`       | `!reminder` parsing, scheduling, persistence.   |
@@ -2008,6 +2696,7 @@ appends fake joke comments.
 | `whois.py`           | `!whois` (Wikipedia) and `!twitch` (Helix).     |
 | `names.py`           | The `!smk` name pool + Wikipedia top-up.        |
 | `storage.py`         | Atomic JSON writes for the bot's state files.   |
+| `ongoing.py`         | The chat AI's working memory: the quiz it hosts, the counts it keeps. |
 | `spicy_facts.json`   | Curated adult-rated facts (editable).           |
 | `llm.py`             | LLM writer for spicy facts (Ollama / Groq / OpenRouter). |
 | `config.example.json`| Sample configuration.                           |
@@ -2023,6 +2712,7 @@ appends fake joke comments.
 | `mock_names_test.py` | Offline `!smk` name-pool tests.                 |
 | `mock_subgoal_test.py` | Offline !subgoal tests.                        |
 | `mock_trucker_test.py` | Offline `!cb` chatter tests.                  |
+| `mock_adminpanel_test.py` | Offline admin-panel tests (real HTTP on loopback). |
 | `mock_beef_test.py`  | Offline `!beef` story tests.                    |
 | `mock_beefstats_test.py` | Offline leaderboard / `!revenge` / tagging tests. |
 | `mock_beefllm_test.py` | Offline LLM-pass tests, incl. a fake OpenAI server. |
@@ -2032,6 +2722,7 @@ appends fake joke comments.
 | `reminders.json`     | Pending reminders; written at runtime.          |
 | `haul.json`          | The current haul; written at runtime.           |
 | `beef_state.json`    | The beef leaderboard and !revenge windows.      |
+| `ongoing.json`       | The game being hosted and the counts kept; written at runtime. |
 | `custom_commands.json` | Mod-defined commands; written at runtime.     |
 | `names.json`         | Harvested `!smk` names; written at runtime.     |
 s.                        |

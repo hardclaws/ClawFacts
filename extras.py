@@ -162,6 +162,22 @@ WOULD_YOU_RATHER = [
     "Would you rather never hit a red light again or never wait in a queue again?",
 ]
 
+RELEASENOTES_V2 = [
+    "DocBot 2.0 - Now with ears! Major upgrade: I can now hear the streamer talking and actually have a conversation. No more pretending I didn't hear 'Docbot, check the map!'",
+    "Dirty Lepage Detection System: Automatic bush-cam scans for police vehicles hiding in bushes doing the dirty. If we hid there we'd be creeps, but cops it's cool - now I spot them for you.",
+    "Auto Dirty Lepage Counter: No more 'keep count' needed - I count them myself and judge silently.",
+    "CB Radio Weather: I can now smell incoming weather through CB static. 10-4 on that cold front, good buddy.",
+    "Diesel Sniffer: I can now smell diesel and fresh truck stop coffee through the mic. Still can't taste it though.",
+    "Mic Mute Radar: I now detect when Doc mutes his mic and automatically tell chat 'Doc is on the phone, radio silence' so you stop asking if he's AFK.",
+    "Route Memory 2.0: I now remember your tinyurl routes forever via !remember and can pull the map on demand. No more 'what was the route again?'",
+    "Wildfire and Flood Alerts: Live NWS alerts for your Davis to Danbury corridor - I check inciweb, CalTrans QuickMap and 511 so you don't have to.",
+    "Em Dash Ban Enforcement: I now physically cannot type - or --. The user hates them and so do I now. Commas only.",
+    "Sarcasm Detector: Upgraded from 0% to 12% accuracy. Still thinks 'great job' is always sincere.",
+    "Coffee Drone Delivery: I can now order truck stop coffee via drone. ETA 3-5 business days, still cold on arrival.",
+    "F-Respect Protocol: When chat pays F, I now pay respects automatically. F.",
+    "Version 2.0 is still running on a Windows mini PC, not the cloud, and still restarts via start-bot.bat. Some things never change.",
+]
+
 
 def get_joke() -> str | None:
     """A random one-liner-style joke (setup + punchline).
@@ -252,6 +268,11 @@ def get_wyr() -> str | None:
     except (OSError, ValueError, KeyError) as exc:
         _fell_back("wyr", exc)
     return _draw("wyr", WOULD_YOU_RATHER)[0]
+
+
+def get_releasenotes() -> list:
+    """Fake DocBot 2.0 release notes for !releasenotes joke command."""
+    return list(RELEASENOTES_V2)
 
 # ---- shag / marry / kill ---------------------------------------------------
 # The names live in names.py: a hand-picked seed pool plus Wikipedia category
