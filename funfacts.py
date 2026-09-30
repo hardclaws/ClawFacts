@@ -3539,7 +3539,7 @@ def _time_answer(question: str):
     if not geo:
         return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
     try:
-        # Get IANA timezone via Open-Meteo (lat/lon -> timezone, handles DST boundaries)
+        # Get IANA timezone via Open-Meteo (lat/lon -> timezone, handles DST)
         tz = None
         try:
             data = _http_get_json(
@@ -3549,36 +3549,55 @@ def _time_answer(question: str):
             tz = data.get("timezone") if isinstance(data, dict) else None
         except Exception:
             tz = None
-        # Robust chain for 100% accurate time with DST:
-        # 1) worldtimeapi.org (precise, DST-aware)
-        # 2) timeapi.io (precise, DST-aware)
-        # 3) Python zoneinfo (uses IANA db, DST-aware, no network)
-        # 4) Open-Meteo current time as last resort
+        # 100% accurate chain - DST auto via IANA, no mini PC clock dependency for primary
+        # 1) timeapi.io (most reliable, precise to second, DST-aware)
+        # 2) worldtimeapi.org (precise, DST-aware)
+        # 3) Python zoneinfo as last resort (uses system clock, so can be off if PC clock wrong - log warning)
         time_str = None
         clock = None
-        # 1) worldtimeapi
+        # 1) timeapi.io primary - https://timeapi.io/api/Time/current/zone?timeZone=Australia/Sydney
         if tz:
-            try:
-                td = _http_get_json(f"https://worldtimeapi.org/api/timezone/{tz}", {}, timeout=8)
-                if isinstance(td, dict):
-                    time_str = td.get("datetime")
-                    if time_str:
-                        clock = _clock_12h(time_str)
-            except Exception as exc:
-                print(f"[funfacts] worldtimeapi failed for {tz}: {exc!r}", flush=True)
-        # 2) timeapi.io
-        if not clock and tz:
             try:
                 td2 = _http_get_json(f"https://timeapi.io/api/Time/current/zone?timeZone={tz}", {}, timeout=8)
                 if isinstance(td2, dict):
-                    # timeapi gives "dateTime": "2026-09-30T21:36:12"
                     dt = td2.get("dateTime") or td2.get("datetime")
                     if dt:
                         time_str = dt
                         clock = _clock_12h(dt)
+                        print(f"[funfacts] time via timeapi.io {tz}: {dt} -> {clock}", flush=True)
             except Exception as exc:
                 print(f"[funfacts] timeapi.io failed for {tz}: {exc!r}", flush=True)
-        # 3) Python zoneinfo - 100% accurate, DST auto, no network, always works if tzdata present
+        # 1b) timeapi.io via coordinate (fallback if timezone name fails)
+        if not clock:
+            try:
+                td_coord = _http_get_json(f"https://timeapi.io/api/Time/current/coordinate?latitude={geo['lat']}&longitude={geo['lon']}", {}, timeout=8)
+                if isinstance(td_coord, dict):
+                    dt = td_coord.get("dateTime") or td_coord.get("datetime")
+                    if dt:
+                        time_str = dt
+                        clock = _clock_12h(dt)
+                        print(f"[funfacts] time via timeapi.io coord {geo['lat']},{geo['lon']}: {dt} -> {clock}", flush=True)
+            except Exception as exc:
+                print(f"[funfacts] timeapi.io coord failed: {exc!r}", flush=True)
+        # 2) worldtimeapi.org
+        if not clock and tz:
+            try:
+                # Try https first, then http
+                for url in [f"https://worldtimeapi.org/api/timezone/{tz}", f"http://worldtimeapi.org/api/timezone/{tz}"]:
+                    try:
+                        td = _http_get_json(url, {}, timeout=8)
+                        if isinstance(td, dict):
+                            d = td.get("datetime")
+                            if d:
+                                time_str = d
+                                clock = _clock_12h(d)
+                                print(f"[funfacts] time via worldtimeapi {tz}: {d} -> {clock}", flush=True)
+                                break
+                    except Exception:
+                        continue
+            except Exception as exc:
+                print(f"[funfacts] worldtimeapi failed for {tz}: {exc!r}", flush=True)
+        # 3) Python zoneinfo - uses system clock, can be off if PC clock wrong, but DST-aware
         if not clock and tz:
             try:
                 import datetime as _dt
@@ -3590,23 +3609,9 @@ def _time_answer(question: str):
                 h, mi = now.hour, now.minute
                 clock = f"{(h % 12) or 12}:{mi:02d} {'AM' if h < 12 else 'PM'}"
                 time_str = now.isoformat()
-                print(f"[funfacts] time via zoneinfo {tz}: {clock}", flush=True)
+                print(f"[funfacts] time via zoneinfo {tz} (system clock, may be off): {clock}", flush=True)
             except Exception as exc:
                 print(f"[funfacts] zoneinfo failed for {tz}: {exc!r}", flush=True)
-        # 4) Open-Meteo current time fallback
-        if not clock:
-            try:
-                data = _http_get_json(
-                    OPEN_METEO_API,
-                    {"latitude": geo["lat"], "longitude": geo["lon"], "current": "temperature_2m", "timezone": "auto"},
-                    timeout=8)
-                cur = data.get("current") if isinstance(data, dict) else None
-                if isinstance(cur, dict):
-                    time_str = cur.get("time")
-                    if time_str:
-                        clock = _clock_12h(time_str)
-            except Exception:
-                pass
         if not clock and time_str:
             try:
                 import re as _re
@@ -3619,7 +3624,8 @@ def _time_answer(question: str):
         if not clock:
             import datetime as _dt
             clock = _dt.datetime.now().strftime("%-I:%M %p") if hasattr(_dt.datetime.now(), 'strftime') else time_str or "unknown time"
-        return {"place": label, "kind": "Time", "_ttl": 30, "facts": [f"{clock} in {label}."]}
+        # TTL 10s for time - must be real-time, not 30s cached
+        return {"place": label, "kind": "Time", "_ttl": 10, "facts": [f"{clock} in {label}."]}
     except Exception as exc:
         print(f"[funfacts] time lookup failed for {place}: {exc!r}", flush=True)
         return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
