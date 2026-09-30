@@ -597,7 +597,8 @@ def _http_get_json(url: str, params: dict, timeout: float = 8.0) -> dict:
     if url.startswith(WIKI_API):
         _pace_wiki()
     qs = urllib.parse.urlencode(params)
-    req = urllib.request.Request(url + "?" + qs, headers={"User-Agent": USER_AGENT})
+    full_url = url + ("?" + qs if qs else "")
+    req = urllib.request.Request(full_url, headers={"User-Agent": USER_AGENT})
     last_exc = None
     for attempt in range(3):
         try:
@@ -3558,7 +3559,7 @@ def _time_answer(question: str):
         # 1) timeapi.io primary - https://timeapi.io/api/Time/current/zone?timeZone=Australia/Sydney
         if tz:
             try:
-                td2 = _http_get_json(f"https://timeapi.io/api/Time/current/zone?timeZone={tz}", {}, timeout=8)
+                td2 = _http_get_json("https://timeapi.io/api/Time/current/zone", {"timeZone": tz}, timeout=8)
                 if isinstance(td2, dict):
                     dt = td2.get("dateTime") or td2.get("datetime")
                     if dt:
@@ -3570,7 +3571,7 @@ def _time_answer(question: str):
         # 1b) timeapi.io via coordinate (fallback if timezone name fails)
         if not clock:
             try:
-                td_coord = _http_get_json(f"https://timeapi.io/api/Time/current/coordinate?latitude={geo['lat']}&longitude={geo['lon']}", {}, timeout=8)
+                td_coord = _http_get_json("https://timeapi.io/api/Time/current/coordinate", {"latitude": geo["lat"], "longitude": geo["lon"]}, timeout=8)
                 if isinstance(td_coord, dict):
                     dt = td_coord.get("dateTime") or td_coord.get("datetime")
                     if dt:
