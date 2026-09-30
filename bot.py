@@ -3657,7 +3657,8 @@ class TwitchBot:
 
     def _chat_ai_line(self, lines: list, nick: str, text: str,
                       quiet: bool = False, vary: bool = False,
-                      overheard: bool = False, task: str = None):
+                      overheard: bool = False, task: str = None,
+                      heavy: bool = False):
         """Compose one cleaned line, or None. Shared by chime, !ask, the
         quiet-room opener and the game steps. `vary` re-asks after a
         too-similar reply (explicit commands get one redemption; ambient
@@ -3733,6 +3734,11 @@ class TwitchBot:
             else:
                 max_spine = 30 if is_local else 60
                 max_hist = 30 if is_local else 50
+            # Heavy mode for local LLM: user said wait is fine, use more slices, longer timeout
+            if heavy and is_local:
+                # Double the budget, cap to avoid OOM on 4b mini PC
+                max_spine = min(100, max(50, max_spine * 2))
+                max_hist = min(80, max(40, max_hist * 2))
             # Fetch spine - full period, will even-sample later
             spine = [
                 "[%s-%s] %s" % (
@@ -3742,6 +3748,8 @@ class TwitchBot:
             history = []
             # Digest limit scales with window so week gets more than 40 lines
             digest_limit = max(40, max_hist * 2)
+            if heavy and is_local:
+                digest_limit = max(80, digest_limit * 2)
             # If the question is "who spoke about X", search for X specifically
             if who_topic and hasattr(self._memory, "search"):
                 for ts, who, line in self._memory.search(
@@ -3878,6 +3886,19 @@ class TwitchBot:
         if knowledge:
             self._log("general-knowledge question - the model answers it, "
                       "not the fact engine")
+        # For heavy recaps on local LLM, give it more time - user said wait is fine
+        opts_for_llm = self._opts
+        if heavy and window_label:
+            try:
+                if llm_mod._is_local((self._opts.get("llm_base_url") or "").strip()):
+                    heavy_opts = dict(self._opts)
+                    heavy_opts["chat_ai_timeout"] = max(60.0, float(self._opts.get("chat_ai_timeout") or 30.0) * 2)
+                    # Cap at 120s to avoid hanging forever
+                    heavy_opts["chat_ai_timeout"] = min(120.0, heavy_opts["chat_ai_timeout"])
+                    opts_for_llm = heavy_opts
+                    self._log(f"heavy recap {window_label}: using {heavy_opts['chat_ai_timeout']}s timeout, {len(spine)} slices, {len(history)} lines")
+            except Exception:
+                pass
         try:
             raw = llm_mod.chat_reply(
                 system,
@@ -3893,7 +3914,7 @@ class TwitchBot:
                                    history=history,
                                    window_label=window_label,
                                    summaries=spine),
-                self._opts)
+                opts_for_llm)
         except Exception as exc:
             self._log(f"chat ai error: {exc!r}")
             return None
@@ -3950,7 +3971,7 @@ class TwitchBot:
                                        notice=self._standing_notice(),
                                        knowledge=knowledge,
                                        ongoing=going_on, task=task),
-                    self._opts)
+                    opts_for_llm)
             except Exception as exc:
                 self._log(f"chat ai error: {exc!r}")
                 return None
@@ -4876,6 +4897,69 @@ class TwitchBot:
             return
         if llm_mod.any_configured(self._opts):
             snapshot = self._chat_ai_snapshot()
+            # Heavy recap for local LLM: ack immediately, then dig through more slices with longer timeout
+            try:
+                is_local_recap = llm_mod._is_local((self._opts.get("llm_base_url") or "").strip())
+            except Exception:
+                is_local_recap = False
+            win_for_heavy = chatai.recap_window(q) if is_local_recap else None
+            if win_for_heavy and self._memory.ok:
+                secs_h, label_h = win_for_heavy
+                since_h = time.time() - secs_h
+                try:
+                    spine_cnt = len(self._memory.summaries(since_h, limit=200))
+                    trans_cnt = len(self._memory.transcript(since_h, limit=5000))
+                except Exception:
+                    spine_cnt, trans_cnt = 20, 200
+                est = max(15, min(90, 10 + spine_cnt))  # ~1s per slice + base
+                # Persona-voiced ack: "going through memory, pulling best ofs, ETA"
+                ack_q = (f"Tell {nick} you are going through your memory - {spine_cnt} slices "
+                         f"covering {trans_cnt} lines from {label_h} - pulling the best highlights, "
+                         f"it will take about {est} seconds. In your persona voice, one line, "
+                         f"no recap yet, just the heads up with ETA.")
+                try:
+                    ack_line = self._chat_ai_line(snapshot, nick, ack_q)
+                except Exception:
+                    ack_line = None
+                if ack_line and ack_line != chatai.DIRECT_FAILURE_LINE:
+                    self._say(self._fit(f"@{nick} ", ack_line))
+                else:
+                    self._say(f"@{nick} Hang on - digging through {spine_cnt} slices from {label_h} to pull the best bits, give me about {est}s")
+                # Heavy job in background thread so chat doesn't block
+                def _heavy_recap_job():
+                    try:
+                        heavy_line = self._chat_ai_line(snapshot, nick, q, heavy=True)
+                        if heavy_line and heavy_line != chatai.DIRECT_FAILURE_LINE:
+                            # Check similarity after heavy
+                            if not chatai.too_similar(heavy_line, self._chat_ai_own, source=q, direct=True):
+                                self._say(self._fit(f"@{nick} ", heavy_line))
+                                self._chat_ai_own = (self._chat_ai_own + [heavy_line])[-3:]
+                                self._log(f"heavy recap {label_h} done: {heavy_line[:120]!r}")
+                            else:
+                                # Too similar, try vary
+                                alt = self._chat_ai_line(snapshot, nick, q, heavy=True, vary=True)
+                                if alt:
+                                    self._say(self._fit(f"@{nick} ", alt))
+                                    self._chat_ai_own = (self._chat_ai_own + [alt])[-3:]
+                        else:
+                            # Fallback grounded
+                            try:
+                                secs2, label2 = win_for_heavy
+                                since2 = time.time() - secs2
+                                sp = self._memory.summaries(since2, limit=20)
+                                if sp:
+                                    highlights = "; ".join(b[:100] for _,_,b in sp[-3:])
+                                    fb = f"{label2}: {highlights[:350]} ({len(sp)} slices)"
+                                    self._say(self._fit(f"@{nick} ", fb))
+                            except Exception as exc:
+                                self._log(f"heavy recap fallback error: {exc!r}")
+                        self._distill(nick, snapshot)
+                    except Exception as exc:
+                        self._log(f"heavy recap error: {exc!r}")
+                        self._say(f"@{nick} Tried to pull {label_h} highlights but hit a snag - ask me again")
+                import threading as _threading
+                _threading.Thread(target=_heavy_recap_job, name="heavy-recap", daemon=True).start()
+                return
             line = self._chat_ai_line(snapshot, nick, q)
             if line and chatai.too_similar(
                     line, self._chat_ai_own, source=q, direct=True):
