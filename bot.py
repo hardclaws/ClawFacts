@@ -2577,6 +2577,15 @@ class TwitchBot:
         if not text:
             self._log(f"stream summary failed: LLM returned empty for {len(rows)} lines from {time.strftime('%H:%M', time.localtime(resume))}")
             return False
+        # Filter out prompt leakage - live-fire: slice 15:23-15:44 stored "We need to extract from the chat lines who was there..." which is the instruction, not a summary
+        low = text.lower()
+        if any(phrase in low for phrase in ("we need to extract from the chat lines", "write up to", "who was there and who said or did what", "chat from the last slice of a live stream", "already logged for the previous slice")):
+            self._log(f"stream summary failed: LLM returned its own prompt instead of a summary for {len(rows)} lines: {text[:120]!r}")
+            return False
+        # Also reject if summary is just listing participant names without verbs (thin slice should say so, not hallucinate)
+        if len(text) < 30 and "participants" in low and "slice" in low:
+            # e.g. "The slice continued with participants..." with no actual event - allow but log as thin
+            pass
         if not self._memory.add_summary(resume, now, text,
                                         max_chars=budget):
             self._log(f"stream summary failed: add_summary rejected text len {len(text)} (need >=20) for {len(rows)} lines")
