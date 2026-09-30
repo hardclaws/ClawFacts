@@ -3506,6 +3506,59 @@ _TIME_TAIL = re.compile(
 _SOLAR_Q = re.compile(r"\b(sunrise|sunset)\b", re.IGNORECASE)
 _SOLAR_PLACE = re.compile(
     r"\b(?:in|for|at|near)\s+(.+?)\s*[?!.]*$", re.IGNORECASE)
+_FOOD_Q = re.compile(
+    r"\b(?:food|foods|eat|eats|eating|drink|drinks|drinking|beverage|beverages|"
+    r"brew|brews|brewery|breweries|diner|restaurant|restaurants|cuisine|dish|dishes|"
+    r"speciality|specialty|snack|meal)\b", re.IGNORECASE)
+
+def _food_answer(question: str, options: dict = None):
+    """Food/drink specialty for a place, via LLM, or False when not a food question."""
+    if not question or not _FOOD_Q.search(question):
+        return False
+    cleaned = (question or "").strip().rstrip(" ?!.")
+    place = None
+    m = _IN_PLACE.search(cleaned)
+    if m:
+        place = " ".join(m.group(1).split()).strip()
+    if not place:
+        import re as _re
+        m2 = _re.search(r"\b(?:in|for|at|near|through)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", cleaned, flags=_re.I)
+        if m2:
+            cand = " ".join(m2.group(1).split()).strip()
+            cand = _re.split(r"\s+(?:what|something|anything|unique|interesting|should|we|to try|to have|wise)\b", cand, flags=_re.I)[0].strip().rstrip(",")
+            if len(cand) >= 3:
+                place = cand
+    if not place or len(place) < 3:
+        return False
+    if place.lower() in ("general", "the area", "there", "here"):
+        return False
+    try:
+        food_q = f"What is something interesting to eat or drink in {place}? Local specialty, diner, brewery, or unique dish"
+        limit = 240
+        if options:
+            limit = int(options.get("max_fact_chars") or 240)
+        # Use LLM facts path - try _llm_only_facts first for food-specific
+        facts = None
+        try:
+            facts = _llm_only_facts(food_q, limit, options or {})
+        except Exception:
+            facts = None
+        if not facts:
+            try:
+                facts = _llm_facts(place, food_q, [], options or {}, limit=limit)
+            except Exception:
+                facts = None
+        if facts:
+            # Prefer facts that actually mention food/drink
+            food_facts = [f for f in facts if _FOOD_Q.search(f) or any(w in f.lower() for w in ("cheese", "burger", "steak", "brew", "beer", "milkshake", "diner", "creamery", "bbq", "barbecue", "pie", "pizza"))]
+            if food_facts:
+                facts = food_facts
+            return {"place": place, "kind": "Food", "facts": facts[:3], "source": "local knowledge"}
+        return False
+    except Exception as exc:
+        print(f"[funfacts] food answer failed for {place}: {exc!r}", flush=True)
+        return False
+
 
 
 def _clock_12h(value: str) -> str | None:
@@ -5097,6 +5150,9 @@ def get_funfact(location: str, options=None):
         if result is None:
             route_map = _route_map_answer(location.strip(), opts)
             result = None if route_map is False else route_map
+        if result is None:
+            food = _food_answer(location.strip(), opts)
+            result = None if food is False else food
         if result is None:
             # What HAPPENED (today, yesterday, a date) is news, and the
             # encyclopedia does not have it: a question about this
