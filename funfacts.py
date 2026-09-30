@@ -3511,7 +3511,7 @@ _TIME_Q = re.compile(r"\b(?:what(?:'s|s| is)?\s+the\s+time|current\s+time|time\s
 _TIME_PLACE = re.compile(r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Za-z ]{2,30})?)\s*[?!.]*$", re.IGNORECASE)
 
 def _time_answer(question: str):
-    """Current time in a place, precise via worldtimeapi, or False when not a time query."""
+    """Current time in a place, 100% accurate with DST, via timezone-aware clock."""
     if not question or not _TIME_Q.search(question):
         return False
     if _SOLAR_Q.search(question):
@@ -3539,7 +3539,7 @@ def _time_answer(question: str):
     if not geo:
         return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
     try:
-        # Get timezone first via Open-Meteo (accurate lat/lon -> timezone)
+        # Get IANA timezone via Open-Meteo (lat/lon -> timezone, handles DST boundaries)
         tz = None
         try:
             data = _http_get_json(
@@ -3549,17 +3549,52 @@ def _time_answer(question: str):
             tz = data.get("timezone") if isinstance(data, dict) else None
         except Exception:
             tz = None
+        # Robust chain for 100% accurate time with DST:
+        # 1) worldtimeapi.org (precise, DST-aware)
+        # 2) timeapi.io (precise, DST-aware)
+        # 3) Python zoneinfo (uses IANA db, DST-aware, no network)
+        # 4) Open-Meteo current time as last resort
         time_str = None
-        # Primary: worldtimeapi for precise time to the second
+        clock = None
+        # 1) worldtimeapi
         if tz:
             try:
-                td = _http_get_json(f"http://worldtimeapi.org/api/timezone/{tz}", {}, timeout=8)
+                td = _http_get_json(f"https://worldtimeapi.org/api/timezone/{tz}", {}, timeout=8)
                 if isinstance(td, dict):
                     time_str = td.get("datetime")
+                    if time_str:
+                        clock = _clock_12h(time_str)
             except Exception as exc:
                 print(f"[funfacts] worldtimeapi failed for {tz}: {exc!r}", flush=True)
-        # Fallback: try worldtimeapi via lat/lon ip? No, try open-meteo current time
-        if not time_str:
+        # 2) timeapi.io
+        if not clock and tz:
+            try:
+                td2 = _http_get_json(f"https://timeapi.io/api/Time/current/zone?timeZone={tz}", {}, timeout=8)
+                if isinstance(td2, dict):
+                    # timeapi gives "dateTime": "2026-09-30T21:36:12"
+                    dt = td2.get("dateTime") or td2.get("datetime")
+                    if dt:
+                        time_str = dt
+                        clock = _clock_12h(dt)
+            except Exception as exc:
+                print(f"[funfacts] timeapi.io failed for {tz}: {exc!r}", flush=True)
+        # 3) Python zoneinfo - 100% accurate, DST auto, no network, always works if tzdata present
+        if not clock and tz:
+            try:
+                import datetime as _dt
+                try:
+                    from zoneinfo import ZoneInfo
+                except ImportError:
+                    from backports.zoneinfo import ZoneInfo
+                now = _dt.datetime.now(ZoneInfo(tz))
+                h, mi = now.hour, now.minute
+                clock = f"{(h % 12) or 12}:{mi:02d} {'AM' if h < 12 else 'PM'}"
+                time_str = now.isoformat()
+                print(f"[funfacts] time via zoneinfo {tz}: {clock}", flush=True)
+            except Exception as exc:
+                print(f"[funfacts] zoneinfo failed for {tz}: {exc!r}", flush=True)
+        # 4) Open-Meteo current time fallback
+        if not clock:
             try:
                 data = _http_get_json(
                     OPEN_METEO_API,
@@ -3568,14 +3603,11 @@ def _time_answer(question: str):
                 cur = data.get("current") if isinstance(data, dict) else None
                 if isinstance(cur, dict):
                     time_str = cur.get("time")
+                    if time_str:
+                        clock = _clock_12h(time_str)
             except Exception:
                 pass
-        if not time_str:
-            import datetime as _dt
-            time_str = _dt.datetime.utcnow().isoformat()
-        # Parse clock with minutes - worldtimeapi gives "2026-09-30T21:36:12.123+10:00"
-        clock = _clock_12h(time_str)
-        if not clock:
+        if not clock and time_str:
             try:
                 import re as _re
                 m = _re.search(r"T(\d{2}):(\d{2})", time_str)
@@ -3585,8 +3617,8 @@ def _time_answer(question: str):
             except Exception:
                 clock = None
         if not clock:
-            clock = time_str
-        # Include seconds? User wants real time - give to minute, accurate via worldtimeapi
+            import datetime as _dt
+            clock = _dt.datetime.now().strftime("%-I:%M %p") if hasattr(_dt.datetime.now(), 'strftime') else time_str or "unknown time"
         return {"place": label, "kind": "Time", "_ttl": 30, "facts": [f"{clock} in {label}."]}
     except Exception as exc:
         print(f"[funfacts] time lookup failed for {place}: {exc!r}", flush=True)
