@@ -3663,6 +3663,13 @@ class TwitchBot:
         # host mid-quiz forget it was hosting.
         going_on = self._ongoing.prompt_lines(local=llm_mod._is_local(
             (self._opts.get("llm_base_url") or "").strip()))
+        # For recaps, ongoing (current game/counts) must not be presented as history.
+        # Live-fire: "last week" recap included today's spin class and current dirty lepage count (8) as if it happened over the week.
+        # The counts are current, not historical, and the game is happening now.
+        # So for window recaps, clear ongoing - the spine and digest are the history.
+        _is_recap_for_prompt = bool(chatai.recap_window(text))
+        if _is_recap_for_prompt:
+            going_on = []
         speakers = [n for n, _ in prompt_lines[-6:]] + [nick]
         # ...and whoever the line itself is about: a recall question
         # names its subject ('when did @TruckingWithDoc last stop'),
@@ -3746,12 +3753,26 @@ class TwitchBot:
                 is_local = False
             max_spine = 12 if is_local else 20
             max_hist = 12 if is_local else 20
+            # Even sampling across period so week recap doesn't just show last hour
+            # Previously kept first + most recent 19, losing middle 27 slices of a 47-slice week.
             if len(spine) > max_spine:
-                spine = [spine[0]] + spine[-(max_spine-1):] if max_spine > 1 else spine[-max_spine:]
+                # Sample evenly: take every step-th slice, always include first and last
+                step = len(spine) / max_spine
+                sampled = []
+                for i in range(max_spine):
+                    idx = int(i * step)
+                    if idx >= len(spine):
+                        idx = len(spine) - 1
+                    sampled.append(spine[idx])
+                # Ensure last slice included for recency
+                if spine[-1] not in sampled:
+                    sampled[-1] = spine[-1]
+                spine = sampled
             if len(history) > max_hist:
+                # History from digest is already recency-weighted buckets covering whole period, keep as is but truncate oldest
                 history = history[-max_hist:]
             self._log(f"recap over {window_label}: {len(spine)} logged "
-                      f"slices covering the whole period, plus "
+                      f"slices covering the whole period (evenly sampled from {len(self._memory.summaries(since))} total), plus "
                       f"{len(history)} verbatim lines (truncated from full period for { 'local' if is_local else 'hosted'} model)"
                       + (f" (who_topic={who_topic!r})" if who_topic else ""))
             if not spine and not history:
@@ -3788,11 +3809,20 @@ class TwitchBot:
             max_spine_who = 12 if is_local_who else 20
             max_hist_who = 12 if is_local_who else 20
             if len(spine) > max_spine_who:
-                spine = [spine[0]] + spine[-(max_spine_who-1):] if max_spine_who > 1 else spine[-max_spine_who:]
+                step = len(spine) / max_spine_who
+                sampled = []
+                for i in range(max_spine_who):
+                    idx = int(i * step)
+                    if idx >= len(spine):
+                        idx = len(spine) - 1
+                    sampled.append(spine[idx])
+                if spine[-1] not in sampled:
+                    sampled[-1] = spine[-1]
+                spine = sampled
             if len(history) > max_hist_who:
                 history = history[-max_hist_who:]
             self._log(f"who search for {who_topic!r} over {window_label}: "
-                      f"{len(spine)} slices, {len(history)} matching lines (truncated)")
+                      f"{len(spine)} slices, {len(history)} matching lines (truncated, even sample)")
         # A local model on CPU reads the whole prompt before writing a
         # word - that read, not the generation, is what blew a 20s
         # timeout on a warm model. Send it a smaller room and fewer
