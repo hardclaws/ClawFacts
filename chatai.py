@@ -632,11 +632,11 @@ def _no_em_dash(text: str) -> str:
     t = t.replace(" ,", ",")
     return t
 
-def clean_line(line: str) -> str | None:
+def clean_line(line: str, max_len: int = 280) -> str | None:
     """One safe line of chat, or None. The output gate."""
     line = " ".join((line or "").split()).strip('"\u201c\u201d')
     line = _no_em_dash(line)
-    if not line or len(line) < 12 or len(line) > 280:
+    if not line or len(line) < 12 or len(line) > max_len:
         return None
     if is_narration(line):
         return None

@@ -2764,21 +2764,30 @@ class TwitchBot:
         # Now generate LLM summary if configured
         try:
             import llm as llm_mod
+            import chatai as chatai_mod
             if llm_mod.any_configured(self._opts):
                 snapshot = self._chat_ai_snapshot()
-                # Use the same prompt as !ask recap but allow longer output via direct call
-                q = f"Give us a detailed summary of {label} of chat - what happened, who said what, any stories, events, or interesting moments"
+                q = f"Give us a detailed summary of {label} of chat - what happened, who said what, any stories, events, or interesting moments. Use only the log, no invented events."
                 line = self._chat_ai_line(snapshot, "Hardclaws", q)
-                if line:
+                if line and line != chatai_mod.DIRECT_FAILURE_LINE and "mangled in the gears" not in line:
                     print(f"\n--- LLM Summary ---")
                     print(line)
                     self._log(f"console recap LLM: {line[:200]!r}")
-                    # Post to chat in chunks if needed
                     self._say(f"Recap {label} | {line}"[:450])
-                    # Also post spine count
                     self._say(f"Recap {label}: {len(spine)} slices covering {len(transcript_rows)} lines since {time.strftime('%H:%M', time.localtime(since))}")
                 else:
-                    self._log("console recap: LLM returned nothing")
+                    # LLM failed or returned failure line - fallback to grounded spine summary
+                    if line == chatai_mod.DIRECT_FAILURE_LINE:
+                        self._log(f"console recap: LLM returned DIRECT_FAILURE_LINE for {label}, using grounded fallback")
+                    else:
+                        self._log(f"console recap: LLM returned nothing for {label}, using grounded fallback")
+                    # Build fallback from spine - first and last few slices
+                    if spine:
+                        # Take 3 most recent slices as highlights
+                        highlights = "; ".join(body[:120] for _,_,body in spine[-3:])
+                        fallback = f"{label}: {highlights[:350]}"
+                        self._say(f"Recap {label} | {fallback}"[:450])
+                    self._say(f"Recap {label}: {len(spine)} slices covering {len(transcript_rows)} lines since {time.strftime('%H:%M', time.localtime(since))} - see console for full log")
             else:
                 self._log("console recap: no LLM configured, printed spine only")
                 self._say(f"Recap {label}: {len(spine)} slices, {len(transcript_rows)} lines - see console for details")
@@ -3879,7 +3888,9 @@ class TwitchBot:
             return None
         if chatai.declined(raw):
             return None
-        line = chatai.clean_line(raw)
+        # Recap needs longer line than normal chatter - allow 450 for window summaries
+        max_len = 450 if window_label else 280
+        line = chatai.clean_line(raw, max_len=max_len)
         if line is None and not quiet and not overheard:
             # A DIRECT ask (a mention or !ask) never goes mute on an
             # unusable reply: one redemption re-ask, told what was
@@ -3929,7 +3940,7 @@ class TwitchBot:
                 return None
             if not raw or chatai.declined(raw):
                 return None
-            line = chatai.clean_line(raw)
+            line = chatai.clean_line(raw, max_len=max_len)
             if line is None and chatai.is_narration(raw):
                 self._log(f"model narrated its reasoning AGAIN: "
                           f"{raw[:120]!r}")
@@ -3939,7 +3950,8 @@ class TwitchBot:
             # attempts ignored the length instruction. Direct asks get a
             # deterministic acknowledgement if even that is impossible;
             # ambient lines remain optional and may stay silent.
-            recovered = (chatai.recover_direct_line(raw) if direct else None)
+            rec_limit = 450 if window_label else 240
+            recovered = (chatai.recover_direct_line(raw, limit=rec_limit) if direct else None)
             if recovered:
                 self._log("overlong direct reply recovered at a complete "
                           f"boundary: {recovered[:120]!r}")
@@ -4851,14 +4863,39 @@ class TwitchBot:
             line = self._chat_ai_line(snapshot, nick, q)
             if line and chatai.too_similar(
                     line, self._chat_ai_own, source=q, direct=True):
-                # An explicit command gets one redemption: ask again with
-                # the repetition named, then take whatever comes - keeping
-                # the first attempt if the retry comes back empty.
                 first = line
                 line = self._chat_ai_line(snapshot, nick, q,
                                           vary=True) or first
+            # Recap failure fallback - don't post "mangled in the gears" as the recap itself
+            window = chatai.recap_window(q)
+            if window and line == chatai.DIRECT_FAILURE_LINE:
+                # Build grounded fallback from memory instead of posting failure line as recap
+                try:
+                    secs, label = window
+                    since = time.time() - secs
+                    spine = self._memory.summaries(since, limit=20)
+                    if spine:
+                        highlights = "; ".join(body[:100] for _,_,body in spine[-3:])
+                        fallback = f"{label}: {highlights[:350]} ({len(spine)} slices)"
+                        self._say(self._fit(f"@{nick} ", fallback))
+                        self._log(f"recap {label} fallback used after DIRECT_FAILURE_LINE")
+                        self._distill(nick, snapshot)
+                        return
+                except Exception as exc:
+                    self._log(f"recap fallback error: {exc!r}")
             if line and not chatai.too_similar(
                     line, self._chat_ai_own, source=q, direct=True):
+                # Don't post DIRECT_FAILURE_LINE as a recap - it's not a recap
+                if window and line == chatai.DIRECT_FAILURE_LINE:
+                    # Already handled above, but if fallback failed, try to give slice count
+                    try:
+                        secs, label = window
+                        since = time.time() - secs
+                        cnt = len(self._memory.summaries(since, limit=96))
+                        self._say(f"@{nick} {label}: {cnt} slices logged, see console with recap {label} for details")
+                        return
+                    except Exception:
+                        pass
                 self._say(self._fit(f"@{nick} ", line))
                 self._chat_ai_own = (self._chat_ai_own + [line])[-3:]
                 self._log(f"chat ai answered {nick}")
