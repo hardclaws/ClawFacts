@@ -3495,6 +3495,19 @@ _NOT_WEATHER = re.compile(
     r"cpu|gpu|server|laptop|soldering|kiln|forge|incubator|"
     r"fever|thermometer|chicken|turkey|roast|steak|bread|bake|baking|"
     r"meat|candy|fudge|yeast)\b", re.IGNORECASE)
+def _clean_place(place: str) -> str:
+    """Strip leading prepositions like 'around' that are not part of town name."""
+    if not place:
+        return place
+    low = place.lower().strip()
+    # Remove leading "around", "around the", "around the area of", etc
+    for prefix in ("around the area of ", "around the area ", "around "):
+        if low.startswith(prefix):
+            place = place[len(prefix):].strip()
+            low = place.lower()
+            break
+    return place
+
 _IN_PLACE = re.compile(
     r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z .,\'-]{2,40})$")
 # Trailing time phrases that are not part of the place: "in California at the moment"
@@ -3521,16 +3534,16 @@ def _time_answer(question: str):
     place = None
     m = _TIME_PLACE.search(cleaned)
     if m:
-        place = m.group(1).strip(" ,.?!")
+        place = _clean_place(m.group(1).strip(" ,.?!"))
     if not place:
         m2 = _IN_PLACE.search(cleaned)
         if m2:
-            place = m2.group(1).strip(" ,.?!")
+            place = _clean_place(m2.group(1).strip(" ,.?!"))
     if not place:
         import re as _re
-        m3 = _re.search(r"\b(?:in|near|at)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Za-z ]{2,30})?)", cleaned, flags=_re.I)
+        m3 = _re.search(r"\b(?:in|near|at|around)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Za-z ]{2,30})?)", cleaned, flags=_re.I)
         if m3:
-            place = m3.group(1).strip(" ,.?!")
+            place = _clean_place(m3.group(1).strip(" ,.?!"))
     if not place or len(place) < 3:
         return {"place": "requested place", "kind": "Time", "facts": ["I need a city or town to check the time."]}
     geo = _osm_geocode(place) or _open_meteo_geocode(place)
@@ -3644,13 +3657,14 @@ def _food_answer(question: str, options: dict = None):
     place = None
     m = _IN_PLACE.search(cleaned)
     if m:
-        place = " ".join(m.group(1).split()).strip()
+        place = _clean_place(" ".join(m.group(1).split()).strip())
     if not place:
         import re as _re
-        m2 = _re.search(r"\b(?:in|for|at|near|through)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", cleaned, flags=_re.I)
+        m2 = _re.search(r"\b(?:in|for|at|near|through|around)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", cleaned, flags=_re.I)
         if m2:
-            cand = " ".join(m2.group(1).split()).strip()
+            cand = _clean_place(" ".join(m2.group(1).split()).strip())
             cand = _re.split(r"\s+(?:what|something|anything|unique|interesting|should|we|to try|to have|wise)\b", cand, flags=_re.I)[0].strip().rstrip(",")
+            cand = _clean_place(cand)
             if len(cand) >= 3:
                 place = cand
     if not place or len(place) < 3:
@@ -3716,28 +3730,24 @@ def _solar_answer(question: str):
     # First try _SOLAR_PLACE at end, then _IN_PLACE anywhere, then outside of pattern
     place_match = _SOLAR_PLACE.search((question or "").strip())
     if place_match:
-        place = place_match.group(1).strip(" ,.?!)") 
+        place = _clean_place(place_match.group(1).strip(" ,.?!)") )
     if not place:
-        # Try _IN_PLACE anywhere (not just $)
         m = _IN_PLACE.search((question or "").strip())
         if m:
-            place = m.group(1).strip(" ,.?!)") 
+            place = _clean_place(m.group(1).strip(" ,.?!)") )
     if not place:
-        # Try "outside of X, NE" or "just outside of X" anywhere
         import re as _re2
-        m2 = _re2.search(r"\b(?:outside of|outside|just outside of)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", question or "", flags=_re2.I)
+        m2 = _re2.search(r"\b(?:outside of|outside|just outside of|around)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", question or "", flags=_re2.I)
         if m2:
-            place = m2.group(1).strip(" ,.?!)") 
+            place = _clean_place(m2.group(1).strip(" ,.?!)") )
     if not place:
-        # Try generic "in|near|at X, NE" anywhere, not just end
         import re as _re3
-        m3 = _re3.search(r"\b(?:in|near|at|for)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", question or "", flags=_re3.I)
+        m3 = _re3.search(r"\b(?:in|near|at|for|around)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Z]{2})?)", question or "", flags=_re3.I)
         if m3:
-            cand = m3.group(1).strip(" ,.?!)") 
-            # Trim at " what", " it is", etc
+            cand = _clean_place(m3.group(1).strip(" ,.?!)") )
             cand = _re3.split(r"\s+(?:what|it is|it\b|we are|we\b)\b", cand, flags=_re3.I)[0].strip()
             if len(cand) >= 3:
-                place = cand
+                place = _clean_place(cand)
     # “Sunset, Louisiana” is a place lookup, not an astronomy question.
     if not place and not re.search(
             r"\b(?:what time|when|today|tomorrow|expect(?:ing|ed)|rise|set)\b|\?",
@@ -3820,7 +3830,7 @@ def _weather_header(question: str):
             if len(cand) >= 2 and len(cand) <= 60:
                 place = cand
     if place:
-        place = _TIME_TAIL.sub("", place).strip()
+        place = _clean_place(_TIME_TAIL.sub("", place).strip())
         import re as _re
         if _re.search(r"\s+and\s+", place, flags=_re.I):
             first = _re.split(r"\s+and\s+", place, flags=_re.I)[0].strip()
@@ -3952,6 +3962,7 @@ def _alerts_answer(question: str, options: dict = None):
         if m:
             p = " ".join(m.group(1).split()).strip()
             p = re.split(r"\s+over\s+the\s+next", p, flags=re.I)[0].strip().rstrip(",.?!")
+            p = _clean_place(p)
             if len(p) >= 2:
                 places.append(p)
         if not places:
@@ -3960,6 +3971,7 @@ def _alerts_answer(question: str, options: dict = None):
             if m:
                 p = " ".join(m.group(1).split()).strip()
                 p = re.split(r"\s+over\s+the\s+next|\s+are\s+there|\s+is\s+there", p, flags=re.I)[0].strip().rstrip(",.?!")
+                p = _clean_place(p)
                 if len(p) >= 2 and p.lower() not in ("the moment", "moment", "our route", "the route", "current route"):
                     places.append(p)
     # If still no places but question is about "our route" / "the route" / "current route", use current route from knowledge.json
@@ -4746,19 +4758,24 @@ def _weather_answer(question: str, options: dict = None):
     fall through to Wikipedia/search snippets or an LLM paraphrase.
     """
     # "weather warnings" is alerts, not current conditions - let alerts handle it
-    # unless it's explicitly "weather currently in X and any warnings" which is combined in get_funfact
     low_q = (question or "").lower()
     if _ALERTS_Q.search(question) and any(w in low_q for w in ("warning", "alert", "watch", "advisory")):
-        # If query is primarily warnings (e.g. "any weather warnings near X"), return False so alerts path handles
-        # Combined queries like "weather currently in X and any warnings" are handled by combined path in get_funfact,
-        # but we need place to be parsed for weather part. If place parsing fails, still let alerts handle.
-        if "currently" not in low_q and "current" not in low_q:
-            # Pure warnings query - not weather conditions
+        # If query is primarily about warnings/alerts (contains warnings/alerts word), let alerts handle
+        # Exception: combined "weather currently in X and any warnings" should still get weather + alerts via get_funfact
+        # So only return False if warnings is main intent, not when it's "weather currently in X and warnings"
+        # Check if query has "weather warnings" as phrase - that's alerts, not weather
+        if "weather warnings" in low_q or "weather alerts" in low_q or low_q.strip().startswith("any weather warnings") or "warnings for" in low_q or "warnings near" in low_q or "warnings around" in low_q:
             return False
-        # For combined, check if place can be parsed - if not, let alerts handle to avoid "I need a city"
-        # e.g. "any weather warnings near Lexington, NE" has "near" not "in", weather header fails
-        place_tmp, _ = _weather_header(question)
-        if not place_tmp:
+        # For "current weather warnings for around X" - also alerts
+        if "warnings" in low_q and ("for around" in low_q or "for near" in low_q or "near" in low_q or "around" in low_q):
+            return False
+        # For combined with "and" - e.g. "weather currently in X and any warnings" - let combined path handle
+        # But if place parsing fails, still let alerts handle to avoid "I need a city"
+        if " and " in low_q and ("warning" in low_q or "alert" in low_q):
+            place_tmp, _ = _weather_header(question)
+            if not place_tmp:
+                return False
+        elif "currently" not in low_q and "current" not in low_q:
             return False
     place, kind = _weather_header(question)
     if kind is None:
