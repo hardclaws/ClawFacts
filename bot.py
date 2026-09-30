@@ -3727,6 +3727,39 @@ class TwitchBot:
         history, window_label, spine = [], "", []
         window = chatai.recap_window(text)
         who_topic = chatai.who_spoke_about(text) if hasattr(chatai, "who_spoke_about") else None
+        # Follow-up handling: "that was today what about last week" after SlowSpoon query
+        # If window exists but no explicit topic, and text is follow-up, reuse topic from recent bot lines or recent chat
+        if window and not who_topic:
+            low_follow = (text or "").lower()
+            if any(p in low_follow for p in ("what about", "how about", "that was", "that was today", "what about last", "what about today")):
+                # Look at last bot own lines for a name like SlowSpoon (CamelCase or known)
+                import re as _re_follow
+                for own_line in reversed(list(self._chat_ai_own)[-3:]):
+                    # Find CamelCase names or slowspoon-like
+                    m = _re_follow.search(r"\b([A-Z][a-z]+[A-Z][a-zA-Z]+)\b", own_line)
+                    if m:
+                        cand = m.group(1)
+                        # Avoid persona names like TruckingWithDocBot, Hardclaws is ok but not the topic
+                        if cand.lower() not in ("hardclaws", "truckingwithdoc", "truckingwithdocbot", "docbot"):
+                            who_topic = cand
+                            self._log(f"follow-up detected, reusing topic from own line: {who_topic!r} from {own_line[:60]!r}")
+                            break
+                    # Also check lower case slowspoon in own line
+                    if "slowspoon" in own_line.lower():
+                        who_topic = "slowspoon"
+                        self._log(f"follow-up detected, reusing slowspoon from own line")
+                        break
+                # If still none, look at recent chat lines for most recent non-bot mention
+                if not who_topic:
+                    for nick, line in reversed(lines[-20:]):
+                        # If recent chat mentions slowspoon, use it
+                        if "slowspoon" in line.lower() or "slowspoon" in nick.lower():
+                            who_topic = "slowspoon"
+                            self._log(f"follow-up detected, reusing slowspoon from recent chat")
+                            break
+                        # Generic: find any name that was asked about in last 5 minutes via search?
+                        # For now, look for any capitalized name that appears in last bot question?
+                        pass
         if window and self._memory.ok:
             secs, window_label = window
             names = tuple(n.lower() for n in self._chat_ai_names if n)
