@@ -3511,7 +3511,7 @@ _TIME_Q = re.compile(r"\b(?:what(?:'s|s| is)?\s+the\s+time|current\s+time|time\s
 _TIME_PLACE = re.compile(r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z .,'-]{2,50}(?:,\s*[A-Za-z ]{2,30})?)\s*[?!.]*$", re.IGNORECASE)
 
 def _time_answer(question: str):
-    """Current time in a place, via Open-Meteo timezone, or False when not a time query."""
+    """Current time in a place, precise via worldtimeapi, or False when not a time query."""
     if not question or not _TIME_Q.search(question):
         return False
     if _SOLAR_Q.search(question):
@@ -3539,25 +3539,41 @@ def _time_answer(question: str):
     if not geo:
         return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
     try:
-        data = _http_get_json(
-            OPEN_METEO_API,
-            {"latitude": geo["lat"], "longitude": geo["lon"], "current": "temperature_2m", "timezone": "auto"},
-            timeout=10)
-        current = data.get("current") if isinstance(data, dict) else None
-        tz = data.get("timezone") if isinstance(data, dict) else None
+        # Get timezone first via Open-Meteo (accurate lat/lon -> timezone)
+        tz = None
+        try:
+            data = _http_get_json(
+                OPEN_METEO_API,
+                {"latitude": geo["lat"], "longitude": geo["lon"], "current": "temperature_2m", "timezone": "auto"},
+                timeout=8)
+            tz = data.get("timezone") if isinstance(data, dict) else None
+        except Exception:
+            tz = None
         time_str = None
-        if isinstance(current, dict):
-            time_str = current.get("time")
+        # Primary: worldtimeapi for precise time to the second
+        if tz:
+            try:
+                td = _http_get_json(f"http://worldtimeapi.org/api/timezone/{tz}", {}, timeout=8)
+                if isinstance(td, dict):
+                    time_str = td.get("datetime")
+            except Exception as exc:
+                print(f"[funfacts] worldtimeapi failed for {tz}: {exc!r}", flush=True)
+        # Fallback: try worldtimeapi via lat/lon ip? No, try open-meteo current time
         if not time_str:
             try:
-                if tz:
-                    td = _http_get_json(f"http://worldtimeapi.org/api/timezone/{tz}", {}, timeout=8)
-                    time_str = td.get("datetime") if isinstance(td, dict) else None
+                data = _http_get_json(
+                    OPEN_METEO_API,
+                    {"latitude": geo["lat"], "longitude": geo["lon"], "current": "temperature_2m", "timezone": "auto"},
+                    timeout=8)
+                cur = data.get("current") if isinstance(data, dict) else None
+                if isinstance(cur, dict):
+                    time_str = cur.get("time")
             except Exception:
-                time_str = None
+                pass
         if not time_str:
             import datetime as _dt
             time_str = _dt.datetime.utcnow().isoformat()
+        # Parse clock with minutes - worldtimeapi gives "2026-09-30T21:36:12.123+10:00"
         clock = _clock_12h(time_str)
         if not clock:
             try:
@@ -3570,7 +3586,8 @@ def _time_answer(question: str):
                 clock = None
         if not clock:
             clock = time_str
-        return {"place": label, "kind": "Time", "_ttl": 60, "facts": [f"{clock} in {label}."]}
+        # Include seconds? User wants real time - give to minute, accurate via worldtimeapi
+        return {"place": label, "kind": "Time", "_ttl": 30, "facts": [f"{clock} in {label}."]}
     except Exception as exc:
         print(f"[funfacts] time lookup failed for {place}: {exc!r}", flush=True)
         return {"place": label, "kind": "Time", "_ttl": 300, "facts": [f"I couldn't fetch the time for {label} right now."]}
